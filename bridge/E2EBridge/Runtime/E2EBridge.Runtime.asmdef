@@ -1,0 +1,20 @@
+{
+    "name": "E2EBridge.Runtime",
+    "rootNamespace": "E2EBridge",
+    "references": [
+        "Unity.InputSystem",
+        "UnityEngine.UI"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [
+        "UAPP_E2E_BRIDGE"
+    ],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
+

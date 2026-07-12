@@ -1,0 +1,10 @@
+{
+  "package": "com.yourcompany.yourapp",
+  "activity": "com.unity3d.player.UnityPlayerActivity",
+  "tests": "tests/test_smoke.py",
+  "orientation": "portrait",
+  "deviceRotation": null,
+  "devicePort": 13333,
+  "editorBridgePort": 13333,
+  "uiType": "ugui-nis"
+}

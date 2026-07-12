@@ -1,0 +1,666 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>uapp_e2e ジャーニーレポート</title>
+<style>
+  :root {
+    --surface-1: #fcfcfb;
+    --page: #f9f9f7;
+    --ink-1: #0b0b0b;
+    --ink-2: #52514e;
+    --ink-muted: #898781;
+    --grid: #e1e0d9;
+    --baseline: #c3c2b7;
+    --border: rgba(11,11,11,0.10);
+    --accent: #2a78d6;          /* 系列1: カバレッジメーター */
+    --status-good: #0ca30c;
+    --status-warn: #fab219;
+    --status-serious: #ec835a;
+    --status-critical: #d03b3b;
+    --good-text: #006300;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --surface-1: #1a1a19;
+      --page: #0d0d0d;
+      --ink-1: #ffffff;
+      --ink-2: #c3c2b7;
+      --ink-muted: #898781;
+      --grid: #2c2c2a;
+      --baseline: #383835;
+      --border: rgba(255,255,255,0.10);
+      --accent: #3987e5;
+      --good-text: #0ca30c;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--page);
+    color: var(--ink-1);
+    font: 14px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 1180px; margin: 0 auto; padding: 20px 24px 64px; }
+  h1 { font-size: 20px; margin: 0; }
+  h2 { font-size: 15px; margin: 40px 0 12px; padding-bottom: 6px; border-bottom: 1px solid var(--grid); }
+  .sub { color: var(--ink-2); font-size: 12px; }
+  .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; word-break: break-all; }
+  .card {
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+
+  /* ---- ヘッダー（スティッキー: スクロール中も対象アプリ/デバイスを常時表示）・統計タイル ---- */
+  header.top { display: flex; flex-wrap: wrap; gap: 4px 16px; align-items: baseline;
+               position: sticky; top: 0; z-index: 5; background: var(--page);
+               padding: 12px 0 10px; margin-bottom: 12px; border-bottom: 1px solid var(--grid); }
+  header.top .target { font-weight: 600; color: var(--ink-1); }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+  .tile { padding: 12px 14px; }
+  .tile .v { font-size: 26px; font-weight: 650; line-height: 1.2; }
+  .tile .v small { font-size: 14px; font-weight: 500; color: var(--ink-2); }
+  .tile .k { color: var(--ink-2); font-size: 12px; margin-top: 2px; }
+  .meter { height: 6px; background: var(--grid); border-radius: 3px; margin-top: 8px; overflow: hidden; }
+  .meter > i { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+
+  /* ---- 凡例・状態チップ ---- */
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 10px 0 14px; font-size: 12px; color: var(--ink-2); }
+  .legend b { font-weight: 500; color: var(--ink-1); }
+  .swatch { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -1px; margin-right: 5px; }
+  .sw-covered  { background: color-mix(in srgb, var(--status-good) 22%, transparent); border: 2px solid var(--status-good); }
+  .sw-failed   { border: 2px solid var(--status-serious); }
+  .sw-untested { border: 2px dashed var(--accent); }
+  .sw-blocked  { border: 2px dotted var(--ink-muted); }
+  .chip { display: inline-block; padding: 0 8px; border-radius: 10px; font-size: 12px; white-space: nowrap; }
+  .chip::before { margin-right: 4px; }
+  .chip.passed  { color: var(--good-text); } .chip.passed::before { content: "✓"; }
+  .chip.failed  { color: var(--status-critical); } .chip.failed::before { content: "✕"; }
+  .chip.error   { color: var(--status-serious); } .chip.error::before { content: "!"; }
+  .chip.skipped { color: var(--ink-muted); } .chip.skipped::before { content: "–"; }
+
+  /* ---- 遷移グラフ ---- */
+  #graph-wrap { overflow-x: auto; padding: 10px; }
+  #graph text { font: 11px system-ui, sans-serif; fill: var(--ink-2); }
+  #graph .node rect.frame { fill: var(--surface-1); stroke: var(--border); }
+  #graph .node.sel rect.frame { stroke: var(--accent); stroke-width: 2; }
+  #graph .node { cursor: pointer; }
+  #graph .edge { fill: none; stroke: var(--baseline); stroke-width: 2; }
+  #graph .edge.covered { stroke: var(--status-good); }
+  #graph .edge.auto { stroke-dasharray: 4 4; }
+  #graph .edge-hit { fill: none; stroke: transparent; stroke-width: 12; cursor: pointer; }
+
+  /* ---- 画面グリッド・詳細 ---- */
+  .screens { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
+  .screen-card { padding: 10px; cursor: pointer; }
+  .screen-card:hover, .screen-card.sel { border-color: var(--accent); }
+  .thumb { width: 100%; aspect-ratio: 9/16; object-fit: contain; background: var(--grid); border-radius: 4px; display: block; }
+  .thumb.landscape { aspect-ratio: 16/9; }
+  .noshot { display: flex; align-items: center; justify-content: center; color: var(--ink-muted); font-size: 12px; }
+  .screen-card .t { font-weight: 600; margin-top: 8px; }
+
+  #detail { margin-top: 18px; padding: 16px; display: none; }
+  #detail.show { display: block; }
+  .detail-cols { display: flex; gap: 20px; flex-wrap: wrap; }
+  .shotbox { position: relative; flex: 0 1 460px; max-width: 100%; align-self: flex-start; overflow: hidden; border-radius: 8px; }
+  .shotbox img { width: 100%; display: block; border-radius: 4px; }
+  .shotbox .noshot { aspect-ratio: 9/16; border: 1px solid var(--grid); border-radius: 4px; }
+  .hotspot { position: absolute; border-radius: 3px; min-width: 10px; min-height: 10px; cursor: pointer; }
+  .hotspot.hidden { display: none; }
+  .hotspot.covered  { border: 2px solid var(--status-good); background: color-mix(in srgb, var(--status-good) 18%, transparent); }
+  .hotspot.failed   { border: 2px solid var(--status-serious); }
+  .hotspot.untested { border: 2px dashed var(--accent); }
+  .hotspot.blocked  { border: 2px dotted var(--ink-muted); }
+  .hotspot.hl { outline: 3px solid var(--accent); outline-offset: 1px; }
+  .btnlist { flex: 1 1 380px; min-width: 300px; }
+
+  /* ---- テーブル ---- */
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th { text-align: left; color: var(--ink-2); font-weight: 500; }
+  th, td { padding: 5px 10px 5px 0; border-bottom: 1px solid var(--grid); vertical-align: top; overflow-wrap: anywhere; }
+  td.num { font-variant-numeric: tabular-nums; text-align: right; padding-right: 16px; }
+  tr.rowbtn { cursor: pointer; }
+  tr.rowbtn:hover td, tr.hl td { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  tr.rowbtn.hidden { display: none; }
+
+  /* ---- 状態フィルタチップ ---- */
+  .fchips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 10px; }
+  .fchip { border: 1px solid var(--grid); background: none; color: var(--ink-2); font: inherit;
+           font-size: 12px; border-radius: 12px; padding: 1px 12px; cursor: pointer; }
+  .fchip:hover { border-color: var(--baseline); }
+  .fchip.on { border-color: var(--accent); color: var(--ink-1); font-weight: 600; }
+
+  /* ---- ボタン→遷移先リンク ---- */
+  .golink { color: var(--accent); cursor: pointer; font-size: 12px; }
+  .golink:hover { text-decoration: underline; }
+  .covbadge { display: inline-block; font-size: 11px; color: var(--ink-2);
+              border: 1px solid var(--grid); border-radius: 9px; padding: 0 7px; margin-left: 4px; }
+  .covbadge.full { color: var(--good-text); border-color: var(--status-good); }
+  .covbadge.zero { color: var(--status-critical); border-color: color-mix(in srgb, var(--status-critical) 50%, transparent); }
+
+  /* ---- 探索モード（serve時のみ）・テスト履歴 ---- */
+  .probe-btn { border: 1px solid var(--accent); color: var(--accent); background: none; font: inherit;
+               font-size: 11px; border-radius: 10px; padding: 0 8px; cursor: pointer; margin-top: 4px; }
+  .probe-btn:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+  .probe-btn:disabled { opacity: .5; cursor: default; }
+  .hist { letter-spacing: 2px; font-size: 11px; white-space: nowrap; }
+  .hist .h-passed { color: var(--status-good); }
+  .hist .h-failed { color: var(--status-critical); }
+  .hist .h-error { color: var(--status-serious); }
+  .hist .h-skipped { color: var(--ink-muted); }
+  .chip.regress { color: var(--status-critical); font-weight: 600; } .chip.regress::before { content: "⚠"; }
+
+  /* ---- ツールチップ・空状態 ---- */
+  #tip {
+    position: fixed; display: none; z-index: 10; max-width: 380px;
+    background: var(--surface-1); color: var(--ink-1);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 8px 10px; font-size: 12px; line-height: 1.5;
+    box-shadow: 0 4px 16px rgba(0,0,0,.18); pointer-events: none;
+  }
+  #empty { margin: 60px auto; max-width: 520px; padding: 32px; text-align: center; }
+  #empty input { margin-top: 12px; }
+</style>
+</head>
+<body>
+<script id="journey-data" type="application/json">null</script>
+<main id="app"></main>
+<div id="tip"></div>
+<script>
+"use strict";
+const $ = (sel, el) => (el || document).querySelector(sel);
+const esc = s => String(s ?? "").replace(/[&<>"']/g,
+  c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const leaf = p => String(p || "").split("/").pop();
+const pct = (n, d) => d ? Math.round(n / d * 100) : null;
+const OUTCOME_LABEL = {passed: "成功", failed: "失敗", error: "エラー", skipped: "スキップ"};
+// 探索サーバー（python -m e2e_driver.journey serve）配信時のみ true → ▶タップを表示
+let CAN_PROBE = false;
+// report.html（データ埋め込み済みの静的レポート）として開かれたか
+let EMBEDDED = false;
+// ?data=<パス> で別ディレクトリから読んだ場合のスクショ相対パス解決基準
+let DATA_BASE = "";
+// フォルダ選択で読んだ場合のスクショ実体（"screens/xxx.png" → blob URL）
+const SHOT_FILES = new Map();
+const resolveShot = p => {
+  if (!p || String(p).startsWith("data:")) return p;
+  return SHOT_FILES.get(p) || DATA_BASE + p;
+};
+const STATE_LABEL = {covered: "テスト済み", failed: "失敗テストで操作", untested: "未テスト", blocked: "遮蔽中"};
+const STATE_MARK = {covered: "✓", failed: "!", untested: "・", blocked: "⊘"};
+
+// ---------------------------------------------------------------- 集計
+function analyze(d) {
+  const tests = d.tests || [];
+  const passed = new Set(tests.filter(t => t.outcome === "passed").map(t => t.name));
+  // 画面×パス → {passed, failed, tests[]}
+  const ops = new Map();
+  for (const t of tests) {
+    for (const a of t.actions || []) {
+      if (!a.screen || !a.path) continue;
+      const key = a.screen + " " + a.path;
+      const o = ops.get(key) || {passed: false, failed: false, tests: new Set()};
+      o.tests.add(t.name);
+      if (passed.has(t.name)) o.passed = true; else o.failed = true;
+      ops.set(key, o);
+    }
+  }
+  const screens = (d.screens || []).map(s => {
+    const buttons = (s.buttons || []).map(b => {
+      const o = ops.get(s.id + " " + b.path);
+      const state = b.hittable === false ? "blocked"
+        : o && o.passed ? "covered" : o ? "failed" : "untested";
+      return {...b, state, tests: o ? [...o.tests] : []};
+    });
+    const target = buttons.filter(b => b.state !== "blocked");
+    const covered = buttons.filter(b => b.state === "covered");
+    return {...s, buttons, nTarget: target.length, nCovered: covered.length,
+            coverage: pct(covered.length, target.length)};
+  });
+  const transitions = (d.transitions || []).map(t =>
+    ({...t, covered: !!(t.test && passed.has(t.test))}));
+  // 「この画面のこのボタン」からの遷移一覧（同じボタンでも状態により遷移先が複数あり得る）
+  const transByButton = new Map();
+  for (const t of transitions) {
+    if (!t.via) continue;
+    const k = t.from + " " + t.via;
+    if (!transByButton.has(k)) transByButton.set(k, []);
+    transByButton.get(k).push(t);
+  }
+  const totTarget = screens.reduce((a, s) => a + s.nTarget, 0);
+  const totCovered = screens.reduce((a, s) => a + s.nCovered, 0);
+  const stateCounts = {covered: 0, failed: 0, untested: 0, blocked: 0};
+  screens.forEach(s => s.buttons.forEach(b => stateCounts[b.state]++));
+  return {
+    screens, transitions, tests, passedTests: passed, transByButton,
+    totTarget, totCovered, stateCounts,
+    outcomes: tests.reduce((m, t) => (m[t.outcome] = (m[t.outcome] || 0) + 1, m), {}),
+    transCovered: transitions.filter(t => t.covered).length,
+    regressions: tests.filter(t => t.regressed).length,
+  };
+}
+
+// ---------------------------------------------------------------- 描画
+let A = null;           // analyze() 結果
+let selected = null;    // 選択中の画面id
+
+function render(data) {
+  A = analyze(data);
+  const app = data.app || {};
+  const o = A.outcomes;
+  $("#app").innerHTML = `
+    <header class="top">
+      <h1>ジャーニーレポート</h1>
+      <span class="target">${esc(app.app || app.package || "?")}${app.device ? " @ " + esc(app.device) : ""}</span>
+      <span class="sub">Unity ${esc(app.unity || "?")}${app.bridgeHost ? " / bridge " + esc(app.bridgeHost) : ""}
+        / 更新 ${esc(data.updatedAt || "?")}</span>
+      ${CAN_PROBE ? '<span class="chip passed">探索モード接続中</span> <button class="probe-btn" id="sync-now">⟳ 実機の画面を取り込む</button>' : ""}
+    </header>
+    ${!CAN_PROBE && !EMBEDDED ? `<p class="sub" style="margin:-10px 0 16px">
+      ヒント: 探索モード（各ボタンを▶タップして実機操作・自動記録）を使うには
+      <span class="mono">python -m e2e_driver.journey serve &lt;journeyディレクトリ&gt;</span> を起動し、
+      <span class="mono">http://127.0.0.1:8787/viewer.html</span> で開く</p>` : ""}
+    <div class="tiles">
+      <div class="card tile"><div class="v">${A.screens.length}</div><div class="k">記録した画面</div></div>
+      <div class="card tile">
+        <div class="v">${A.totCovered === 0 && A.totTarget === 0 ? "—" : A.totCovered + " <small>/ " + A.totTarget + "</small>"}</div>
+        <div class="k">ボタンカバレッジ ${pct(A.totCovered, A.totTarget) ?? "—"}%</div>
+        <div class="meter"><i style="width:${pct(A.totCovered, A.totTarget) || 0}%"></i></div>
+      </div>
+      <div class="card tile">
+        <div class="v">${A.transCovered} <small>/ ${A.transitions.length}</small></div>
+        <div class="k">遷移カバレッジ ${pct(A.transCovered, A.transitions.length) ?? "—"}%</div>
+        <div class="meter"><i style="width:${pct(A.transCovered, A.transitions.length) || 0}%"></i></div>
+      </div>
+      <div class="card tile">
+        <div class="v">${o.passed || 0} <small>/ ${A.tests.length}</small></div>
+        <div class="k">テスト成功${(o.failed || o.error) ? `（<span class="chip failed">${(o.failed || 0) + (o.error || 0)}</span>）` : ""}
+          ${A.regressions ? `<span class="chip regress">回帰 ${A.regressions}</span>` : ""}</div>
+      </div>
+    </div>
+
+    <h2>画面遷移</h2>
+    <div class="card" id="graph-wrap"></div>
+    <div id="trans-table"></div>
+
+    <h2>画面とボタン</h2>
+    <div class="legend">
+      <span><i class="swatch sw-covered"></i><b>テスト済み ${A.stateCounts.covered}</b>（成功テストで操作）</span>
+      <span><i class="swatch sw-failed"></i><b>失敗テストで操作 ${A.stateCounts.failed}</b></span>
+      <span><i class="swatch sw-untested"></i><b>未テスト ${A.stateCounts.untested}</b></span>
+      <span><i class="swatch sw-blocked"></i><b>遮蔽中 ${A.stateCounts.blocked}</b>（記録時点で届かない。NOTHING_HIT=レイキャスト対象外）</span>
+    </div>
+    <div class="screens" id="screens"></div>
+    <div class="card" id="detail"></div>
+
+    <h2>テスト一覧</h2>
+    <div id="tests"></div>`;
+  renderGraph();
+  renderTransTable();
+  renderScreens();
+  renderTests();
+  if (A.screens.length) selectScreen(A.screens[0].id);
+  const syncBtn = $("#sync-now");
+  if (syncBtn) syncBtn.addEventListener("click", async () => {
+    syncBtn.disabled = true;
+    syncBtn.textContent = "取得中…";
+    try {
+      const res = await fetch("/api/sync", {method: "POST"});
+      const result = await res.json();
+      if (!res.ok || !result.ok) throw new Error(result.error || ("HTTP " + res.status));
+      const fresh = await (await fetch("journey.json?ts=" + Date.now())).json();
+      render(fresh);
+      selectScreen(result.to);
+    } catch (e) {
+      alert("実機画面の取り込みに失敗: " + (e.message || e));
+      syncBtn.disabled = false;
+      syncBtn.textContent = "⟳ 実機の画面を取り込む";
+    }
+  });
+}
+
+// --- 遷移グラフ（BFSレイヤーレイアウト・依存なしSVG） ---
+function layoutGraph() {
+  const ids = A.screens.map(s => s.id);
+  const adj = new Map(ids.map(id => [id, []]));
+  for (const t of A.transitions) if (adj.has(t.from) && adj.has(t.to)) adj.get(t.from).push(t.to);
+  const layer = new Map();
+  const queue = ids.length ? [ids[0]] : [];
+  layer.set(ids[0], 0);
+  while (queue.length) {
+    const cur = queue.shift();
+    for (const next of adj.get(cur) || []) {
+      if (!layer.has(next)) { layer.set(next, layer.get(cur) + 1); queue.push(next); }
+    }
+  }
+  let maxLayer = Math.max(0, ...layer.values());
+  for (const id of ids) if (!layer.has(id)) layer.set(id, ++maxLayer); // 未到達は右端に
+  const cols = [];
+  for (const id of ids) {
+    const l = layer.get(id);
+    (cols[l] = cols[l] || []).push(id);
+  }
+  const NW = 120, NH = 96, GX = 90, GY = 26, PAD = 16;
+  const pos = new Map();
+  cols.forEach((col, x) => col.forEach((id, y) =>
+    pos.set(id, {x: PAD + x * (NW + GX), y: PAD + y * (NH + GY)})));
+  const w = PAD * 2 + cols.length * NW + (cols.length - 1) * GX;
+  const h = PAD * 2 + Math.max(0, ...cols.map(c => c.length)) * (NH + GY) - GY;
+  return {pos, NW, NH, w, h};
+}
+
+function renderGraph() {
+  if (!A.screens.length) { $("#graph-wrap").innerHTML = '<p class="sub" style="padding:8px">画面がまだ記録されていません</p>'; return; }
+  const {pos, NW, NH, w, h} = layoutGraph();
+  const byId = new Map(A.screens.map(s => [s.id, s]));
+  let svg = `<svg id="graph" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" role="img" aria-label="画面遷移グラフ">
+    <defs>
+      <marker id="arr" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0 0 L8 4 L0 8 z" fill="context-stroke"/>
+      </marker>
+    </defs>`;
+  // 同一ペア間の複数遷移をずらすためのカウンタ
+  const pairSeen = new Map();
+  A.transitions.forEach((t, i) => {
+    const a = pos.get(t.from), b = pos.get(t.to);
+    if (!a || !b) return;
+    const pk = t.from + "→" + t.to;
+    const off = (pairSeen.get(pk) || 0); pairSeen.set(pk, off + 1);
+    const backward = b.x <= a.x;
+    const y1 = a.y + NH / 2 + (backward ? 18 : 0) + off * 10;
+    const y2 = b.y + NH / 2 + (backward ? 18 : 0) + off * 10;
+    let dPath;
+    if (backward) {
+      const dip = Math.max(a.y, b.y) + NH + 16 + off * 12;
+      dPath = `M ${a.x + NW / 2} ${a.y + NH} C ${a.x + NW / 2} ${dip}, ${b.x + NW / 2} ${dip}, ${b.x + NW / 2} ${b.y + NH + 4}`;
+    } else {
+      const midX = (a.x + NW + b.x) / 2;
+      dPath = `M ${a.x + NW} ${y1} C ${midX} ${y1}, ${midX} ${y2}, ${b.x - 4} ${y2}`;
+    }
+    const cls = "edge" + (t.covered ? " covered" : "") + (t.via ? "" : " auto");
+    svg += `<path class="${cls}" d="${dPath}" marker-end="url(#arr)"/>`;
+    svg += `<path class="edge-hit" d="${dPath}" data-trans="${i}"/>`;
+  });
+  for (const [id, p] of pos) {
+    const s = byId.get(id);
+    const shot = s.screenshot
+      ? `<image href="${esc(resolveShot(s.screenshot))}" x="6" y="6" width="${NW - 12}" height="${NH - 30}" preserveAspectRatio="xMidYMid meet"/>`
+      : `<text x="${NW / 2}" y="${(NH - 24) / 2 + 8}" text-anchor="middle">no shot</text>`;
+    svg += `<g class="node" data-screen="${esc(id)}" transform="translate(${p.x},${p.y})">
+      <rect class="frame" width="${NW}" height="${NH}" rx="6"/>${shot}
+      <text x="${NW / 2}" y="${NH - 9}" text-anchor="middle">${esc(s.label)}${s.coverage != null ? " " + s.coverage + "%" : ""}</text>
+    </g>`;
+  }
+  svg += "</svg>";
+  $("#graph-wrap").innerHTML = svg;
+  $("#graph-wrap").querySelectorAll(".node").forEach(n =>
+    n.addEventListener("click", () => selectScreen(n.dataset.screen)));
+  $("#graph-wrap").querySelectorAll(".edge-hit").forEach(e => {
+    const t = A.transitions[+e.dataset.trans];
+    bindTip(e, () => `<b>${esc(labelOf(t.from))} → ${esc(labelOf(t.to))}</b><br>
+      ${t.via ? "ボタン: <span class='mono'>" + esc(t.via) + "</span>" : "自動遷移（タップ以外）"}<br>
+      ${t.test ? "テスト: <span class='mono'>" + esc(t.test) + "</span>" + (t.covered ? "（成功）" : "") : "テスト記録なし"}`);
+  });
+}
+
+const labelOf = id => (A.screens.find(s => s.id === id) || {label: id}).label;
+const destsOf = (screenId, path) => A.transByButton.get(screenId + " " + path) || [];
+
+// 遷移先画面のテスト状況バッジ（全数テスト済み=緑 / ゼロ=赤 / 途中=中立）
+function covBadge(id) {
+  const d = A.screens.find(x => x.id === id);
+  if (!d || !d.nTarget) return "";
+  const cls = d.nCovered === d.nTarget ? " full" : d.nCovered === 0 ? " zero" : "";
+  return `<span class="covbadge${cls}">テスト済み ${d.nCovered}/${d.nTarget}</span>`;
+}
+
+function renderTransTable() {
+  if (!A.transitions.length) { $("#trans-table").innerHTML = ""; return; }
+  $("#trans-table").innerHTML = `<details style="margin-top:8px"><summary class="sub">遷移一覧（表）</summary>
+    <table><thead><tr><th>元画面</th><th>先画面</th><th>操作ボタン</th><th>テスト</th></tr></thead><tbody>` +
+    A.transitions.map(t => `<tr>
+      <td>${esc(labelOf(t.from))}</td><td>${esc(labelOf(t.to))} ${covBadge(t.to)}</td>
+      <td class="mono">${t.via ? esc(t.via) : '<span class="sub">（自動遷移）</span>'}</td>
+      <td class="mono">${t.test ? esc(t.test) + (t.covered ? ' <span class="chip passed">成功</span>' : "") : "—"}</td>
+    </tr>`).join("") + "</tbody></table></details>";
+}
+
+function renderScreens() {
+  $("#screens").innerHTML = A.screens.map(s => {
+    const landscape = s.screen && s.screen.w > s.screen.h;
+    const img = s.screenshot
+      ? `<img class="thumb ${landscape ? "landscape" : ""}" src="${esc(resolveShot(s.screenshot))}" alt="${esc(s.label)}" loading="lazy"
+           onerror="this.outerHTML='<div class=&quot;thumb noshot&quot;>画像なし</div>'">`
+      : `<div class="thumb noshot ${landscape ? "landscape" : ""}">画像なし</div>`;
+    return `<div class="card screen-card" data-screen="${esc(s.id)}">
+      ${img}
+      <div class="t">${esc(s.label)}</div>
+      <div class="sub">ボタン ${s.nCovered}/${s.nTarget} テスト済み${s.buttons.length - s.nTarget ? "・遮蔽 " + (s.buttons.length - s.nTarget) : ""}</div>
+      <div class="meter"><i style="width:${s.coverage || 0}%"></i></div>
+    </div>`;
+  }).join("");
+  $("#screens").querySelectorAll(".screen-card").forEach(c =>
+    c.addEventListener("click", () => { selectScreen(c.dataset.screen); $("#detail").scrollIntoView({behavior: "smooth", block: "nearest"}); }));
+}
+
+function selectScreen(id) {
+  selected = id;
+  document.querySelectorAll(".screen-card").forEach(c => c.classList.toggle("sel", c.dataset.screen === id));
+  document.querySelectorAll("#graph .node").forEach(n => n.classList.toggle("sel", n.dataset.screen === id));
+  const s = A.screens.find(x => x.id === id);
+  if (!s) return;
+  const landscape = s.screen && s.screen.w > s.screen.h;
+  const uw = s.screen ? s.screen.w : 1, uh = s.screen ? s.screen.h : 1;
+  // 画面矩形 [0,uw]×[0,uh] と全く重ならないボタン（Footerの非表示分・スクロール外のバナー等、
+  // 座標が負や画面外にあるもの）はオーバーレイを描かない。スクショ外に枠が散乱するのを防ぐ。
+  // data-btn は元インデックスを保つ（テーブル行・ツールチップと対応付けるため）。
+  const onScreen = r => r && r.x + r.w > 0 && r.x < uw && r.y + r.h > 0 && r.y < uh;
+  const spots = s.buttons.map((b, i) => ({b, i})).filter(x => onScreen(x.b.rect)).map(({b, i}) => {
+    const r = b.rect;
+    // Unityスクリーン座標（左下原点）→ CSS%（left/bottom基準）。画面端で 0..100% にクランプ
+    const cl = v => Math.max(0, Math.min(100, v));
+    const l = r.x / uw * 100, bo = r.y / uh * 100;
+    return `<div class="hotspot ${b.state}" data-btn="${i}" style="
+      left:${cl(l).toFixed(2)}%; bottom:${cl(bo).toFixed(2)}%;
+      width:${Math.min(r.w / uw * 100, 100 - cl(l)).toFixed(2)}%; height:${Math.min(r.h / uh * 100, 100 - cl(bo)).toFixed(2)}%"></div>`;
+  }).join("");
+  const shot = s.screenshot
+    ? `<img src="${esc(resolveShot(s.screenshot))}" alt="${esc(s.label)}のスクリーンショット">`
+    : `<div class="noshot ${landscape ? "landscape" : ""}">スクリーンショットなし</div>`;
+  // 一覧はアクションしやすい順（未テスト→失敗→テスト済み→遮蔽）。ホットスポットとは元indexで対応付ける
+  const stateOrder = {untested: 0, failed: 1, covered: 2, blocked: 3};
+  const sorted = s.buttons.map((b, i) => i)
+    .sort((a, b) => stateOrder[s.buttons[a].state] - stateOrder[s.buttons[b].state] || a - b);
+  const counts = {all: s.buttons.length};
+  for (const st of ["untested", "failed", "covered", "blocked"])
+    counts[st] = s.buttons.filter(b => b.state === st).length;
+  const chips = [["all", "すべて"], ["untested", "未テスト"], ["failed", "失敗テストで操作"],
+                 ["covered", "テスト済み"], ["blocked", "遮蔽中"]]
+    .filter(([k]) => k === "all" || counts[k] > 0)
+    .map(([k, label]) => `<button class="fchip${k === "all" ? " on" : ""}" data-filter="${k}">${label} ${counts[k]}</button>`)
+    .join("");
+  $("#detail").className = "card show";
+  $("#detail").innerHTML = `
+    <h2 style="margin-top:0">${esc(s.label)} <span class="sub mono">${esc(s.scene || "")} / ${esc(s.capturedAt || "")}</span></h2>
+    <div class="detail-cols">
+      <div class="shotbox" style="${landscape ? "flex-basis:640px" : ""}">${shot}${spots}</div>
+      <div class="btnlist">
+        <div class="fchips">${chips}</div>
+        <table><thead><tr><th></th><th>ボタン</th><th>状態</th><th>テスト</th></tr></thead><tbody>` +
+    sorted.map(i => { const b = s.buttons[i]; const dests = destsOf(s.id, b.path); return `<tr class="rowbtn" data-btn="${i}" data-state="${b.state}">
+      <td>${STATE_MARK[b.state]}</td>
+      <td><b>${esc(b.text || b.name)}</b><br><span class="mono sub">${esc(b.path)}</span>
+        ${dests.map(t => `<br><span class="golink" data-goto="${esc(t.to)}">→ ${esc(labelOf(t.to))}</span>${covBadge(t.to)}`).join("")}
+        ${b.state === "blocked" && b.blockedBy ? `<br><span class="sub">遮蔽: <span class="mono">${esc(b.blockedBy)}</span></span>` : ""}</td>
+      <td style="white-space:nowrap">${STATE_LABEL[b.state]}${CAN_PROBE && b.state !== "blocked"
+        ? `<br><button class="probe-btn" data-btn="${i}">▶ タップ</button>` : ""}</td>
+      <td class="mono sub">${b.tests.map(esc).join("<br>") || "—"}</td>
+    </tr>`; }).join("") + `</tbody></table>
+      </div>
+    </div>`;
+  // ホットスポット ⇔ 行 の相互ハイライト＋ツールチップ＋クリックで相互ジャンプ
+  const box = $("#detail .shotbox");
+  const rowOf = i => $("#detail").querySelector(`tr[data-btn="${i}"]`);
+  $("#detail").querySelectorAll(".hotspot").forEach(hs => {
+    const b = s.buttons[+hs.dataset.btn];
+    bindTip(hs, () => `<b>${esc(b.text || b.name)}</b>（${STATE_LABEL[b.state]}）<br>
+      <span class="mono">${esc(b.path)}</span>
+      ${destsOf(s.id, b.path).map(t => "<br>→ " + esc(labelOf(t.to)) + " " + covBadge(t.to)).join("")}
+      ${b.tests.length ? "<br>テスト: <span class='mono'>" + b.tests.map(esc).join("<br>") + "</span>" : ""}
+      ${b.state === "blocked" && b.blockedBy ? "<br>遮蔽: <span class='mono'>" + esc(b.blockedBy) + "</span>" : ""}`);
+    hs.addEventListener("mouseenter", () => rowOf(+hs.dataset.btn)?.classList.add("hl"));
+    hs.addEventListener("mouseleave", () => rowOf(+hs.dataset.btn)?.classList.remove("hl"));
+    hs.addEventListener("click", () => {
+      const row = rowOf(+hs.dataset.btn);
+      if (!row) return;
+      row.scrollIntoView({behavior: "smooth", block: "center"});
+      row.classList.add("hl");
+      setTimeout(() => row.classList.remove("hl"), 1600);
+    });
+  });
+  $("#detail").querySelectorAll("tr.rowbtn").forEach(tr => {
+    const spot = box.querySelector(`.hotspot[data-btn="${tr.dataset.btn}"]`);
+    tr.addEventListener("mouseenter", () => spot && spot.classList.add("hl"));
+    tr.addEventListener("mouseleave", () => spot && spot.classList.remove("hl"));
+  });
+  // 遷移先リンク → その画面の詳細へ
+  $("#detail").querySelectorAll(".golink").forEach(a =>
+    a.addEventListener("click", ev => {
+      ev.stopPropagation();
+      selectScreen(a.dataset.goto);
+      $("#detail").scrollIntoView({behavior: "smooth", block: "start"});
+    }));
+  // 探索タップ: サーバーに実機タップを依頼 → 更新された journey を読み直して遷移先を表示
+  $("#detail").querySelectorAll(".probe-btn").forEach(pb =>
+    pb.addEventListener("click", async ev => {
+      ev.stopPropagation();
+      const b = s.buttons[+pb.dataset.btn];
+      pb.disabled = true;
+      pb.textContent = "実行中…";
+      try {
+        const res = await fetch("/api/probe", {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({screen: s.id, path: b.path}),
+        });
+        const result = await res.json();
+        if (!res.ok) throw new Error(result.error || ("HTTP " + res.status));
+        const data = await (await fetch("journey.json?ts=" + Date.now())).json();
+        render(data);
+        if (result.mismatch) {
+          selectScreen(result.actual);
+          alert("実機はいま「" + (result.actualLabel || result.actual) + "」を表示しています。\n"
+            + "タップは行わず、表示をその画面に合わせました。");
+        } else {
+          selectScreen(result.to || s.id);
+          if (result.error) alert("タップは記録されましたが失敗しました: " + result.error);
+        }
+      } catch (e) {
+        alert("探索タップに失敗: " + (e.message || e));
+        pb.disabled = false;
+        pb.textContent = "▶ タップ";
+      }
+    }));
+  // 状態フィルタ: 行とホットスポットの両方を絞り込む
+  $("#detail").querySelectorAll(".fchip").forEach(chip => {
+    chip.addEventListener("click", () => {
+      $("#detail").querySelectorAll(".fchip").forEach(c => c.classList.toggle("on", c === chip));
+      const f = chip.dataset.filter;
+      $("#detail").querySelectorAll("tr.rowbtn").forEach(tr =>
+        tr.classList.toggle("hidden", f !== "all" && tr.dataset.state !== f));
+      box.querySelectorAll(".hotspot").forEach(hs =>
+        hs.classList.toggle("hidden", f !== "all" && s.buttons[+hs.dataset.btn].state !== f));
+    });
+  });
+}
+
+function renderTests() {
+  if (!A.tests.length) { $("#tests").innerHTML = '<p class="sub">テスト結果はまだ記録されていません</p>'; return; }
+  $("#tests").innerHTML = `<table>
+    <thead><tr><th>結果</th><th>テスト</th><th class="num">時間</th><th>操作（画面 / ボタン）</th></tr></thead><tbody>` +
+    A.tests.map(t => `<tr>
+      <td><span class="chip ${esc(t.outcome)}">${OUTCOME_LABEL[t.outcome] || esc(t.outcome)}</span>${t.regressed ? ' <span class="chip regress">回帰</span>' : ""}
+        ${(t.history || []).length > 1 ? `<br><span class="hist">${t.history.slice(-10).map(h =>
+          `<span class="h-${esc(h.outcome)}" title="${esc(h.ranAt || "")} ${esc(h.outcome)}">${{passed: "✓", failed: "✕", error: "!", skipped: "–"}[h.outcome] || "?"}</span>`).join("")}</span>` : ""}</td>
+      <td class="mono">${esc(t.name)}<br><span class="sub">${esc(t.ranAt || "")}</span></td>
+      <td class="num">${t.duration != null ? t.duration.toFixed(1) + "s" : ""}</td>
+      <td class="mono sub">${(t.actions || []).map(a =>
+        esc(labelOf(a.screen)) + " / " + esc(leaf(a.path)) + (a.kind !== "tap" ? "（" + esc(a.kind) + "）" : "")).join("<br>") || "—"}</td>
+    </tr>`).join("") + "</tbody></table>";
+}
+
+// ---------------------------------------------------------------- ツールチップ
+function bindTip(el, html) {
+  el.addEventListener("mouseenter", () => { $("#tip").innerHTML = html(); $("#tip").style.display = "block"; });
+  el.addEventListener("mousemove", ev => {
+    const tip = $("#tip");
+    const x = Math.min(ev.clientX + 14, innerWidth - tip.offsetWidth - 8);
+    const y = Math.min(ev.clientY + 14, innerHeight - tip.offsetHeight - 8);
+    tip.style.left = x + "px"; tip.style.top = y + "px";
+  });
+  el.addEventListener("mouseleave", () => { $("#tip").style.display = "none"; });
+}
+
+// ---------------------------------------------------------------- 起動
+function boot() {
+  // 探索サーバー（serve）配信下かを先に判定してからデータを読む
+  fetch("/api/ping").then(r => r.ok ? r.json() : null)
+    .then(j => { CAN_PROBE = !!(j && j.ok); }).catch(() => {})
+    .finally(loadData);
+}
+
+function loadData() {
+  let data = null;
+  try { data = JSON.parse($("#journey-data").textContent); } catch (e) { /* 埋め込みなし */ }
+  if (data) { EMBEDDED = true; render(data); return; }
+  // 埋め込みデータなし（テンプレートを直接開いた）→ URLパラメータ ?data=<パス> か、
+  // 同ディレクトリの journey.js を自動で読む。file:// では fetch が使えないため
+  // .js（window.JOURNEY_DATA を定義。レコーダーが journey.json と併せて出力）を <script src> で読む
+  const requested = new URLSearchParams(location.search).get("data");
+  const src = requested || "journey.js";
+  DATA_BASE = src.includes("/") ? src.slice(0, src.lastIndexOf("/") + 1) : "";
+  if (/\.json($|[?#])/.test(src)) {
+    fetch(src).then(r => r.json()).then(render)
+      .catch(() => showPicker(src + "（file:// では .json を fetch できません。journey.js を指定してください）"));
+    return;
+  }
+  const script = document.createElement("script");
+  script.src = src;
+  script.onload = () => window.JOURNEY_DATA ? render(window.JOURNEY_DATA) : showPicker(src);
+  script.onerror = () => showPicker(requested);  // 既定の journey.js 不在は正常系（エラー表示しない）
+  document.head.appendChild(script);
+}
+
+function showPicker(failed) {
+  DATA_BASE = "";
+  $("#app").innerHTML = `<div class="card" id="empty">
+    <h1>ジャーニーレポート</h1>
+    ${failed ? `<p class="sub">「${esc(failed)}」を読み込めませんでした。</p>` : ""}
+    <p><b>journey フォルダを選択</b>してください（journey.json とスクリーンショットをまとめて読み込みます）</p>
+    <input type="file" webkitdirectory>
+    <p class="sub" style="margin-top:16px">ヒント: 記録先の <span class="mono">journey フォルダ内の viewer.html</span> を開けば選択不要で表示されます。<br>
+    URL指定: <span class="mono">viewer.html?data=&lt;journey.jsへの相対パス&gt;</span> /
+    自己完結レポート生成: <span class="mono">python -m e2e_driver.journey &lt;journeyディレクトリ&gt;</span></p>
+  </div>`;
+  $("#empty input").addEventListener("change", ev => {
+    const files = [...ev.target.files];
+    const dataFile = files.find(f => f.name === "journey.json");
+    if (!dataFile) {
+      alert("選択したフォルダに journey.json がありません");
+      return;
+    }
+    // webkitRelativePath は「<選択フォルダ名>/screens/xxx.png」— journey.json からの相対に直して対応付ける
+    const prefix = dataFile.webkitRelativePath.slice(0, -"journey.json".length);
+    for (const f of files) {
+      if (f.webkitRelativePath.startsWith(prefix) && /\.(png|jpe?g|webp)$/i.test(f.name)) {
+        SHOT_FILES.set(f.webkitRelativePath.slice(prefix.length), URL.createObjectURL(f));
+      }
+    }
+    dataFile.text().then(txt => render(JSON.parse(txt)));
+  });
+}
+boot();
+</script>
+</body>
+</html>
