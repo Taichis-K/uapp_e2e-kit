@@ -16,6 +16,9 @@ Claude Code 等の AI エージェントによる自律テスト開発を前提�
 - **uGUI / NGUI 両対応**、Input System・レガシー Input 両対応（`e2e-config.json` の `uiType` で切替）
 - **タップ・ドラッグ・ピンチ・複数ポインタの同時操作**（press/release）のジェスチャ注入、
   `wait_until_*` による待機（sleep に頼らない）
+- **エディタ再生に直結する高速ループ**: エディタで Play 中のアプリへ、ビルド・デバイス・adb なしで
+  直接接続できる（`BridgeClient()` が `e2e-config.json` の `editorBridgePort` を自動解決。
+  `UAPP_E2E_EDITOR=1` で pytest もそのまま実行可能。adb を使うテストは明示エラーになり誤検証しない）
 - **ジャーニー記録**: テスト実行から画面遷移マップ＋スクリーンショット＋カバレッジの
   自己完結HTMLレポートを自動生成（[docs/07-viewer.md](docs/07-viewer.md)）
 - **AI向けランブック同梱**: [SETUP.md](SETUP.md)（導入手順書）と Claude Code スキル（/e2e-setup /e2e-run
@@ -42,7 +45,8 @@ cd uapp_e2e-kit
 - 対象アプリ: Unity製 Android アプリ（エミュレーター/実機どちらも可）
 - Windows + PowerShell 7（スクリプト類）
 - Python 3.10 以降（3.12 で検証。ドライバの依存パッケージは pytest のみ）
-- Android SDK Platform-Tools（adb。エミュレーター利用時は AVD）
+- Android SDK Platform-Tools（adb）。エミュレーター利用時は AVD も
+  （**エディタ再生への直結だけで使う場合は adb 不要**）
 - Unity 2022.3 系〜 Unity 6000 系で検証済み
 
 Unity・Android SDK・Python 等は別途用意し、それぞれのライセンス・利用規約に従うこと。
