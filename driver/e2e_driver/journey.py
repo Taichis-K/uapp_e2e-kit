@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from . import adb
-from .client import BridgeClient
+from .client import BridgeClient, resolve_port
 from .gestures import Gestures
 
 FORMAT = "uapp-e2e-journey/1"
@@ -332,6 +332,23 @@ def _match_screen(screens: dict[str, dict], button_paths: set[str],
     return best_id if best_score >= threshold else None
 
 
+def _find_config_start(journey_dir: Path) -> Path:
+    """serve のポート解決に使う e2e-config.json の探索起点を決める。
+
+    導入先レイアウト（<プロジェクト>/uapp_e2e/Builds/journey）は祖先に config があるので
+    そのまま journey_dir。開発リポジトリ（Builds/journey/<サンプル名>）は config が
+    兄弟の <サンプル名>/e2e-config.json にあるため、同名フォルダも候補に入れる。
+    """
+    ancestors = [journey_dir, *list(journey_dir.parents)[:4]]
+    if any((p / "e2e-config.json").exists() for p in ancestors):
+        return journey_dir
+    for p in ancestors[1:]:
+        candidate = p / journey_dir.name / "e2e-config.json"
+        if candidate.exists() and candidate.parent != journey_dir:
+            return candidate.parent
+    return journey_dir
+
+
 def _find_ui_type(journey_dir: Path) -> str | None:
     """journey ディレクトリから親を辿って e2e-config.json の uiType を拾う（無ければ None）。"""
     for parent in [journey_dir, *list(journey_dir.parents)[:4]]:
@@ -418,7 +435,11 @@ def serve(journey_dir: str | Path, *, http_port: int = 8787,
     if not (out_dir / "journey.json").exists():
         raise FileNotFoundError(f"journey.json が見つかりません: {out_dir}")
     _deploy_viewer(out_dir)  # 最新ビューアーで配信する（既存コピーが内容違いなら退避してから）
-    resolved_ui_type = ui_type or _find_ui_type(out_dir)
+    # config 探索は journey ディレクトリ起点（実行場所に依存させない）。uiType とポートは
+    # 同じ e2e-config.json から解決する（開発リポジトリ配置では兄弟のサンプルプロジェクト）
+    config_start = _find_config_start(out_dir)
+    resolved_ui_type = ui_type or _find_ui_type(config_start)
+    bridge_port = resolve_port(bridge_port, start=config_start)
 
     class Handler(SimpleHTTPRequestHandler):
         def __init__(self, *args, **kwargs):
@@ -474,7 +495,7 @@ def serve(journey_dir: str | Path, *, http_port: int = 8787,
     (out_dir / "探索モード.url").write_text(f"[InternetShortcut]\nURL={url}\n", encoding="ascii")
     print(f"探索モード: {url}")
     print(f"  journey: {out_dir}")
-    print(f"  bridge: {bridge_host}:{bridge_port or int(os.environ.get('UAPP_E2E_BRIDGE_PORT', '13333'))}"
+    print(f"  bridge: {bridge_host}:{bridge_port}"
           f" / uiType: {resolved_ui_type or '不明（tap系を使用）'}  [Ctrl+C で停止]")
     if open_browser:
         webbrowser.open(url)
@@ -492,7 +513,8 @@ def main(argv: list[str] | None = None) -> None:
         parser.add_argument("--http-port", type=int, default=8787)
         parser.add_argument("--bridge-host", default="127.0.0.1")
         parser.add_argument("--bridge-port", type=int, default=None,
-                            help="ブリッジのホスト側ポート（既定: 環境変数 UAPP_E2E_BRIDGE_PORT）")
+                            help="ブリッジのホスト側ポート（既定: 環境変数 UAPP_E2E_BRIDGE_PORT → "
+                                 "e2e-config.json の editorBridgePort → 13333）")
         parser.add_argument("--ui-type", default=None,
                             help="ngui-legacy を指定すると ngui_tap を使う（既定: e2e-config.json から自動判定）")
         parser.add_argument("--no-open", action="store_true",

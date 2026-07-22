@@ -28,17 +28,37 @@ __all__ = ["pytest_addoption", "pytest_runtest_makereport",
 def client():
     """接続済みブリッジクライアント。アプリ未起動なら分かりやすく失敗させる。
 
-    Unityビルド等がadbサーバーを再起動するとforwardが消えるため、
-    リトライのたびに forward を張り直す（IL2CPPコールドスタートは30秒超かかることもある）。
-    リトライ回数は環境変数 UAPP_E2E_CONNECT_RETRIES（既定45秒相当）。起動が長いアプリは増やす。
+    UAPP_E2E_EDITOR=1 なら adb を使わずエディタ再生へ直結する（デバイス/AVD不要。
+    ポートは BridgeClient が e2e-config.json の editorBridgePort を自動解決）。
+
+    デバイス向けは、Unityビルド等がadbサーバーを再起動するとforwardが消えるため、
+    リトライのたびに forward を張り直す（IL2CPPコールドスタートは30秒超、
+    エミュレーターが高負荷だと100秒超かかることもある）。
+    リトライ回数は環境変数 UAPP_E2E_CONNECT_RETRIES（既定: デバイス120秒相当・エディタ30秒相当）。
+    起動が長いアプリは増やす。
     """
-    c = BridgeClient()
+    if os.environ.get("UAPP_E2E_EDITOR") == "1":
+        c = BridgeClient()
+        try:
+            c.connect(retries=int(os.environ.get("UAPP_E2E_CONNECT_RETRIES", "30")), interval=1.0)
+        except ConnectionError:
+            pytest.fail(f"エディタ再生の E2EBridge（port={c.port}）に接続できません。"
+                        f"Unityエディタが再生中か、ポート設定"
+                        f"（UAPP_E2E_BRIDGE_PORT > e2e-config.json の editorBridgePort）を確認してください")
+        yield c
+        c.close()
+        return
+    # デバイス向けは forward したホスト側ポートに固定する（e2e-config.json の
+    # editorBridgePort への自動フォールバックでエディタへ誤接続しないように）
+    c = BridgeClient(port=adb.BRIDGE_PORT)
     last_error = None
-    for _ in range(int(os.environ.get("UAPP_E2E_CONNECT_RETRIES", "45"))):
+    for _ in range(int(os.environ.get("UAPP_E2E_CONNECT_RETRIES", "120"))):
         try:
             adb.forward()
             c.connect(retries=1, interval=0)
             break
+        except adb.AdbNotFoundError as e:
+            pytest.fail(str(e))  # adb 不在は恒久エラー。リトライで2分待たせない
         except (ConnectionError, RuntimeError) as e:
             last_error = e
             time.sleep(1.0)

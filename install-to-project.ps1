@@ -28,6 +28,7 @@ function Get-KitOwnedFiles($target) {
                      (Join-Path $kit "driver\requirements.txt"),
                      (Join-Path $kit "driver\tests\test_journey_unit.py"),
                      (Join-Path $kit "driver\tests\test_adb_ui.py"),
+                     (Join-Path $kit "driver\tests\test_client_unit.py"),
                      (Join-Path $kit "config\local.sample.json"),
                      (Join-Path $kit "config\e2e-config.sample.json"),
                      (Join-Path $kit "CLAUDE.md"),
@@ -109,7 +110,8 @@ if (Test-Path $kit) {
         if (Test-Path $p) { $backupPaths += $p }
     }
     if ($backupPaths.Count -gt 0) {
-        $backupZip = Join-Path $kit ("Builds\update-backup-" + (Get-Date -Format "yyyyMMdd-HHmmss") + ".zip")
+        # ミリ秒まで含める（同一秒内の連続実行で名前が衝突して Compress-Archive が失敗するため）
+        $backupZip = Join-Path $kit ("Builds\update-backup-" + (Get-Date -Format "yyyyMMdd-HHmmss-fff") + ".zip")
         New-Item -ItemType Directory -Force (Split-Path $backupZip) | Out-Null
         Compress-Archive -Path $backupPaths -DestinationPath $backupZip
         Write-Host "  [OK] 更新前バックアップ: $backupZip"
@@ -164,7 +166,7 @@ if (-not (Test-Path $conftestDest)) {
 } else {
     Write-Host "  [SKIP] driver\tests\conftest.py（既存を維持）"
 }
-foreach ($t in @("test_journey_unit.py", "test_adb_ui.py")) {
+foreach ($t in @("test_journey_unit.py", "test_adb_ui.py", "test_client_unit.py")) {
     Copy-Item (Join-Path $src.Driver "tests\$t") (Join-Path $kit "driver\tests\$t") -Force
 }
 if ($IncludeSampleTests) {
@@ -208,7 +210,8 @@ Write-Host "  [OK] .claude\rules\uapp-e2e.md（uapp_e2e\CLAUDE.md への参照�
 
 # --- 3. e2e-config.json（無ければテンプレから生成） ---
 $configDest = Join-Path $kit "e2e-config.json"
-if (-not (Test-Path $configDest)) {
+$configExisted = Test-Path $configDest
+if (-not $configExisted) {
     Copy-Item (Join-Path $src.Config "e2e-config.sample.json") $configDest
     Write-Host "  [OK] e2e-config.json（テンプレから生成 → package 等を編集してください）"
 } else {
@@ -224,14 +227,69 @@ foreach ($f in (Get-KitOwnedFiles $target | Sort-Object)) {
 $manifestEntries | ConvertTo-Json | Set-Content (Join-Path $kit "kit-manifest.json") -Encoding utf8
 Write-Host "  [OK] uapp_e2e\kit-manifest.json（次回更新時のローカル改変検知用）"
 
+# --- 5. 残りの手動手順の表示（検出できる項目は導入状況を照合して [済]/[未] を付ける） ---
+function Get-ManifestDependencyVersion($name) {
+    $manifestJson = Join-Path $target "Packages\manifest.json"
+    if (-not (Test-Path $manifestJson)) { return $null }
+    try { (Get-Content $manifestJson -Raw | ConvertFrom-Json).dependencies.$name } catch { $null }
+}
+function Mark($done) { if ($done) { "[済]" } else { "[未]" } }
+$inputSystemVer = Get-ManifestDependencyVersion "com.unity.inputsystem"
+$newtonsoftVer = Get-ManifestDependencyVersion "com.unity.nuget.newtonsoft-json"
+$projSettings = Join-Path $target "ProjectSettings\ProjectSettings.asset"
+# Android 向けの define だけを対象に検出する（Standalone 等の他ターゲットのみへの付与は
+# asmdef の defineConstraints を満たさず APK にブリッジが入らないため [済] にしない）。
+# YAML を行単位で走査し、scriptingDefineSymbols: キー自身よりも深いインデントの行だけを
+# ブロックとみなす（同じか浅いインデントで打ち切り。後続の別ブロックの Android: 行を拾わない）。
+# キーは Android:（旧シリアライズ形式の数値キー 7: も許容）、シンボル名は両側語境界つきで照合
+# （NOT_UAPP_E2E_BRIDGE / UAPP_E2E_BRIDGE_XXX に誤反応しない）
+$defineFound = $false
+if (Test-Path $projSettings) {
+    $keyIndent = $null
+    foreach ($line in (Get-Content $projSettings)) {
+        if ($null -eq $keyIndent) {
+            if ($line -match '^([ \t]*)scriptingDefineSymbols:\s*$') { $keyIndent = $Matches[1].Length }
+            continue
+        }
+        if ($line -notmatch '^([ \t]*)\S') { continue }
+        if ($Matches[1].Length -le $keyIndent) { break }  # ブロック終端
+        if ($line -match '^\s*(Android|7):.*(^|[^A-Za-z0-9_])UAPP_E2E_BRIDGE($|[^A-Za-z0-9_])') {
+            $defineFound = $true
+            break
+        }
+    }
+}
+$localJsonDone = Test-Path (Join-Path $kit "config\local.json")
+$gitignorePath = Join-Path $target ".gitignore"
+# 行単位で照合（コメント行や uapp_e2e/Builds-old のような別パスに誤反応しない。
+# 区切りは / のみ受理: gitignore のバックスラッシュはパス区切りでなくエスケープなので無効な記述。
+# 行頭空白もパターンの一部として扱われるため許容しない。末尾空白は Git が無視するので許容）
+$gitignoreDone = (Test-Path $gitignorePath) -and
+    (Select-String -Path $gitignorePath -Pattern '^/?uapp_e2e/config/local\.json\s*$' -Quiet) -and
+    (Select-String -Path $gitignorePath -Pattern '^/?uapp_e2e/Builds/?\s*$' -Quiet)
+# e2e-config.json は「存在」でなく「編集済み」で判定する:
+# package が雛形のままでない かつ tests の指すパスが実在する（-IncludeSampleTests なし導入だと
+# 既定の tests/test_smoke.py は配置されないため、package だけ直して [済] になる偽陽性を防ぐ）。
+# orientation は実アプリと突き合わせできないため自動確認の対象外。
+$configEdited = $false
+if ($configExisted) {
+    try {
+        $cfg = Get-Content $configDest -Raw | ConvertFrom-Json
+        $testsPath = if ($cfg.tests) { Join-Path $kit "driver\$($cfg.tests)" } else { $null }
+        $configEdited = $cfg.package -and ($cfg.package -ne "com.yourcompany.yourapp") -and
+            $testsPath -and (Test-Path $testsPath)
+    } catch { $configEdited = $false }
+}
+
 Write-Host ""
-Write-Host "=== 残りの手動手順（詳細: docs/05-install-to-project.md） ==="
+Write-Host "=== 残りの手動手順（[済]=導入済みを検出。詳細: docs/05-install-to-project.md） ==="
 Write-Host "1. Packages/manifest.json に以下を追加（Unityバージョンに応じて）:"
-Write-Host "     com.unity.inputsystem（2022.3系:1.7.0 / Unity6系:1.14+）"
-Write-Host "     com.unity.nuget.newtonsoft-json: 3.2.1"
-Write-Host "2. $configDest の package / tests / orientation を実アプリに合わせて編集"
-Write-Host "3. テスト用ビルドに UAPP_E2E_BRIDGE define を付与（自前ビルドスクリプト or Player Settings）"
-Write-Host "4. uapp_e2e\config\local.sample.json を local.json にコピーして各自の環境を記入"
-Write-Host "5. .gitignore に追加: uapp_e2e/config/local.json, uapp_e2e/Builds/"
+Write-Host "     $(Mark $inputSystemVer) com.unity.inputsystem（2022.3系:1.7.0 / Unity6系:1.14+）$(if ($inputSystemVer) { " → $inputSystemVer 導入済み" })"
+Write-Host "     $(Mark $newtonsoftVer) com.unity.nuget.newtonsoft-json: 3.2.1$(if ($newtonsoftVer) { " → $newtonsoftVer 導入済み" })（既存 Newtonsoft DLL があれば不要）"
+Write-Host "2. $(Mark $configEdited) $configDest の package / tests / orientation を実アプリに合わせて編集$(if ($configEdited) { "（package 設定済み・tests 実在。orientation は自動確認外）" })"
+Write-Host "3. $(Mark $defineFound) テスト用ビルドに UAPP_E2E_BRIDGE define を付与（検出対象は Player Settings の Android 向け define のみ。"
+Write-Host "     自前ビルドスクリプト側で付与する構成は ProjectSettings に現れないため [未] 表示のままでよい）"
+Write-Host "4. $(Mark $localJsonDone) uapp_e2e\config\local.sample.json を local.json にコピーして各自の環境を記入"
+Write-Host "5. $(Mark $gitignoreDone) .gitignore に追加: uapp_e2e/config/local.json, uapp_e2e/Builds/"
 Write-Host "（AI向け規約は .claude\rules\uapp-e2e.md 経由で自動参照される。CLAUDE.md の書き換えは不要）"
 exit 0  # robocopy の成功コード(1〜7)を漏らさない

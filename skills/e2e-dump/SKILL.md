@@ -10,12 +10,13 @@ description: 実行中のUnityアプリのUI階層をdumpして見やすく要�
 ## 手順
 
 1. 接続先を判断:
-   - エミュレーター: `adb forward` 済みのホストポート（`uapp_e2e/config/local.json` の `bridgePort`）
-   - エディタ再生中: `uapp_e2e/e2e-config.json` の `editorBridgePort`
-2. 取得:
+   - エディタ再生中: 引数不要（`BridgeClient()` が `uapp_e2e/e2e-config.json` の `editorBridgePort` を自動解決）
+   - エミュレーター/実機: `adb forward` 済みのホストポート（`uapp_e2e/config/local.json` の `bridgePort`）を
+     `BridgeClient(port=<ポート>)` で明示
+2. 取得（エディタ再生の例。デバイスは `BridgeClient(port=<ポート>)` に置き換える）:
    ```powershell
    cd uapp_e2e\driver
-   python -c "from e2e_driver import BridgeClient; import json; d = BridgeClient(port=<ポート>).connect().dump(); print(json.dumps(d, indent=1, ensure_ascii=False))"
+   python -c "from e2e_driver import BridgeClient; import json; d = BridgeClient().connect().dump(); print(json.dumps(d, indent=1, ensure_ascii=False))"
    ```
    大きい場合はファイルに保存してから読む
 3. 要約して提示。重要情報:

@@ -16,9 +16,20 @@ Pythonドライバ・実行スクリプト一式で構成される。
 ```
 
 複数ターゲット同時: `-DeviceSerial emulator-5556 -HostPort 13335` のように分離する。
-エディタ再生中のアプリへは adb 不要で `BridgeClient(port=<e2e-config.jsonのeditorBridgePort>)` で直接接続できる。
+エディタ再生中のアプリへは adb 不要で `BridgeClient()` で直接接続できる
+（ポートは `e2e-config.json` の `editorBridgePort` を自動解決）。
+pytest をエディタ相手に流すには（デバイス/AVD/adb 不要）:
 
-UI階層の確認（**テストを書く前に必ず実物を見る**）:
+```powershell
+cd driver
+$env:UAPP_E2E_EDITOR = "1"; pytest tests; Remove-Item Env:\UAPP_E2E_EDITOR
+```
+
+対象は adb を直接使わないテストのみ（logcat アサート・adb タップ入りのテストは
+エディタ直結モードでは明示エラーになる → `-k` で除外する）。
+
+UI階層の確認（**テストを書く前に必ず実物を見る**。例はエディタ再生向け。
+デバイスは forward 済みホスト側ポートを `BridgeClient(port=<config\local.json の bridgePort>)` で明示する）:
 
 ```powershell
 cd driver

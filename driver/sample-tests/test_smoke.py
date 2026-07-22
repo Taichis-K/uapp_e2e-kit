@@ -100,7 +100,7 @@ def test_second_client_not_blocked(client):
     ブリッジは接続ごとに独立スレッドで応対する（直列応対だと、不正終了した
     クライアントの残留接続が以降の接続を永久に塞ぐ）。その設計の回帰テスト。
     """
-    c2 = BridgeClient(timeout=10.0).connect(retries=1)
+    c2 = BridgeClient(port=client.port, timeout=10.0).connect(retries=1)  # 1本目と同じ接続先へ
     try:
         assert c2.ping()["bridge"] == "1.0"
     finally:

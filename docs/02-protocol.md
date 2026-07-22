@@ -17,6 +17,9 @@
 4. **エディタのみ**: プロジェクトの `e2e-config.json` の `editorBridgePort`
 5. 既定 `13333`
 
+いずれの経路も **1〜65535 のみ採用**（値域外は警告ログを出して次の候補へ。
+Python ドライバ側の解決と挙動を揃え、片側だけフォールバックして接続先がズレる事故を防ぐ）。
+
 - **デバイス（実機/AVD）**: `e2e-config.json` の `devicePort`（既定 13333）で待ち受け。
   **同一デバイスに計装アプリを複数入れる場合はアプリごとに別の devicePort を割り当てる**。
   ホストからは `adb -s <serial> forward tcp:<ホスト側ポート> tcp:<devicePort>` で接続
@@ -26,6 +29,11 @@
   （`run-e2e.ps1` が設定。ドライバの `adb.forward()` はこの2つで再forwardする）
 - **エディタ再生**: ホスト上で直接待ち受けるため adb 不要。複数エディタ（＝複数プロジェクト）
   同時運用は各プロジェクトの `editorBridgePort` で自然に分離される
+- **Python ドライバ側の接続先解決**（`BridgeClient` / `resolve_port`）: 明示引数 >
+  環境変数 `UAPP_E2E_BRIDGE_PORT` > カレントディレクトリから親方向に探索した
+  `e2e-config.json` の `editorBridgePort` > 既定 13333。
+  ポート未指定の `BridgeClient()` はエディタ直結の設定と自動で一致する
+  （デバイス向けの pytest は forward したホスト側ポートに固定されるため影響しない）
 
 ポート競合時の挙動: bind に失敗したブリッジは**2秒間隔で約60秒間リトライ**し、ポートが解放され次第
 自己回復する（logcat に `[E2EBridge] bind failed ... リトライします` が出る）。

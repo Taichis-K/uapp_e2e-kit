@@ -45,7 +45,10 @@ cd uapp_e2e
 ```
 
 エディタ再生中のアプリに対しては adb 不要で直接接続できる
-（`e2e-config.json` の `editorBridgePort`。ビルド不要なので外側ループの高速な代替になる。
+（`BridgeClient()` が `e2e-config.json` の `editorBridgePort` を自動解決。
+pytest は `$env:UAPP_E2E_EDITOR = "1"; pytest tests` で adb を迂回して流せる。
+adb を直接使うテスト—logcat アサート・adb タップ—は対象外で明示エラーになるため `-k` で除外する。
+ビルド不要なので外側ループの高速な代替になる。
 ただし実機との差異があるため、最終確認はエミュレーター/実機で行う）。
 
 ## ジャーニー記録（画面把握・遷移・カバレッジの可視化）

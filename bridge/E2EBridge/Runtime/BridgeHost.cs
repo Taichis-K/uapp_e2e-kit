@@ -44,16 +44,18 @@ namespace E2EBridge
         ///    （run-e2e.ps1 が e2e-config.json の devicePort を `am start --ei uapp_e2e_port <n>` で渡す。
         ///      同一デバイスに計装アプリが複数あってもアプリごとにポートを分けられる）
         /// 4) エディタのみ: プロジェクト直下 e2e-config.json の editorBridgePort  5) 既定 13333
+        /// いずれの経路も 1〜65535 のみ採用（値域外は警告して次の候補へ。
+        /// Pythonドライバ側の解決（resolve_port）と挙動を一致させ、片側だけフォールバックする不整合を防ぐ）。
         /// </summary>
         private static int ResolvePort()
         {
             var args = Environment.GetCommandLineArgs();
             for (var i = 0; i < args.Length - 1; i++)
-                if (args[i] == "-e2eBridgePort" && int.TryParse(args[i + 1], out var fromArg))
+                if (args[i] == "-e2eBridgePort" && int.TryParse(args[i + 1], out var fromArg) && IsValidPort(fromArg, "-e2eBridgePort"))
                     return fromArg;
 
             var env = Environment.GetEnvironmentVariable("UAPP_E2E_BRIDGE_PORT");
-            if (!string.IsNullOrEmpty(env) && int.TryParse(env, out var fromEnv))
+            if (!string.IsNullOrEmpty(env) && int.TryParse(env, out var fromEnv) && IsValidPort(fromEnv, "UAPP_E2E_BRIDGE_PORT"))
                 return fromEnv;
 
 #if UNITY_ANDROID && !UNITY_EDITOR
@@ -64,7 +66,7 @@ namespace E2EBridge
                 using (var intent = activity.Call<AndroidJavaObject>("getIntent"))
                 {
                     var fromIntent = intent.Call<int>("getIntExtra", "uapp_e2e_port", 0);
-                    if (fromIntent > 0)
+                    if (fromIntent != 0 && IsValidPort(fromIntent, "uapp_e2e_port"))
                         return fromIntent;
                 }
             }
@@ -87,8 +89,21 @@ namespace E2EBridge
                 {
                     if (!File.Exists(configPath)) continue;
                     var config = Newtonsoft.Json.Linq.JObject.Parse(File.ReadAllText(configPath));
-                    var fromConfig = (int?)config["editorBridgePort"];
-                    if (fromConfig > 0)
+                    // (int?) キャストは bool/float も Convert.ToInt32 で変換してしまうため型を限定し、
+                    // Python ドライバ側（_parse_port: 整数と10進数字文字列のみ受理）と判定を揃える
+                    var token = config["editorBridgePort"];
+                    int? fromConfig = null;
+                    if (token != null)
+                    {
+                        if (token.Type == Newtonsoft.Json.Linq.JTokenType.Integer)
+                            fromConfig = (int)token;
+                        else if (token.Type == Newtonsoft.Json.Linq.JTokenType.String
+                                 && int.TryParse((string)token, out var parsedConfig))
+                            fromConfig = parsedConfig;
+                        else
+                            Debug.LogWarning($"[E2EBridge] editorBridgePort={token} は整数でないため無視します");
+                    }
+                    if (fromConfig.HasValue && IsValidPort(fromConfig.Value, "editorBridgePort"))
                         return fromConfig.Value;
                     break;
                 }
@@ -99,6 +114,14 @@ namespace E2EBridge
             }
 #endif
             return DefaultPort;
+        }
+
+        private static bool IsValidPort(int port, string source)
+        {
+            if (port >= 1 && port <= 65535)
+                return true;
+            Debug.LogWarning($"[E2EBridge] {source} のポート {port} は値域外（1〜65535）のため無視します");
+            return false;
         }
 
         private void Awake()

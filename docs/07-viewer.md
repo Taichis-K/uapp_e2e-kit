@@ -16,7 +16,7 @@ E2E テスト中に「各画面のボタンをどう把握できているか」�
 開発リポジトリは `Builds\journey\<サンプル名>\`。
 
 ```powershell
-.\scripts\run-e2e.ps1                       # → Builds\journey\report.html が更新される
+.\scripts\run-e2e.ps1                       # → Builds\journey\<サンプル名>\report.html が更新される（導入先は uapp_e2e\Builds\journey\）
 .\scripts\run-e2e.ps1 -NoJourney            # 記録を無効化
 .\scripts\run-e2e.ps1 -JourneyDir <DIR>     # 出力先を変える（別ジャーニーを分けたい時）
 ```
@@ -172,7 +172,9 @@ python -m e2e_driver.journey serve ..\Builds\journey   # → http://127.0.0.1:87
 （既知画面ならスクショ更新、未知なら `screen-N（自動取得）` として追加）。
 
 未テストのボタンを順に押していくだけで、画面地図とカバレッジが育つ。
-待ち受けは 127.0.0.1 のみ。ブリッジ接続先は `--bridge-port`（既定: 環境変数 UAPP_E2E_BRIDGE_PORT）。
+待ち受けは 127.0.0.1 のみ。ブリッジ接続先は `--bridge-port`
+（既定: 環境変数 UAPP_E2E_BRIDGE_PORT → journey ディレクトリ起点で探索した e2e-config.json の
+editorBridgePort → 13333。**adb forward 済みデバイスを探索する場合はホスト側ポートを明示する**）。
 
 ## ボタンデータの再利用（テスト作成の「地図」としての運用）
 

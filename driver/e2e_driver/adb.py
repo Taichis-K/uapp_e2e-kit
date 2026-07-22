@@ -11,11 +11,15 @@ from pathlib import Path
 
 import os
 
+from .client import _env_port
+
 # ホスト側ポート（run-e2e.ps1 が -HostPort / config/local.json から環境変数で渡す）。
-BRIDGE_PORT = int(os.environ.get("UAPP_E2E_BRIDGE_PORT", "13333"))
+# 無効な環境変数値は警告して既定へ（import 時の ValueError 死や、値域外を
+# BridgeClient へ明示引数として渡してしまう事故を防ぐ。検証は client._parse_port と共通）
+BRIDGE_PORT = _env_port("UAPP_E2E_BRIDGE_PORT") or 13333
 # デバイス内でアプリが待ち受けるポート（e2e-config.json の devicePort。run-e2e.ps1 が環境変数で渡す。
 # 同一デバイスに計装アプリが複数ある場合はアプリごとに別ポート）。
-DEVICE_BRIDGE_PORT = int(os.environ.get("UAPP_E2E_DEVICE_PORT", "13333"))
+DEVICE_BRIDGE_PORT = _env_port("UAPP_E2E_DEVICE_PORT") or 13333
 # 複数デバイス同時運用時の対象指定（run-e2e.ps1 の -DeviceSerial → 環境変数）。
 # 未指定なら adb の既定（接続デバイスが1台のときのみ有効）。
 DEVICE_SERIAL = os.environ.get("UAPP_E2E_DEVICE_SERIAL")
@@ -28,14 +32,42 @@ _EXCEPTION_PATTERN = re.compile(
 )
 
 
+class AdbNotFoundError(RuntimeError):
+    """adb が使えない恒久エラー（未インストール / エディタ直結モード）。リトライしても回復しない。"""
+
+
+_ADB_MISSING = ("adb が見つかりません。Android SDK Platform-Tools を導入して PATH に追加してください"
+                "（エディタ再生のみで使う場合は adb 不要: UAPP_E2E_EDITOR=1 で pytest、"
+                "または BridgeClient 直結）")
+
+_EDITOR_MODE = ("UAPP_E2E_EDITOR=1（エディタ直結モード）のため adb は使いません。"
+                "この操作は デバイス前提です — エディタ実行から対象テストを除外（-k / marker）するか、"
+                "UAPP_E2E_EDITOR を外してデバイスで実行してください")
+
+
 def _adb_base() -> list[str]:
     return ["adb", "-s", DEVICE_SERIAL] if DEVICE_SERIAL else ["adb"]
 
 
+def _check_adb_available() -> None:
+    """エディタ直結モードでの adb 使用を明示的に失敗させる。
+
+    ガードが無いと、端末が接続されていた場合に「エディタをテストしたつもりで
+    端末側の logcat / 画面を検証して偽の成功になる」事故が起きる。
+    （ジャーニー記録の screencap は Exception を握って続行するため影響しない）
+    """
+    if os.environ.get("UAPP_E2E_EDITOR") == "1":
+        raise AdbNotFoundError(_EDITOR_MODE)
+
+
 def _run(*args: str, check: bool = True) -> str:
-    result = subprocess.run(
-        [*_adb_base(), *args], capture_output=True, text=True, encoding="utf-8", errors="replace"
-    )
+    _check_adb_available()
+    try:
+        result = subprocess.run(
+            [*_adb_base(), *args], capture_output=True, text=True, encoding="utf-8", errors="replace"
+        )
+    except FileNotFoundError as e:
+        raise AdbNotFoundError(_ADB_MISSING) from e
     if check and result.returncode != 0:
         raise RuntimeError(f"adb {' '.join(args)} failed: {result.stderr.strip()}")
     return result.stdout
@@ -180,9 +212,13 @@ def screencap(local_path: str | Path) -> Path:
     """スクリーンショットをローカルに保存する。AI はこの画像を読んで描画検証する。"""
     local = Path(local_path)
     local.parent.mkdir(parents=True, exist_ok=True)
-    png = subprocess.run(
-        [*_adb_base(), "exec-out", "screencap", "-p"], capture_output=True
-    )
+    _check_adb_available()
+    try:
+        png = subprocess.run(
+            [*_adb_base(), "exec-out", "screencap", "-p"], capture_output=True
+        )
+    except FileNotFoundError as e:
+        raise AdbNotFoundError(_ADB_MISSING) from e
     if png.returncode != 0:
         raise RuntimeError(f"screencap failed: {png.stderr.decode(errors='replace')}")
     local.write_bytes(png.stdout)

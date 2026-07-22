@@ -81,15 +81,34 @@
 
 ### 5. 検証（ここまでの成果を必ず実際に動かして確認）
 
+**まず 5a（エディタ再生・数分）で疎通させてから 5b（APKビルド・十数分）へ進む。**
+計装のコンパイル・NGUI検出・プロトコル疎通は 5a で全部検証でき、失敗時の切り分けもビルドと分離できる。
+
+#### 5a. エディタ再生で疎通（数分・デバイス/adb 不要）
+
 1. コンパイル確認: 対象バージョンの Unity でバッチ起動し `error CS` が無いこと
-2. ビルド: `uapp_e2e\scripts\build-android.ps1`（初回はIL2CPPで10分超）
-3. エミュレーター起動 → `uapp_e2e\scripts\run-e2e.ps1`（テスト未作成なら ping 疎通のみ）:
+2. エディタでも `UAPP_E2E_BRIDGE` define が有効なことを確認して Play
+   （define をビルドスクリプトでのみ付与する構成では、一時的に Player Settings の
+   Scripting Define Symbols へ追加して再コンパイルさせる）
+3. ping（ブリッジは `e2e-config.json` の `editorBridgePort` で待ち受け、`BridgeClient()` が同じ値を自動解決する）:
    ```powershell
    cd uapp_e2e\driver
    python -c "from e2e_driver import BridgeClient; print(BridgeClient().connect().ping())"
    ```
 4. `ping` 応答の `ngui` が手順2の検出と一致することを確認
-5. 結果（検出した構成・変更したファイル一覧・疎通結果）をユーザーに報告
+5. pytest まで流す場合はエディタ直結モード（adb を迂回）で:
+   ```powershell
+   $env:UAPP_E2E_EDITOR = "1"; pytest tests; Remove-Item Env:\UAPP_E2E_EDITOR
+   ```
+   adb を直接使うテスト（logcat アサート・adb タップ）はこのモードでは明示エラーになる。
+   その場合は `-k` で除外して流し、除外分は 5b で検証する
+
+#### 5b. APK ビルドで実機/エミュレーター検証（十数分）
+
+1. ビルド: `uapp_e2e\scripts\build-android.ps1`（初回はIL2CPPで10分超）
+2. エミュレーター起動 → `uapp_e2e\scripts\run-e2e.ps1`（テスト未作成なら ping 疎通のみ。
+   5a で Player Settings に足した define をビルドスクリプト付与へ戻す場合はここで外す）
+3. 結果（検出した構成・変更したファイル一覧・疎通結果）をユーザーに報告
 
 ### 6. 最初のテスト作成（ユーザーが望む場合）
 

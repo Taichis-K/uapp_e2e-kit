@@ -91,7 +91,9 @@ Claude Code に次のように依頼するだけでよい（キットの取得�
   "tests": "tests/test_smoke.py",            // 自アプリ用テストのパス（uapp_e2e/driver/からの相対）
   "orientation": "landscape",                // portrait | landscape | auto（横画面アプリはlandscape）
   "deviceRotation": null,                    // 縦横両対応で起動向きを固定したい場合 0-3
-  "editorBridgePort": 13333                  // エディタ再生時の待ち受けポート（複数プロジェクト並行開発時は重複させない）
+  "devicePort": 13333,                       // デバイス内でブリッジが待ち受けるポート（計装アプリを複数入れる場合はアプリごとに分ける）
+  "editorBridgePort": 13333,                 // エディタ再生時の待ち受けポート（複数プロジェクト並行開発時は重複させない）
+  "uiType": "ugui-nis"                       // ugui-nis | ugui-legacy | ngui-nis | ngui-legacy（操作APIの選択に使う）
 }
 ```
 
@@ -134,8 +136,12 @@ pip install -r driver\requirements.txt
 .\scripts\build-android.ps1        # キットがプロジェクト内にある場合は -ProjectPath 不要（自動検出）
 .\scripts\run-e2e.ps1              # まだテストが無ければ次の1行で疎通だけ確認：
 cd driver
-python -c "from e2e_driver import BridgeClient; print(BridgeClient().connect().ping())"
+python -c "from e2e_driver import BridgeClient; print(BridgeClient(port=<ホスト側ポート>).connect().ping())"
 ```
+
+デバイス疎通ではホスト側ポート（`config\local.json` の `bridgePort`）を明示する。
+無引数の `BridgeClient()` はエディタ向けに `e2e-config.json` の `editorBridgePort` を解決するため、
+デバイスの forward 先と一致するとは限らない。
 
 `ping` の応答に `'ngui': True/False` が含まれ、NGUI検出が確認できる。
 以降のテストの書き方は [docs/ai-loop.md](ai-loop.md) の規約に従う（まず dump を見る）。
@@ -154,7 +160,14 @@ python -c "from e2e_driver import BridgeClient; print(BridgeClient().connect().p
 
 1. Scripting Define Symbols に `UAPP_E2E_BRIDGE` を追加してプレイ開始
 2. ブリッジが `e2e-config.json` の `editorBridgePort` で待ち受ける（adb不要）
-3. `BridgeClient(port=<editorBridgePort>)` で直接接続
+3. `BridgeClient()` で直接接続（`e2e-config.json` の `editorBridgePort` を自動解決。明示指定も可）
+4. pytest を流す場合はエディタ直結モードで（デバイス/AVD/adb 不要）:
+   ```powershell
+   cd uapp_e2e\driver
+   $env:UAPP_E2E_EDITOR = "1"; pytest tests; Remove-Item Env:\UAPP_E2E_EDITOR
+   ```
+   対象は adb を直接使わないテストのみ。logcat アサートや adb タップを含むテストは
+   エディタ直結モードでは明示エラーになる（端末側を誤検証しないためのガード）ので `-k` 等で除外する。
 
 AVDとエディタ、複数エディタの同時運用のポート設計は [docs/02-protocol.md](02-protocol.md) 参照。
 
@@ -181,9 +194,9 @@ AVDとエディタ、複数エディタの同時運用のポート設計は [doc
 
 | 区分 | 対象 | 更新時の挙動 |
 |---|---|---|
-| **キット所有** | `Assets/uapp_e2e/E2EBridge/`・`uapp_e2e/driver/e2e_driver/`・`uapp_e2e/scripts/`・`uapp_e2e/docs/`・`uapp_e2e/CLAUDE.md`/`SETUP.md`/`VERSION`・`.claude/skills/`・`.claude/rules/uapp-e2e.md`・`driver/tests/test_journey_unit.py` | **上書き更新**（手を入れない前提。変更したい場合はキット側へ還元する） |
-| **プロジェクト所有** | `uapp_e2e/e2e-config.json`・`driver/tests/` の自作テスト・`config/local.json`・`Builds/`（ジャーニー記録含む） | **触らない** |
-| **初回のみ生成** | `driver/tests/conftest.py`（キット取り込みの1行＋プロジェクト追記領域） | 既存があれば**保持**（フィクスチャの実体は `e2e_driver` パッケージ側にあるため、conftest を更新しなくてもキットの新機能が届く） |
+| **キット所有** | `Assets/uapp_e2e/E2EBridge/`・`uapp_e2e/driver/e2e_driver/`・`uapp_e2e/scripts/`・`uapp_e2e/docs/`・`uapp_e2e/CLAUDE.md`/`SETUP.md`/`VERSION`・`.claude/skills/`・`.claude/rules/uapp-e2e.md`・`uapp_e2e/driver/tests/test_journey_unit.py`/`test_adb_ui.py`/`test_client_unit.py` | **上書き更新**（手を入れない前提。変更したい場合はキット側へ還元する） |
+| **プロジェクト所有** | `uapp_e2e/e2e-config.json`・`uapp_e2e/driver/tests/` の自作テスト・`uapp_e2e/config/local.json`・`uapp_e2e/Builds/`（ジャーニー記録含む） | **触らない** |
+| **初回のみ生成** | `uapp_e2e/driver/tests/conftest.py`（キット取り込みの1行＋プロジェクト追記領域） | 既存があれば**保持**（フィクスチャの実体は `e2e_driver` パッケージ側にあるため、conftest を更新しなくてもキットの新機能が届く） |
 
 更新後の確認（AI向けランブック）:
 

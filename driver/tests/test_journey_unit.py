@@ -196,3 +196,29 @@ def test_export_html_embeds_data(tmp_path, no_screencap):
     assert '"format": "uapp-e2e-journey/1"'.replace(" ", "") in html.replace(" ", "")
     assert "data:image/png;base64," in html, "スクリーンショットが data URI で内蔵されること"
     assert ">null</script>" not in html, "データスロットが置換されていること"
+
+
+def test_find_config_start_layouts(tmp_path):
+    """serve のポート解決起点: 導入先（config が祖先）と開発リポジトリ（config が兄弟）の両対応。"""
+    from e2e_driver.journey import _find_config_start
+    # 導入先レイアウト: <プロジェクト>/uapp_e2e/Builds/journey → 祖先に config があるのでそのまま
+    kit = tmp_path / "proj" / "uapp_e2e"
+    kit_journey = kit / "Builds" / "journey"
+    kit_journey.mkdir(parents=True)
+    (kit / "e2e-config.json").write_text("{}", encoding="utf-8")
+    assert _find_config_start(kit_journey) == kit_journey
+    # 開発リポジトリレイアウト: Builds/journey/<サンプル名> と <サンプル名>/e2e-config.json が兄弟
+    root = tmp_path / "dev"
+    dev_journey = root / "Builds" / "journey" / "unity-x"
+    dev_journey.mkdir(parents=True)
+    sample = root / "unity-x"
+    sample.mkdir()
+    (sample / "e2e-config.json").write_text('{"uiType": "ngui-legacy"}', encoding="utf-8")
+    assert _find_config_start(dev_journey) == sample
+    # serve はこの起点から uiType も解決する（ポートだけ兄弟解決して uiType が None になる齟齬を防ぐ）
+    from e2e_driver.journey import _find_ui_type
+    assert _find_ui_type(_find_config_start(dev_journey)) == "ngui-legacy"
+    # どこにも無ければ journey ディレクトリのまま（resolve_port が既定値へフォールバック）
+    lone = tmp_path / "lone" / "journey"
+    lone.mkdir(parents=True)
+    assert _find_config_start(lone) == lone

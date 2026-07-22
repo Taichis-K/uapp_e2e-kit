@@ -1,4 +1,7 @@
-# adb の要素ベース・ネイティブUI操作（uiautomator XMLパーサ）の単体テスト。デバイス不要。
+# adb の要素ベース・ネイティブUI操作（uiautomator XMLパーサ）等の単体テスト。デバイス不要。
+import pytest
+
+from e2e_driver import adb
 from e2e_driver.adb import find_ui_node
 
 # uiautomator dump の抜粋を模した最小XML（アプリ選択ダイアログ相当）
@@ -28,3 +31,44 @@ def test_find_by_class_and_resource_id():
 def test_find_returns_none_when_absent():
     assert find_ui_node(text="存在しない", xml=XML) is None
     assert find_ui_node(class_name="android.webkit.WebView", xml=XML) is None
+
+
+def test_missing_adb_binary_message(monkeypatch, tmp_path):
+    """adb バイナリが無いときは生の FileNotFoundError でなく、導入案内付き RuntimeError にする。"""
+    monkeypatch.delenv("UAPP_E2E_EDITOR", raising=False)
+    def _no_adb(*args, **kwargs):
+        raise FileNotFoundError("adb")
+    monkeypatch.setattr(adb.subprocess, "run", _no_adb)
+    with pytest.raises(adb.AdbNotFoundError, match="adb が見つかりません"):
+        adb.forward()
+    with pytest.raises(adb.AdbNotFoundError, match="adb が見つかりません"):
+        adb.screencap(tmp_path / "screen.png")
+
+
+def test_module_ports_survive_invalid_env():
+    """BRIDGE_PORT/DEVICE_BRIDGE_PORT は無効な環境変数でも import 死せず既定 13333 に落ちる。"""
+    import importlib
+    try:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setenv("UAPP_E2E_BRIDGE_PORT", "abc")
+            mp.setenv("UAPP_E2E_DEVICE_PORT", "70000")
+            with pytest.warns(UserWarning, match="無視します"):
+                reloaded = importlib.reload(adb)
+            assert reloaded.BRIDGE_PORT == 13333
+            assert reloaded.DEVICE_BRIDGE_PORT == 13333
+    finally:
+        # 環境変数が実行開始時の値へ戻った状態（context 脱出後）で再ロードし、
+        # モジュール定数を元どおりに再構築する（run-e2e 経由等で非既定ポートの場合も正しく復元）
+        importlib.reload(adb)
+
+
+def test_editor_mode_blocks_adb(monkeypatch, tmp_path):
+    """UAPP_E2E_EDITOR=1 中の adb 使用は明示エラー（端末側を誤検証する偽の成功を防ぐ）。"""
+    monkeypatch.setenv("UAPP_E2E_EDITOR", "1")
+    called = []
+    monkeypatch.setattr(adb.subprocess, "run", lambda *a, **k: called.append(a))
+    with pytest.raises(adb.AdbNotFoundError, match="エディタ直結モード"):
+        adb.forward()
+    with pytest.raises(adb.AdbNotFoundError, match="エディタ直結モード"):
+        adb.screencap(tmp_path / "screen.png")
+    assert not called, "ガードは subprocess 実行前に効くこと"

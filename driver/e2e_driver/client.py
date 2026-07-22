@@ -1,15 +1,99 @@
 """E2EBridge（Unityアプリ内計装サーバー）への行区切りJSONクライアント。
 
 座標系はすべて Unity スクリーン座標（左下原点・ピクセル）。
-接続先は adb forward tcp:13333 tcp:13333 済みの localhost:13333 を想定。
+接続先ポートは 明示引数 > 環境変数 UAPP_E2E_BRIDGE_PORT > e2e-config.json の
+editorBridgePort > 13333 の順で解決する（resolve_port 参照）。
 """
 from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import time
+import warnings
+from pathlib import Path
 from typing import Any
+
+DEFAULT_PORT = 13333
+
+_PORT_RE = re.compile(r"[+-]?[0-9]+")
+
+
+def _parse_port(raw) -> int | None:
+    """C#側（int.TryParse）と受理範囲を揃えた厳格なポート解釈。値域は 1〜65535。
+
+    Python の int() は "13_333" や bool（True→1）も通してしまい、Unity 側と
+    「どちらか片方だけ採用」の不整合を生むため、符号＋10進数字のみを受理する。
+    不採用は None（呼び出し側が次の候補へフォールバックする）。
+    """
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        port = raw
+    elif isinstance(raw, str) and _PORT_RE.fullmatch(raw.strip()):
+        port = int(raw.strip())
+    else:
+        return None
+    return port if 1 <= port <= 65535 else None
+
+
+def _env_port(name: str) -> int | None:
+    """環境変数から検証済みポートを取得。未設定は None、無効値は警告して None。"""
+    raw = os.environ.get(name)
+    if not raw:
+        return None
+    port = _parse_port(raw)
+    if port is None:
+        warnings.warn(f"{name}={raw} は有効なポート（1〜65535の10進整数）でないため無視します")
+    return port
+
+
+def _config_editor_port(start: Path | None = None) -> int | None:
+    """start（既定: カレントディレクトリ）から親を辿って e2e-config.json の editorBridgePort を拾う。
+
+    ポート未指定の BridgeClient() の典型用途はエディタ再生への直結
+    （デバイス向けは run-e2e.ps1 が UAPP_E2E_BRIDGE_PORT で forward 先を渡してくる）。
+    設定が無い・読めない・値の型が想定外の場合は None（既定値へフォールバック）。
+    """
+    start = Path(start) if start is not None else Path.cwd()
+    for parent in [start, *list(start.parents)[:4]]:
+        config = parent / "e2e-config.json"
+        if config.exists():
+            try:
+                value = json.loads(config.read_text(encoding="utf-8")).get("editorBridgePort")
+                if value is None:
+                    return None
+                port = _parse_port(value)
+                if port is None:
+                    warnings.warn(f"{config} の editorBridgePort={value!r} は有効なポートでないため無視します")
+                return port
+            except Exception:
+                return None
+    return None
+
+
+def resolve_port(explicit: int | None = None, start: Path | None = None) -> int:
+    """接続先ホストポートの解決: 明示引数 > UAPP_E2E_BRIDGE_PORT > e2e-config.json > 13333。
+
+    start は e2e-config.json の探索起点（既定: カレントディレクトリ）。
+    値域は 1〜65535（BridgeHost.ResolvePort と同一）。環境変数・設定ファイルの値域外/不正値は
+    警告して次の候補へスキップし、Unity 側と接続先がズレないようにする。
+    明示引数の値域外だけは ValueError — 暗黙フォールバックすると呼び出し側の意図と
+    別のポートへ接続してしまうため、即時に失敗させる。
+    """
+    if explicit is not None:
+        port = _parse_port(explicit)
+        if port is None:
+            raise ValueError(f"port {explicit!r} は有効なポートではありません（1〜65535の10進整数）")
+        return port
+    env_port = _env_port("UAPP_E2E_BRIDGE_PORT")
+    if env_port is not None:
+        return env_port
+    config_port = _config_editor_port(start)
+    if config_port is not None:
+        return config_port
+    return DEFAULT_PORT
 
 
 class BridgeError(Exception):
@@ -32,11 +116,8 @@ class BlockedError(Exception):
 
 class BridgeClient:
     def __init__(self, host: str = "127.0.0.1", port: int | None = None, timeout: float = 30.0):
-        if port is None:
-            # ホスト側ポート（config/local.json の bridgePort → run-e2e.ps1 が環境変数で渡す）
-            port = int(os.environ.get("UAPP_E2E_BRIDGE_PORT", "13333"))
         self.host = host
-        self.port = port
+        self.port = resolve_port(port)
         self.timeout = timeout
         self._sock: socket.socket | None = None
         self._file = None
@@ -59,7 +140,7 @@ class BridgeClient:
                 time.sleep(interval)
         raise ConnectionError(
             f"E2EBridge ({self.host}:{self.port}) に接続できません。"
-            f"アプリ起動と adb forward を確認してください: {last_error}"
+            f"アプリ（またはエディタ再生）の起動、デバイス接続なら adb forward を確認してください: {last_error}"
         )
 
     def close(self) -> None:
