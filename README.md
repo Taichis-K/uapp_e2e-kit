@@ -21,8 +21,12 @@ Claude Code 等の AI エージェントによる自律テスト開発を前提�
   `UAPP_E2E_EDITOR=1` で pytest もそのまま実行可能。adb を使うテストは明示エラーになり誤検証しない）
 - **ジャーニー記録**: テスト実行から画面遷移マップ＋スクリーンショット＋カバレッジの
   自己完結HTMLレポートを自動生成（[docs/07-viewer.md](docs/07-viewer.md)）
-- **AI向けランブック同梱**: [SETUP.md](SETUP.md)（導入手順書）と Claude Code スキル（/e2e-setup /e2e-run
-  /e2e-write-test /e2e-dump）で、AI に「セットアップして」と頼むだけで導入できる
+- **AI向けランブック同梱**: [SETUP.md](SETUP.md)（導入手順書）と e2e-setup / e2e-run / e2e-write-test /
+  e2e-dump の4スキルで、AI に「セットアップして」と頼むだけで導入できる。スキルは **Claude Code**
+  （`.claude/skills/`、`/e2e-run` 等）と **OpenAI Codex CLI v0.94.0+**（`.agents/skills/`、`$e2e-run` 等）の
+  両対応（installer の `-Agents claude|codex|both` で選択、既定 both・後から追加可）
+- **クリーンに外せる**: 同梱の `uapp_e2e\scripts\uninstall.ps1` でアンインストール
+  （既定は設定・自作テストを残して外す＝installer 再実行で復帰。`-Purge` で全削除）
 
 ## 導入方法（2経路）
 
@@ -48,6 +52,7 @@ cd uapp_e2e-kit
 - Android SDK Platform-Tools（adb）。エミュレーター利用時は AVD も
   （**エディタ再生への直結だけで使う場合は adb 不要**）
 - Unity 2022.3 系〜 Unity 6000 系で検証済み
+- AIエージェント（任意・人手運用も可）: Claude Code、または OpenAI Codex CLI v0.94.0 以降
 
 Unity・Android SDK・Python 等は別途用意し、それぞれのライセンス・利用規約に従うこと。
 

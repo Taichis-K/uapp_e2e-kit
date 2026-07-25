@@ -24,4 +24,4 @@ description: 実行中のUnityアプリのUI階層をdumpして見やすく要�
    - 遮られている要素（`hittable: false` + `blockedBy`）→ ブロッカーの解除漏れの兆候
    - テキスト（`text`）、非アクティブ要素、NGUI要素（`ui: "ngui"`）の区別
 4. `NOT_FOUND` や接続エラーの場合: アプリ起動状態・forward設定・ポートを確認
-   （全滅時の解析手順は `/e2e-run` スキルの失敗解析を参照）
+   （全滅時の解析手順は `e2e-run` スキルの失敗解析を参照）

@@ -1,7 +1,8 @@
 # AIループ開発ガイド（導入先プロジェクト用）
 
-AIエージェント（Claude Code）がこの E2E 基盤を使ってアプリを自律開発するための手順書。
-テスト規約の要約は `uapp_e2e/CLAUDE.md`、コマンド詳細は各スキル（`.claude/skills/e2e-*`）にある。
+AIエージェント（Claude Code / Codex 等）がこの E2E 基盤を使ってアプリを自律開発するための手順書。
+テスト規約の要約は `uapp_e2e/CLAUDE.md`、コマンド詳細は各スキル
+（`.claude/skills/e2e-*` および `.agents/skills/e2e-*`。内容は同一）にある。
 
 ## 全体ループ
 
@@ -104,7 +105,7 @@ adb.uninstall(pkg); adb.install(apk)                      # クリーンイン�
 
 ## E2Eテストの書き方（規約）
 
-`/e2e-write-test` スキルの手順に従う。要点:
+`e2e-write-test` スキルの手順に従う。要点:
 
 1. **dump を見てから書く**（推測で書かない）。ジャーニー記録（`Builds/journey/journey.json`）が
    あれば画面・ボタン・カバレッジの**索引**として先に読む。ただし過去のスナップショットなので

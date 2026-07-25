@@ -1,24 +1,43 @@
 # E2EBridge と E2E キット一式を既存の Unity プロジェクトへ導入する。
-# 使い方: .\install-to-project.ps1 -ProjectPath <Unityプロジェクトのパス> [-IncludeSampleTests]
+# 使い方: .\install-to-project.ps1 -ProjectPath <Unityプロジェクトのパス> [-Agents claude|codex|both] [-IncludeSampleTests] [-RootAgentsMd]
 # 実行元は 配布キット（package-kit.ps1 が生成した zip の展開先）/ 開発リポジトリ のどちらでもよい（自動判定）。
+# -Agents: 配置する AI エージェント導線の選択（既定 both）。
+#          claude = .claude\skills + .claude\rules\uapp-e2e.md
+#          codex  = .agents\skills + uapp_e2e\AGENTS.md + ルート AGENTS.md の案内/-RootAgentsMd
+#          再実行すれば後から追加できる（例: claude 導入済みへ -Agents codex）。
+#          既配置分の自動削除はしない（外し方は docs/05 のアンインストール参照）
+# -RootAgentsMd: プロジェクトルートに AGENTS.md（Codex 等向けポインタ）が無い場合のみ新規作成する
+#                （既存の AGENTS.md は変更しない。省略時はスニペット案内のみ。-Agents claude では無効）
 # 導入後の手動手順（パッケージ追加・define付与）は最後に表示される。詳細: docs/05-install-to-project.md
 param(
     [Parameter(Mandatory = $true)][string]$ProjectPath,
-    [switch]$IncludeSampleTests
+    [ValidateSet("claude", "codex", "both")][string]$Agents = "both",
+    [switch]$IncludeSampleTests,
+    [switch]$RootAgentsMd
 )
 
 $ErrorActionPreference = "Stop"
+
+$installClaude = $Agents -in @("claude", "both")
+$installCodex = $Agents -in @("codex", "both")
 
 # キット所有ファイル（=上書き更新の対象）の列挙。改変検知マニフェストとバックアップで共用する。
 # プロジェクト所有（e2e-config.json / conftest.py / 自作テスト / config\local.json / Builds\）は含めない。
 function Get-KitOwnedFiles($target) {
     $kit = Join-Path $target "uapp_e2e"
     $paths = @()
-    foreach ($dir in @((Join-Path $target "Assets\uapp_e2e\E2EBridge"),
-                       (Join-Path $kit "scripts"),
-                       (Join-Path $kit "driver\e2e_driver"),
-                       (Join-Path $kit "docs"),
-                       (Join-Path $target ".claude\skills"))) {
+    # スキルはキットの e2e-* の4つのみ（skills\ 全体を列挙するとユーザーの無関係スキルまで
+    # 「キット所有」として改変検知の警告対象になってしまう。uninstall.ps1 の削除対象とも同期）
+    $skillDirs = @()
+    foreach ($skillsRoot in @(".claude\skills", ".agents\skills")) {
+        foreach ($name in @("e2e-setup", "e2e-run", "e2e-write-test", "e2e-dump")) {
+            $skillDirs += Join-Path $target "$skillsRoot\$name"
+        }
+    }
+    foreach ($dir in (@((Join-Path $target "Assets\uapp_e2e\E2EBridge"),
+                        (Join-Path $kit "scripts"),
+                        (Join-Path $kit "driver\e2e_driver"),
+                        (Join-Path $kit "docs")) + $skillDirs)) {
         if (Test-Path $dir) {
             $paths += Get-ChildItem $dir -Recurse -File | Where-Object { $_.FullName -notmatch "__pycache__" } | ForEach-Object { $_.FullName }
         }
@@ -32,6 +51,7 @@ function Get-KitOwnedFiles($target) {
                      (Join-Path $kit "config\local.sample.json"),
                      (Join-Path $kit "config\e2e-config.sample.json"),
                      (Join-Path $kit "CLAUDE.md"),
+                     (Join-Path $kit "AGENTS.md"),
                      (Join-Path $kit "SETUP.md"),
                      (Join-Path $kit "VERSION"),
                      (Join-Path $target ".claude\rules\uapp-e2e.md"))) {
@@ -57,6 +77,7 @@ if (Test-Path (Join-Path $PSScriptRoot "bridge\E2EBridge")) {
         Doc07       = Join-Path $root "docs\07-viewer.md"
         AiLoop      = Join-Path $root "docs\ai-loop.md"
         ClaudeMd    = Join-Path $root "CLAUDE.md"
+        AgentsMd    = Join-Path $root "AGENTS.md"
         SetupMd     = Join-Path $root "SETUP.md"
         Skills      = Join-Path $root "skills"
         Rules       = Join-Path $root "rules"
@@ -78,6 +99,7 @@ elseif (Test-Path (Join-Path $PSScriptRoot "..\unity-nis\Assets\uapp_e2e\E2EBrid
         Doc07       = Join-Path $root "docs\07-viewer.md"
         AiLoop      = Join-Path $root "kit\docs\ai-loop.md"
         ClaudeMd    = Join-Path $root "kit\CLAUDE.md"
+        AgentsMd    = Join-Path $root "kit\AGENTS.md"
         SetupMd     = Join-Path $root "kit\SETUP.md"
         Skills      = Join-Path $root "kit\skills"
         Rules       = Join-Path $root "kit\rules"
@@ -106,14 +128,28 @@ if (Test-Path $kit) {
     $backupPaths = @(Get-ChildItem $kit -Exclude "Builds" | ForEach-Object { $_.FullName })
     foreach ($p in @((Join-Path $target "Assets\uapp_e2e"),
                      (Join-Path $target ".claude\skills"),
+                     (Join-Path $target ".agents\skills"),
                      (Join-Path $target ".claude\rules\uapp-e2e.md"))) {
         if (Test-Path $p) { $backupPaths += $p }
     }
     if ($backupPaths.Count -gt 0) {
-        # ミリ秒まで含める（同一秒内の連続実行で名前が衝突して Compress-Archive が失敗するため）
+        # ミリ秒まで含める（同一秒内の連続実行で名前が衝突して圧縮が失敗するため）
         $backupZip = Join-Path $kit ("Builds\update-backup-" + (Get-Date -Format "yyyyMMdd-HHmmss-fff") + ".zip")
         New-Item -ItemType Directory -Force (Split-Path $backupZip) | Out-Null
-        Compress-Archive -Path $backupPaths -DestinationPath $backupZip
+        # zip内は導入先ルートからの相対パスを保つ（Compress-Archive に複数パスを直接渡すと
+        # 末端名で格納され .claude\skills と .agents\skills が同名衝突して復元不能になるため、
+        # ステージングへ相対パス付きで複製してからディレクトリごと圧縮する）
+        $backupStage = Join-Path ([System.IO.Path]::GetTempPath()) ("uapp_e2e-backup-" + [System.IO.Path]::GetRandomFileName())
+        try {
+            foreach ($p in $backupPaths) {
+                $dest = Join-Path $backupStage $p.Substring($target.Length + 1)
+                New-Item -ItemType Directory -Force (Split-Path $dest) | Out-Null
+                Copy-Item $p $dest -Recurse
+            }
+            [System.IO.Compression.ZipFile]::CreateFromDirectory($backupStage, $backupZip)
+        } finally {
+            if (Test-Path $backupStage) { Remove-Item $backupStage -Recurse -Force }
+        }
         Write-Host "  [OK] 更新前バックアップ: $backupZip"
     }
 
@@ -125,6 +161,7 @@ if (Test-Path $kit) {
         $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
         $modified = @()
         foreach ($entry in $manifest.PSObject.Properties) {
+            if ($entry.Name -like "__*") { continue }  # ファイルでないメタ記録（__rootAgentsMdByInstaller 等）
             $full = Join-Path $target $entry.Name
             if (-not (Test-Path $full)) { $modified += "$($entry.Name)（削除されている）"; continue }
             if ((Get-FileHash $full -Algorithm SHA256).Hash -ne $entry.Value) { $modified += $entry.Name }
@@ -151,7 +188,7 @@ $kit = Join-Path $target "uapp_e2e"
 foreach ($dir in @("scripts", "config")) {
     New-Item -ItemType Directory -Force (Join-Path $kit $dir) | Out-Null
 }
-foreach ($script in @("build-android.ps1", "run-e2e.ps1", "start-emulator.ps1")) {
+foreach ($script in @("build-android.ps1", "run-e2e.ps1", "start-emulator.ps1", "uninstall.ps1")) {
     Copy-Item (Join-Path $src.Scripts $script) (Join-Path $kit "scripts\$script") -Force
 }
 robocopy (Join-Path $src.Driver "e2e_driver") (Join-Path $kit "driver\e2e_driver") /E /XD __pycache__ /NFL /NDL /NJH /NJS | Out-Null
@@ -190,23 +227,66 @@ Copy-Item $src.Doc05 (Join-Path $kit "docs\05-install-to-project.md") -Force
 Copy-Item $src.Doc07 (Join-Path $kit "docs\07-viewer.md") -Force
 Copy-Item $src.AiLoop (Join-Path $kit "docs\ai-loop.md") -Force
 Copy-Item $src.ClaudeMd (Join-Path $kit "CLAUDE.md") -Force
+if ($installCodex) {
+    Copy-Item $src.AgentsMd (Join-Path $kit "AGENTS.md") -Force
+}
 Copy-Item $src.SetupMd (Join-Path $kit "SETUP.md") -Force
 Copy-Item $src.Version (Join-Path $kit "VERSION") -Force
 $installedVersion = (Get-Content (Join-Path $kit "VERSION") -TotalCount 1).Trim()
-Write-Host "  [OK] uapp_e2e\docs\ + CLAUDE.md（AI向け運用ガイド） + VERSION=$installedVersion"
+Write-Host "  [OK] uapp_e2e\docs\ + CLAUDE.md（AI向け運用ガイド）$(if ($installCodex) { " + AGENTS.md（Codex等向けポインタ）" }) + VERSION=$installedVersion"
 
-# --- 2.6 Claude Code スキル（.claude\skills へ配置） ---
-$skillsDest = Join-Path $target ".claude\skills"
-New-Item -ItemType Directory -Force $skillsDest | Out-Null
-robocopy $src.Skills $skillsDest /E /NFL /NDL /NJH /NJS | Out-Null
-if ($LASTEXITCODE -ge 8) { throw "スキルのコピーに失敗 (robocopy exit=$LASTEXITCODE)" }
-Write-Host "  [OK] .claude\skills\（/e2e-setup /e2e-run /e2e-write-test /e2e-dump）"
+# --- 2.6 AIスキル（Claude Code: .claude\skills / Codex v0.94.0+: .agents\skills。内容は同一） ---
+$skillsDests = @()
+if ($installClaude) { $skillsDests += Join-Path $target ".claude\skills" }
+if ($installCodex) { $skillsDests += Join-Path $target ".agents\skills" }
+foreach ($skillsDest in $skillsDests) {
+    New-Item -ItemType Directory -Force $skillsDest | Out-Null
+    robocopy $src.Skills $skillsDest /E /NFL /NDL /NJH /NJS | Out-Null
+    if ($LASTEXITCODE -ge 8) { throw "スキルのコピーに失敗 (robocopy exit=$LASTEXITCODE): $skillsDest" }
+}
+$skillsLabel = @()
+if ($installClaude) { $skillsLabel += ".claude\skills\" }
+if ($installCodex) { $skillsLabel += ".agents\skills\" }
+Write-Host "  [OK] $($skillsLabel -join " + ")（e2e-setup / e2e-run / e2e-write-test / e2e-dump）"
 
 # --- 2.7 Claude Code ルール（軽量ポインタ。対象プロジェクトの CLAUDE.md は書き換えない） ---
-$rulesDest = Join-Path $target ".claude\rules"
-New-Item -ItemType Directory -Force $rulesDest | Out-Null
-Copy-Item (Join-Path $src.Rules "uapp-e2e.md") (Join-Path $rulesDest "uapp-e2e.md") -Force
-Write-Host "  [OK] .claude\rules\uapp-e2e.md（uapp_e2e\CLAUDE.md への参照ルール）"
+if ($installClaude) {
+    $rulesDest = Join-Path $target ".claude\rules"
+    New-Item -ItemType Directory -Force $rulesDest | Out-Null
+    Copy-Item (Join-Path $src.Rules "uapp-e2e.md") (Join-Path $rulesDest "uapp-e2e.md") -Force
+    Write-Host "  [OK] .claude\rules\uapp-e2e.md（uapp_e2e\CLAUDE.md への参照ルール）"
+}
+
+# --- 2.8 ルート AGENTS.md（Codex 等向けの発見性向上。オプトイン・既存ファイルは絶対に変更しない） ---
+# Codex はルート起動時に uapp_e2e\AGENTS.md を読まない（サブディレクトリ AGENTS.md は
+# そこを CWD にした場合のみ読込）ため、ルートへのポインタ配置が発見性の本命になる。
+# ただしプロジェクト本体への成果物追加なので、既定では作成せず案内のみ。
+if ($RootAgentsMd -and -not $installCodex) {
+    Write-Host "  [SKIP] -RootAgentsMd は -Agents codex/both のときのみ有効（今回は -Agents $Agents のため何もしない）"
+}
+$rootAgentsPath = Join-Path $target "AGENTS.md"
+# この生成内容を変更したら uninstall.ps1 の「未編集判定」の期待値も同期すること
+$rootAgentsSnippet = @"
+## uapp_e2e（E2Eテスト基盤・導入済み）
+
+E2Eテストの作成・実行・デバッグ、計装SDK（``Assets/uapp_e2e/E2EBridge/``）、
+エミュレーター/エディタ再生への接続に関わる作業を始める前に、必ず
+``uapp_e2e/CLAUDE.md``（エージェント共通の規約・コマンド・失敗解析手順）を読むこと。
+セットアップ・修復の入口は ``uapp_e2e/SETUP.md``。
+定型作業は ``.agents/skills/e2e-*`` スキル（setup / run / write-test / dump）にある。
+"@
+$rootAgentsExists = Test-Path $rootAgentsPath
+$rootAgentsCreated = $false
+if ($installCodex -and $RootAgentsMd -and -not $rootAgentsExists) {
+    # BOM付きUTF-8で直接書く（Set-Content の -Encoding utf8BOM は PowerShell 5.1 に無く、
+    # UTF8 指定は 5.1=BOM付き/7=BOMなし と挙動が割れるため、バージョン非依存の .NET API を使う）
+    [System.IO.File]::WriteAllText($rootAgentsPath, ("# AGENTS.md`r`n`r`n" + $rootAgentsSnippet + "`r`n"),
+        (New-Object System.Text.UTF8Encoding $true))
+    $rootAgentsCreated = $true
+    Write-Host "  [OK] AGENTS.md（ルートに新規作成。Codex 等がルート起動時に E2E 導線を発見できる）"
+} elseif ($installCodex -and $RootAgentsMd -and $rootAgentsExists) {
+    Write-Host "  [SKIP] AGENTS.md（既存を維持。自動追記はしない — uapp_e2e への言及が無ければ末尾のスニペットを手動統合）"
+}
 
 # --- 3. e2e-config.json（無ければテンプレから生成） ---
 $configDest = Join-Path $kit "e2e-config.json"
@@ -219,12 +299,22 @@ if (-not $configExisted) {
 }
 
 # --- 4. 改変検知用マニフェスト（今回導入したキット所有ファイルのハッシュ）を記録 ---
+# ルート AGENTS.md を「installer が作成した」記録も残す（uninstall -Purge が削除してよいかの
+# 判定に使う。ユーザーが元々置いていた同内容ファイルを誤って消さないため）。再実行時は引き継ぐ
+$manifestPath = Join-Path $kit "kit-manifest.json"
+$prevRootAgentsMarker = $false
+if (-not $rootAgentsCreated -and (Test-Path $manifestPath)) {
+    try { $prevRootAgentsMarker = [bool]((Get-Content $manifestPath -Raw | ConvertFrom-Json)."__rootAgentsMdByInstaller") } catch {}
+}
 $manifestEntries = [ordered]@{}
+if (($rootAgentsCreated -or $prevRootAgentsMarker) -and (Test-Path $rootAgentsPath)) {
+    $manifestEntries["__rootAgentsMdByInstaller"] = $true
+}
 foreach ($f in (Get-KitOwnedFiles $target | Sort-Object)) {
     $rel = $f.Substring($target.Length + 1)
     $manifestEntries[$rel] = (Get-FileHash $f -Algorithm SHA256).Hash
 }
-$manifestEntries | ConvertTo-Json | Set-Content (Join-Path $kit "kit-manifest.json") -Encoding utf8
+$manifestEntries | ConvertTo-Json | Set-Content $manifestPath -Encoding utf8
 Write-Host "  [OK] uapp_e2e\kit-manifest.json（次回更新時のローカル改変検知用）"
 
 # --- 5. 残りの手動手順の表示（検出できる項目は導入状況を照合して [済]/[未] を付ける） ---
@@ -291,5 +381,25 @@ Write-Host "3. $(Mark $defineFound) テスト用ビルドに UAPP_E2E_BRIDGE def
 Write-Host "     自前ビルドスクリプト側で付与する構成は ProjectSettings に現れないため [未] 表示のままでよい）"
 Write-Host "4. $(Mark $localJsonDone) uapp_e2e\config\local.sample.json を local.json にコピーして各自の環境を記入"
 Write-Host "5. $(Mark $gitignoreDone) .gitignore に追加: uapp_e2e/config/local.json, uapp_e2e/Builds/"
-Write-Host "（AI向け規約は .claude\rules\uapp-e2e.md 経由で自動参照される。CLAUDE.md の書き換えは不要）"
+if ($installClaude) {
+    Write-Host "（AI向け規約は .claude\rules\uapp-e2e.md 経由で自動参照される。CLAUDE.md の書き換えは不要）"
+}
+if ($installCodex) {
+    Write-Host ""
+    Write-Host "=== Codex（OpenAI Codex CLI v0.94.0 以降）で使う場合 ==="
+    Write-Host "スキルは .agents\skills\ に配置済み: `$e2e-setup / `$e2e-run / `$e2e-write-test / `$e2e-dump（/skills で一覧確認）"
+    if (-not (Test-Path $rootAgentsPath)) {
+        Write-Host "ルートに AGENTS.md が無いため、Codex のルート起動では E2E 導線が自動読込されません。"
+        Write-Host "  -RootAgentsMd を付けて再実行するとポインタを新規作成します（既存プロジェクトファイルは変更しない）"
+    } elseif (-not ((Get-Content $rootAgentsPath -Raw) -match 'uapp_e2e')) {
+        Write-Host "既存の AGENTS.md に uapp_e2e への言及がありません。以下のスニペットの統合を検討してください（自動追記はしない）:"
+        Write-Host $rootAgentsSnippet
+    }
+}
+if ($Agents -ne "both") {
+    Write-Host ""
+    Write-Host "（-Agents $Agents で導入。もう一方のエージェント導線は後から -Agents $(if ($Agents -eq "claude") { "codex" } else { "claude" }) の再実行で追加できる）"
+}
+Write-Host ""
+Write-Host "外すとき: uapp_e2e\scripts\uninstall.ps1（既定=設定・自作テストは残す / -Purge=全消し。詳細: docs\05）"
 exit 0  # robocopy の成功コード(1〜7)を漏らさない

@@ -3,8 +3,10 @@
 このフォルダは Unity 製 Android アプリの E2E テスト基盤キット。
 計装SDK（`Assets/uapp_e2e/E2EBridge/`、`UAPP_E2E_BRIDGE` define 時のみ有効）と、
 Pythonドライバ・実行スクリプト一式で構成される。
-**`.claude/rules/uapp-e2e.md`（導入時に配置される軽量ルール）から参照される。
-プロジェクト本体の CLAUDE.md を書き換える必要はない。**
+**このファイルはエージェント共通の運用ガイド**（ファイル名は歴史的経緯で、内容は Claude 専用ではない）。
+Claude Code は `.claude/rules/uapp-e2e.md`（導入時に配置される軽量ルール）から、
+Codex 等は `uapp_e2e/AGENTS.md`（同）から参照される。
+プロジェクト本体の CLAUDE.md を書き換える必要はない。
 
 ## よく使うコマンド（このフォルダ＝uapp_e2e/ から実行）
 
@@ -27,6 +29,8 @@ $env:UAPP_E2E_EDITOR = "1"; pytest tests; Remove-Item Env:\UAPP_E2E_EDITOR
 
 対象は adb を直接使わないテストのみ（logcat アサート・adb タップ入りのテストは
 エディタ直結モードでは明示エラーになる → `-k` で除外する）。
+サンドボックス環境（Codex 等）で pytest がハング/失敗するときは、一時領域がワークスペース外の
+`%TEMP%` に作られ拒否されるのが典型原因 → `--basetemp ..\Builds\pytest-tmp` を付ける（gitignore 済み領域）。
 
 UI階層の確認（**テストを書く前に必ず実物を見る**。例はエディタ再生向け。
 デバイスは forward 済みホスト側ポートを `BridgeClient(port=<config\local.json の bridgePort>)` で明示する）:
@@ -87,12 +91,16 @@ python -m e2e_driver.journey ..\Builds\journey    # → report.html 生成（詳
 
 ## スキル
 
-導入時に `.claude/skills/` へ以下が配置されている（スラッシュコマンドで呼び出し可能）:
+導入時に同一内容が `.claude/skills/`（Claude Code）と `.agents/skills/`（Codex CLI v0.94.0 以降）へ
+配置されている（installer の `-Agents claude|codex|both` 指定に応じて片方のみの場合もある。
+足りない側は installer を該当値で再実行すれば追加できる）。
+呼び出しは Claude Code が `/e2e-setup` 等のスラッシュコマンド、
+Codex が `$e2e-setup` 等の `$` 言及（または `/skills` から選択）:
 
-- `/e2e-setup` — 環境セットアップ・修復（`SETUP.md` ランブックを実行）
-- `/e2e-run` — E2E実行＋失敗解析ループ（証跡の読み方の手順込み）
-- `/e2e-write-test` — 規約に沿ったE2Eテストの新規作成（dumpを見てから書く手順）
-- `/e2e-dump` — 実行中アプリのUI階層取得と要約
+- `e2e-setup` — 環境セットアップ・修復（`SETUP.md` ランブックを実行）
+- `e2e-run` — E2E実行＋失敗解析ループ（証跡の読み方の手順込み）
+- `e2e-write-test` — 規約に沿ったE2Eテストの新規作成（dumpを見てから書く手順）
+- `e2e-dump` — 実行中アプリのUI階層取得と要約
 
 セットアップが未完了・壊れている場合は [SETUP.md](SETUP.md) が入口。
 

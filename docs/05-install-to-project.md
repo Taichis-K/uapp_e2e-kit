@@ -21,18 +21,25 @@
 | UIフレームワーク | uGUI / NGUI（自動検出・リフレクション対応。混在可） |
 | 入力 | New Input System または Both（レガシーInputのみのアプリは Both へ変更が必要。既存挙動は変わらない） |
 | 追加パッケージ | `com.unity.inputsystem`、`com.unity.nuget.newtonsoft-json`（ともに無料の公式パッケージ） |
+| PowerShell | **PowerShell 7（pwsh）以降**。Windows 標準の Windows PowerShell 5.1 は非対応（キットのスクリプトは BOM なし UTF-8 のため 5.1 では日本語が誤解釈され動作しない） |
+| AIエージェント | Claude Code、または OpenAI Codex CLI v0.94.0 以降（任意。人手運用も可） |
 
 ## 導入後の配置（標準レイアウト）
 
-プロジェクト直下に増えるのは `Assets/uapp_e2e/` と `uapp_e2e/` の2箇所のみ（名前空間で完結）。
+プロジェクト本体のコードに混ざるのは `Assets/uapp_e2e/` と `uapp_e2e/` の2箇所のみ（名前空間で完結）。
+ほかに AI エージェント導線として `.claude/`・`.agents/`（`-Agents` で選択、既定 both）と、
+オプトインの ルート `AGENTS.md`（`-RootAgentsMd` 指定時のみ）が増える。
 
 ```
 <Unityプロジェクト>/
 ├── Assets/uapp_e2e/E2EBridge/   計装SDK（UAPP_E2E_BRIDGE define時のみコンパイル）
-├── .claude/skills/              Claude Code用スキル（/e2e-setup /e2e-run /e2e-write-test /e2e-dump）
-├── .claude/rules/uapp-e2e.md    軽量ルール（uapp_e2e/CLAUDE.md への参照。本体CLAUDE.mdの書き換え不要）
+├── .claude/skills/              Claude Code用スキル（/e2e-setup /e2e-run /e2e-write-test /e2e-dump）※-Agents claude/both
+├── .agents/skills/              Codex用スキル（同一内容。$e2e-setup 等で呼び出し。Codex CLI v0.94.0以降）※-Agents codex/both
+├── .claude/rules/uapp-e2e.md    軽量ルール（uapp_e2e/CLAUDE.md への参照。本体CLAUDE.mdの書き換え不要）※-Agents claude/both
+├── AGENTS.md                    （任意・-RootAgentsMd 指定時のみ新規作成。既存があれば一切変更しない）
 └── uapp_e2e/                    E2Eキット（git管理。ただし下記gitignore対象を除く）
-    ├── CLAUDE.md                AI向け運用ガイド（プロジェクトのCLAUDE.mdから @uapp_e2e/CLAUDE.md で参照）
+    ├── CLAUDE.md                AI向け運用ガイド（エージェント共通。プロジェクトのCLAUDE.mdから @uapp_e2e/CLAUDE.md で参照）
+    ├── AGENTS.md                Codex等向けポインタ（uapp_e2e/ をCWDに起動した場合に読まれる）※-Agents codex/both
     ├── e2e-config.json          プロジェクト仕様（git管理）
     ├── docs/                    プロトコル仕様・AI運用・導入マニュアル
     ├── scripts/                 build-android / run-e2e / start-emulator
@@ -53,6 +60,17 @@ Claude Code に次のように依頼するだけでよい（キットの取得�
 セットアップ後は `/e2e-setup` スキルとして再実行・修復も可能。
 以下は同じ内容を人間が手動で行う場合の手順。
 
+### Codex（OpenAI Codex CLI）で使う場合
+
+- 対応バージョン: **Codex CLI v0.94.0 以降**（プロジェクト同梱スキル `.agents/skills` の探索に対応した版）
+- スキルは導入時に `.agents/skills/` へ配置済み（`-Agents claude` で導入済みの環境は
+  `-Agents codex` で installer を再実行すると追加される）。`$e2e-setup` のような `$` 言及、
+  または `/skills` からの選択で呼び出す（SKILL.md の形式は Claude Code と共通のため、内容は `.claude/skills/` と同一）
+- Codex はルート起動時に `uapp_e2e/AGENTS.md` を自動では読まない（サブディレクトリの AGENTS.md は
+  そこを CWD にした場合のみ読込）。ルートに `AGENTS.md` が無いプロジェクトは installer の
+  `-RootAgentsMd` でポインタを新規作成すると、規約・失敗解析手順への導線がルート起動でも効く。
+  既存の `AGENTS.md` があるプロジェクトでは installer が統合用スニペットを表示するので手動で統合する
+
 ## 手順（手動）
 
 ### 1. キットのコピー（自動）
@@ -65,8 +83,25 @@ Claude Code に次のように依頼するだけでよい（キットの取得�
 
 （installer はキット展開先・開発リポジトリのどちらのレイアウトからでも実行でき、同じ結果になる）
 
-`Assets\uapp_e2e\E2EBridge`・`uapp_e2e\`一式（scripts / driver / docs / CLAUDE.md / e2e-config.json テンプレ）が配置される。
-サンプルテストも参考に欲しい場合は `-IncludeSampleTests` を付ける。
+`Assets\uapp_e2e\E2EBridge`・`uapp_e2e\`一式（scripts / driver / docs / CLAUDE.md / e2e-config.json テンプレ）と
+AIエージェント導線が配置される。サンプルテストも参考に欲しい場合は `-IncludeSampleTests` を付ける。
+
+**AIエージェント導線は `-Agents` で選択できる**（既定 `both`。E2EBridge・driver・docs 等の共通部は選択に関係なく常に配置）:
+
+| 指定 | 配置されるもの |
+|---|---|
+| `-Agents claude` | `.claude/skills/` + `.claude/rules/uapp-e2e.md` |
+| `-Agents codex` | `.agents/skills/` + `uapp_e2e/AGENTS.md` + ルート `AGENTS.md` の案内/`-RootAgentsMd` |
+| `-Agents both`（既定） | 上記すべて |
+
+- **後から追加できる**: installer は再実行安全なので、`claude` で導入済みの環境に `-Agents codex` で
+  再実行すれば codex 分だけ追加される（逆も同様）
+- **自動削除はしない**: `both` で入れた後に `-Agents claude` で再実行しても `.agents/` は消えない。
+  外し方は本書のアンインストール手順を参照
+
+Codex ユーザーでルートに `AGENTS.md` が無い場合は `-RootAgentsMd` を付けると発見用ポインタを新規作成する
+（既存の `AGENTS.md` は上書き・追記とも行わない。統合スニペットは installer が末尾に表示する。
+`-Agents claude` 指定時は無効）。
 
 ### 2. パッケージ追加
 
@@ -177,14 +212,17 @@ AVDとエディタ、複数エディタの同時運用のポート設計は [doc
 
 **更新前のバックアップ:**
 
-- インストーラーが既導入を検知すると、**上書き対象（キット所有領域）を自動で
-  `uapp_e2e/Builds/update-backup-<日時>.zip` に退避**してから更新する（`Builds/` 自体は対象外なので含まれない）
+- インストーラーが既導入を検知すると、**キット関連領域を丸ごと自動で
+  `uapp_e2e/Builds/update-backup-<日時>.zip` に退避**してから更新する（`Builds/` 自体は対象外なので含まれない。
+  退避範囲は上書き対象より広く、`e2e-config.json`・自作テスト・`local.json` 等のプロジェクト所有物や
+  `.claude/skills/`・`.agents/skills/` 全体も含む＝更新直前の復元点として使える安全側の設計）
 - 加えて **VCS の作業ツリーをクリーンにしてから更新する**ことを推奨（更新差分をレビュー・巻き戻しできる）
 - **VCS 管理外のファイルは自分で守る**: `uapp_e2e/config/local.json`（環境設定）と
   `uapp_e2e/Builds/`（ジャーニー記録・ビルド成果物）。どちらもインストーラーは触らないが、
   重要なら別途コピーしておく
-- キット所有領域（下表）に独自改変を入れている場合は、更新で消える。バックアップzipから差分を回収し、
-  恒久化したい変更はキット側へ還元すること
+- キット所有領域（下表）の**既存ファイルに独自改変**を入れている場合は、更新の上書きで消える。
+  バックアップzipから差分を回収し、恒久化したい変更はキット側へ還元すること
+  （キット所有ディレクトリに**追加**した独自ファイルは、上書きコピーのため削除はされず残る）
 - **ローカル改変は自動検知される**: インストーラーは導入時に `uapp_e2e/kit-manifest.json`
   （キット所有ファイルのハッシュ）を記録し、次回更新時に照合して「前回導入後に改変された
   キット所有ファイル」（例: 導入先AIが独自改修した viewer.html）を **[警告] として列挙**する。
@@ -194,8 +232,8 @@ AVDとエディタ、複数エディタの同時運用のポート設計は [doc
 
 | 区分 | 対象 | 更新時の挙動 |
 |---|---|---|
-| **キット所有** | `Assets/uapp_e2e/E2EBridge/`・`uapp_e2e/driver/e2e_driver/`・`uapp_e2e/scripts/`・`uapp_e2e/docs/`・`uapp_e2e/CLAUDE.md`/`SETUP.md`/`VERSION`・`.claude/skills/`・`.claude/rules/uapp-e2e.md`・`uapp_e2e/driver/tests/test_journey_unit.py`/`test_adb_ui.py`/`test_client_unit.py` | **上書き更新**（手を入れない前提。変更したい場合はキット側へ還元する） |
-| **プロジェクト所有** | `uapp_e2e/e2e-config.json`・`uapp_e2e/driver/tests/` の自作テスト・`uapp_e2e/config/local.json`・`uapp_e2e/Builds/`（ジャーニー記録含む） | **触らない** |
+| **キット所有** | `Assets/uapp_e2e/E2EBridge/`・`uapp_e2e/driver/e2e_driver/`・`uapp_e2e/scripts/`・`uapp_e2e/docs/`・`uapp_e2e/CLAUDE.md`/`AGENTS.md`/`SETUP.md`/`VERSION`・`.claude/skills/e2e-*`・`.agents/skills/e2e-*`・`.claude/rules/uapp-e2e.md`・`uapp_e2e/driver/tests/test_journey_unit.py`/`test_adb_ui.py`/`test_client_unit.py` | **上書き更新**（手を入れない前提。変更したい場合はキット側へ還元する） |
+| **プロジェクト所有** | `uapp_e2e/e2e-config.json`・`uapp_e2e/driver/tests/` の自作テスト・`uapp_e2e/config/local.json`・`uapp_e2e/Builds/`（ジャーニー記録含む）・ルート `AGENTS.md`（`-RootAgentsMd` で作成した場合も以後は触らない） | **触らない** |
 | **初回のみ生成** | `uapp_e2e/driver/tests/conftest.py`（キット取り込みの1行＋プロジェクト追記領域） | 既存があれば**保持**（フィクスチャの実体は `e2e_driver` パッケージ側にあるため、conftest を更新しなくてもキットの新機能が届く） |
 
 更新後の確認（AI向けランブック）:
@@ -212,9 +250,24 @@ AVDとエディタ、複数エディタの同時運用のポート設計は [doc
 
 ## アンインストール
 
-1. `Assets/uapp_e2e/`（+ .meta）と `uapp_e2e/` を削除
-2. Scripting Define Symbols から `UAPP_E2E_BRIDGE` を除去
-3. 追加したパッケージが他で不要なら manifest から削除
+導入時に配置される `uapp_e2e\scripts\uninstall.ps1` を実行する:
+
+```powershell
+.\uapp_e2e\scripts\uninstall.ps1           # キット所有のみ削除（設定・自作テスト・記録は残す）
+.\uapp_e2e\scripts\uninstall.ps1 -Purge    # uapp_e2e\ 全体も削除（ジャーニー記録・バックアップ含む）
+```
+
+- **既定**は `Assets/uapp_e2e/`（+ .meta）・`uapp_e2e/` のキット所有部分・`.claude/skills/e2e-*`・
+  `.agents/skills/e2e-*`・`.claude/rules/uapp-e2e.md` を削除し、プロジェクト所有物
+  （`e2e-config.json`・自作テスト・`conftest.py`・`config/local.json`・`Builds/`）は残す。
+  **installer を再実行すれば設定ごと復帰する**ので、試用のやり直しや導入試験の繰り返しに使える
+- **`-Purge`** は `uapp_e2e/` を丸ごと削除。ルート `AGENTS.md` は「installer が作成した記録
+  （kit-manifest.json のメタ記録）があり、かつ生成時から未編集」の場合に限り削除する
+  （1文字でも編集されていれば触らない。ユーザーが元々置いていた同内容のファイルも記録が無いため触らない）
+- 他のスキル・ルール（e2e-* 以外）には触らない。空になった `.claude/`・`.agents/` は畳む
+- 以下は自動では戻さない（実行後に案内が表示される）:
+  1. Scripting Define Symbols の `UAPP_E2E_BRIDGE` 除去（検出状態を表示）
+  2. 追加したパッケージが他で不要なら manifest から削除
 
 ## 制約・注意
 
