@@ -19,6 +19,13 @@ Claude Code 等の AI エージェントによる自律テスト開発を前提�
 - **エディタ再生に直結する高速ループ**: エディタで Play 中のアプリへ、ビルド・デバイス・adb なしで
   直接接続できる（`BridgeClient()` が `e2e-config.json` の `editorBridgePort` を自動解決。
   `UAPP_E2E_EDITOR=1` で pytest もそのまま実行可能。adb を使うテストは明示エラーになり誤検証しない）
+- **人手ゼロのエディタE2E**: [Unity CLI](https://docs.unity.com/en-us/unity-cli) を入れておくと
+  `run-e2e.ps1 -Editor` の1コマンドで「エディタ起動 → シーンを開く → Game view 解像度設定 → Play →
+  pytest → Play 終了」まで自動実行（コールドスタート約60秒。Unity 6 以降）。
+  他タスクが Play 中なら中断し、未保存シーンは保護する
+- **内側ループ（C#テスト）も1コマンド**: `run-unity-tests.ps1` で EditMode/PlayMode テストを実行し、
+  失敗したテスト名・メッセージ・該当行を要約表示する（Unity CLI が無ければ Unity 本体の
+  batchmode へ自動フォールバック）
 - **ジャーニー記録**: テスト実行から画面遷移マップ＋スクリーンショット＋カバレッジの
   自己完結HTMLレポートを自動生成（[docs/07-viewer.md](docs/07-viewer.md)）
 - **AI向けランブック同梱**: [SETUP.md](SETUP.md)（導入手順書）と e2e-setup / e2e-run / e2e-write-test /
@@ -53,6 +60,9 @@ cd uapp_e2e-kit
   （**エディタ再生への直結だけで使う場合は adb 不要**）
 - Unity 2022.3 系〜 Unity 6000 系で検証済み
 - AIエージェント（任意・人手運用も可）: Claude Code、または OpenAI Codex CLI v0.94.0 以降
+- [Unity CLI](https://docs.unity.com/en-us/unity-cli)（任意）: `run-e2e.ps1 -Editor`（エディタ直結E2Eの
+  自動化）に必要。**Unity 6 以降**が対象（`com.unity.pipeline` の要件）。
+  `run-unity-tests.ps1` は Unity CLI が無くても動く（batchmode へ自動フォールバック）
 
 Unity・Android SDK・Python 等は別途用意し、それぞれのライセンス・利用規約に従うこと。
 

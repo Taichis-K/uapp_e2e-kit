@@ -96,6 +96,17 @@ Codex ユーザーでルート `AGENTS.md` が無いプロジェクトは `-Root
 
 #### 5a. エディタ再生で疎通（数分・デバイス/adb 不要）
 
+**Unity CLI（v1.0.0-beta.3+）がインストール済みで対象が Unity 6 以降なら、1コマンドで完結する**
+（シーンオープン→Game view解像度設定→Play開始→pytest→Play終了まで全自動。人手でのPlay操作は不要）:
+
+```powershell
+.\uapp_e2e\scripts\run-e2e.ps1 -Editor
+# adb を使うテストがある場合は除外: -PytestArgs "--deselect tests/xxx.py::test_yyy"
+```
+
+エディタが別タスクで Play 中の場合は明示エラーで停止する（排他ガード）。
+Unity CLI が無い / Unity 6 未満の場合は以下の手動手順で行う。
+
 1. コンパイル確認: 対象バージョンの Unity でバッチ起動し `error CS` が無いこと
 2. エディタでも `UAPP_E2E_BRIDGE` define が有効なことを確認して Play
    （define をビルドスクリプトでのみ付与する構成では、一時的に Player Settings の

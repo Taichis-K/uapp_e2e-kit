@@ -188,7 +188,7 @@ $kit = Join-Path $target "uapp_e2e"
 foreach ($dir in @("scripts", "config")) {
     New-Item -ItemType Directory -Force (Join-Path $kit $dir) | Out-Null
 }
-foreach ($script in @("build-android.ps1", "run-e2e.ps1", "start-emulator.ps1", "uninstall.ps1")) {
+foreach ($script in @("build-android.ps1", "run-e2e.ps1", "run-unity-tests.ps1", "start-emulator.ps1", "uninstall.ps1")) {
     Copy-Item (Join-Path $src.Scripts $script) (Join-Path $kit "scripts\$script") -Force
 }
 robocopy (Join-Path $src.Driver "e2e_driver") (Join-Path $kit "driver\e2e_driver") /E /XD __pycache__ /NFL /NDL /NJH /NJS | Out-Null

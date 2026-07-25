@@ -10,6 +10,15 @@ description: UnityアプリのE2Eテストを実行し、失敗時は証跡（lo
 
 ## 手順
 
+0. **内側ループで足りるか判断**: 変更がロジック（入力・描画に依存しない計算や状態遷移）なら
+   `uapp_e2e\scripts\run-unity-tests.ps1 -Mode EditMode`（数分・ビルド不要）で先に検証する。
+   E2E は導線・入力・描画の確認に絞る（詳細 `docs/ai-loop.md`）
+0.5 **エディタ直結で足りるか判断**（導線・UI操作の検証で、adb を直接使うテストが対象外なら最速）:
+   Unity CLI がインストール済み かつ 対象が Unity 6 以降なら
+   `uapp_e2e\scripts\run-e2e.ps1 -Editor` の1コマンドで シーン→解像度→Play→pytest→Play終了 まで全自動
+   （ビルド・デバイス・adb 不要。adb を使うテストは `-PytestArgs "--deselect <nodeid>"` で除外。
+   「既に Play 中」エラーは他タスクが使用中＝奪わずに待つか調整する）。
+   実機依存（logcat アサート・adb タップ・実機描画）の検証は以下のデバイス実行で行う
 1. エミュレーター確認・起動: `uapp_e2e\scripts\start-emulator.ps1`（起動済みならスキップされる）
 2. 計装ビルドが必要か判断:
    - `Assets/` や計装対象コードを変更した → `uapp_e2e\scripts\build-android.ps1`（十数分かかる）

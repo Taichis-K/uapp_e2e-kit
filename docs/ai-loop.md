@@ -4,6 +4,10 @@ AIエージェント（Claude Code / Codex 等）がこの E2E 基盤を使っ�
 テスト規約の要約は `uapp_e2e/CLAUDE.md`、コマンド詳細は各スキル
 （`.claude/skills/e2e-*` および `.agents/skills/e2e-*`。内容は同一）にある。
 
+**最速の検証ループはエディタ直結**: Unity CLI＋Unity 6 以降なら `scripts/run-e2e.ps1 -Editor` が
+シーン→Game view解像度→Play→pytest→Play終了まで全自動（ビルド・デバイス・adb 不要）。
+実機依存の検証（logcat・adbタップ・実機描画）だけデバイス実行に回す。
+
 ## 全体ループ
 
 ```mermaid
@@ -22,17 +26,24 @@ Android ビルドは1回十数分かかるため、③を回す頻度が高い�
 
 ## 内側ループ（エディタ内テスト・ビルド不要）
 
-プロジェクトの Unity バージョンのエディタで実行する（エディタパスは
-`uapp_e2e/config/local.json` の editorRoots ＋ `ProjectSettings/ProjectVersion.txt` から解決）:
-
 ```powershell
-& "<Unityエディタのパス>" -batchmode -projectPath "<プロジェクトパス>" `
-  -runTests -testPlatform EditMode `
-  -testResults "uapp_e2e\Builds\results.xml" -logFile "uapp_e2e\Builds\test.log"
+.\uapp_e2e\scripts\run-unity-tests.ps1 -Mode EditMode
+.\uapp_e2e\scripts\run-unity-tests.ps1 -Mode PlayMode -Filter <テスト名の一部>
 ```
 
-- 結果は NUnit XML。PlayMode テストは `-testPlatform PlayMode`
-- `-runTests` 時は `-quit` を付けないこと
+- Unity CLI があればそれを、無ければ Unity 本体の `-batchmode -runTests` を自動で使う
+  （エディタは `uapp_e2e/config/local.json` の editorRoots ＋ `ProjectVersion.txt` から解決）
+- 結果は NUnit XML。**失敗テスト名・メッセージ・スタック先頭が要約表示される**ので、そこから修正対象へ直行する
+- 終了ハング対策に `-TimeoutSeconds`（既定1800）で強制終了し、出力済みの結果XMLで判定する
+- EditMode は既定で `-nographics`（グラフィックス初期化と USB スキャンを避ける。実行が数割速くなる）。
+  描画が要る PlayMode は既定 OFF。明示指定は `-NoGraphics:$true` / `-NoGraphics:$false`（値が必須）
+- ログは `Builds/test-<project>-<mode>.log` に確保される（既定の Editor.log は複数 Unity 同時実行で
+  競合し、後発の実行がログを残せないことがあるため）
+- **既知の制限**: Unity 2022.3 系では EditMode テストが完了しない事象を実測している（原因未特定。
+  アセットインポートもライセンスも正常だが、テスト実行フェーズに入らないままタイムアウトする）。
+  その場合は内側ループを諦め、E2E（外側ループ）で検証する
+- テストが 0 件と警告が出たら、テストアセンブリ（`.asmdef` に `UnityEngine.TestRunner` /
+  `nunit.framework.dll` 参照、`UNITY_INCLUDE_TESTS` 制約）と `-Filter` を確認する
 - プロジェクトにテストアセンブリが無い場合、ロジックテストの新設はアプリ側の
   ビルド構成に影響するため、導入はユーザーに提案・確認してから行う
 

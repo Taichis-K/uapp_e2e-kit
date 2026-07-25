@@ -15,6 +15,9 @@ Codex 等は `uapp_e2e/AGENTS.md`（同）から参照される。
 .\scripts\build-android.ps1                   # 計装入りビルド（プロジェクト自動検出）
 .\scripts\run-e2e.ps1                         # install→起動→forward→pytest 一括
 .\scripts\run-e2e.ps1 -SkipInstall -PytestArgs "-k xxx"   # 部分実行
+.\scripts\run-e2e.ps1 -Editor                 # エディタ直結E2E（Unity CLI＋Unity 6以降。ビルド/デバイス/adb不要・
+                                              # シーン→解像度→Play→pytest→Play終了まで全自動。既にPlay中なら明示エラー）
+.\scripts\run-unity-tests.ps1 -Mode EditMode  # 内側ループ（C#のEditMode/PlayModeテスト。失敗は要約表示）
 ```
 
 複数ターゲット同時: `-DeviceSerial emulator-5556 -HostPort 13335` のように分離する。
