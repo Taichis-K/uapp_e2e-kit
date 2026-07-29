@@ -16,13 +16,21 @@ Claude Code 等の AI エージェントによる自律テスト開発を前提�
 - **uGUI / NGUI 両対応**、Input System・レガシー Input 両対応（`e2e-config.json` の `uiType` で切替）
 - **タップ・ドラッグ・ピンチ・複数ポインタの同時操作**（press/release）のジェスチャ注入、
   `wait_until_*` による待機（sleep に頼らない）
+- **UI を経由しない入力にも対応**（v0.1.4）: キーボード・マウス・ゲームパッドを直接注入できる。
+  「キーが押された」「パッドのボタンが押された」を自前で読んでいるゲームコードも E2E から操作できる。
+  注入先は専用の仮想デバイスなので、**PC に接続された実機のパッドと混ざらない**
+  （`input_devices` で接続状況を確認できる）
 - **エディタ再生に直結する高速ループ**: エディタで Play 中のアプリへ、ビルド・デバイス・adb なしで
   直接接続できる（`BridgeClient()` が `e2e-config.json` の `editorBridgePort` を自動解決。
   `UAPP_E2E_EDITOR=1` で pytest もそのまま実行可能。adb を使うテストは明示エラーになり誤検証しない）
 - **人手ゼロのエディタE2E**: [Unity CLI](https://docs.unity.com/en-us/unity-cli) を入れておくと
   `run-e2e.ps1 -Editor` の1コマンドで「エディタ起動 → シーンを開く → Game view 解像度設定 → Play →
   pytest → Play 終了」まで自動実行（コールドスタート約60秒。Unity 6 以降）。
-  他タスクが Play 中なら中断し、未保存シーンは保護する
+  他タスクが Play 中なら中断し、未保存シーンは保護する。
+  **エディタ直結でもスクリーンショットを残す**（ジャーニーの画面画像・失敗時の証跡。v0.1.4）
+- **Android を使わない運用にも対応**（v0.1.4）: `install-to-project.ps1 -Mode editor` で、
+  エディタ直結E2Eだけで回す構成として導入できる（`package` / `activity` / AVD を必須扱いにしない。
+  `UAPP_E2E_BRIDGE` define の確認も、Build Settings で選んでいるプラットフォームに合わせて判定する）
 - **内側ループ（C#テスト）も1コマンド**: `run-unity-tests.ps1` で EditMode/PlayMode テストを実行し、
   失敗したテスト名・メッセージ・該当行を要約表示する（Unity CLI が無ければ Unity 本体の
   batchmode へ自動フォールバック）

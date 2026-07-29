@@ -23,6 +23,85 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+function Get-DeviceFreeBytes {
+    <#
+      .SYNOPSIS
+      デバイスの /data の空き容量（バイト）。取得できなければ 0。
+    #>
+    param([string[]]$AdbTarget = @())
+    try {
+        # df の 1K ブロック表示から Available 列を取る（-h だと単位付きで解析が面倒）
+        $line = (adb @AdbTarget shell df /data 2>$null | Select-Object -Last 1)
+        $columns = ($line -split '\s+') | Where-Object { $_ }
+        # Filesystem 1K-blocks Used Available Use% Mounted → 4 列目が Available
+        if ($columns.Count -ge 4 -and $columns[3] -match '^\d+$') { return [long]$columns[3] * 1024 }
+    } catch { }
+    return 0
+}
+
+function Format-InstallFailure {
+    <#
+      .SYNOPSIS
+      adb install の失敗を「何が起きて、どう直すか」に翻訳する。
+
+      .NOTES
+      生の Failure[...] だけだと、呼び出し元（verify-all 等）の要約では「テスト失敗」に見え、
+      コードの回帰を疑って時間を溶かす（2026-07-29 に実際に踏んだ）。
+    #>
+    param([string]$Output, [int]$ExitCode, [string]$Apk, [string]$Package, [long]$FreeBytes = 0)
+
+    $apkMb = [math]::Round((Get-Item $Apk).Length / 1MB)
+    $freeMb = if ($FreeBytes -gt 0) { [math]::Round($FreeBytes / 1MB) } else { $null }
+    $hint = switch -Regex ($Output) {
+        # 文言は Android の版で違う（INSTALL_FAILED_INSUFFICIENT_STORAGE のこともあれば、
+        # "Requested internal only, but not enough space" の IOException のこともある。両方実測）
+        "INSUFFICIENT_STORAGE|not enough space|No space left" {
+            "デバイスの空き容量が足りません" + $(if ($freeMb) { "（空き ${freeMb} MB / APK ${apkMb} MB）" }) +
+            "。不要なアプリを削除するか（adb uninstall <package>）、AVD のディスクサイズを拡張してください。" +
+            "計装アプリを複数のプロジェクト分入れていると起きやすい"
+            break
+        }
+        "UPDATE_INCOMPATIBLE|INCONSISTENT_CERTIFICATES" {
+            "同じ package が別の署名で既に入っています（$Package）。" +
+            "adb uninstall $Package してから再実行してください"
+            break
+        }
+        "VERSION_DOWNGRADE" {
+            "デバイス側の方が新しい版です（$Package）。adb uninstall $Package してから再実行してください"
+            break
+        }
+        "INSTALL_FAILED_NO_MATCHING_ABIS" {
+            "APK の ABI がデバイスと合いません（エミュレーターは x86_64、実機は arm64 が普通）。" +
+            "ビルド設定のターゲットアーキテクチャを確認してください"
+            break
+        }
+        default { "adb の出力をそのまま確認してください" }
+    }
+    return "adb install 失敗 (exit=$ExitCode): $hint`n--- adb の出力 ---`n$Output"
+}
+
+function Test-UnityProjectLocked {
+    <#
+      .SYNOPSIS
+      エディタがこのプロジェクトを実際に開いているか（Temp\UnityLockfile を掴んでいるか）。
+
+      .NOTES
+      **ファイルの存在だけで判断しない**。エディタが異常終了するとロックファイルは残るため、
+      存在で判定すると「既に開いています」と言い続けて永久に起動できなくなる（実際に踏んだ）。
+      排他で開けたら誰も掴んでいない＝古い残骸。
+    #>
+    param([Parameter(Mandatory)][string]$ProjectDir)
+    $lock = Join-Path $ProjectDir "Temp\UnityLockfile"
+    if (-not (Test-Path -LiteralPath $lock)) { return $false }
+    try {
+        $stream = [System.IO.File]::Open($lock, "Open", "ReadWrite", "None")
+        $stream.Close()
+        return $false
+    } catch {
+        return $true
+    }
+}
 $root = (Resolve-Path "$PSScriptRoot\..").Path
 
 # 対象プロジェクト解決: -ProjectPath 優先 → キット親がUnityプロジェクトならそれ → $root\$Project
@@ -54,6 +133,70 @@ if (-not $NoJourney) {
     $JourneyDir = [System.IO.Path]::GetFullPath($JourneyDir)
 } else {
     $JourneyDir = $null
+}
+
+# --- エージェント開発ダッシュボード連携（任意・別リポジトリ） ---
+# **導入されていない環境では何も変えない**: pytest の引数も増やさず、ファイルも作らない。
+# JUnit XML は件数の記録にしか使わないので、連携が有効なときだけ出力する
+$emitHelper = Join-Path $PSScriptRoot "emit-status.ps1"
+$dashEnabled = $false
+# 連携の準備で失敗しても E2E 本体を巻き込まない（ErrorActionPreference="Stop" 下で throw させない）
+try {
+    if (Test-Path -LiteralPath $emitHelper -PathType Leaf) {
+        . $emitHelper
+        $dashEnabled = [bool](Get-DashStatusDir -StartPath $root)
+    }
+} catch {
+    $dashEnabled = $false
+}
+$junitPath = $null
+
+function Enable-JunitOutput {
+    <# 連携が有効なときだけ pytest に渡す --junitxml を組み立てる。
+       出力先は**ターゲットごとに分ける**（同一プロジェクトの並行実行が互いの XML を壊さないため）。
+       準備に失敗したら連携を諦めて空配列を返す（テスト実行を止めない）。 #>
+    param([Parameter(Mandatory)][string]$Tag)
+
+    if (-not $script:dashEnabled) { return @() }
+    try {
+        $safeTag = ($Tag -replace '[^A-Za-z0-9._-]', '_')
+        $script:junitPath = Join-Path $root "Builds\e2e-results-$projectName-$safeTag.xml"
+        New-Item -ItemType Directory -Force (Split-Path $script:junitPath -Parent) | Out-Null
+        Remove-Item $script:junitPath -ErrorAction SilentlyContinue   # 前回結果を誤読しない
+        return @("--junitxml=$script:junitPath")
+    } catch {
+        $script:junitPath = $null
+        $script:dashEnabled = $false
+        return @()
+    }
+}
+
+function Send-E2eEvidence {
+    param([int]$ExitCode, [string]$Mode, [string]$FailureDir)
+
+    if (-not $script:dashEnabled) { return }
+    $junitPath = $script:junitPath
+
+    $data = @{ suite = "e2e"; project = $projectName; mode = $Mode; exitCode = $ExitCode }
+    if ($junitPath -and (Test-Path $junitPath)) {
+        try {
+            $suite = ([xml](Get-Content $junitPath -Raw)).SelectSingleNode("//testsuite")
+            if ($suite) {
+                $failed = [int]$suite.failures + [int]$suite.errors
+                $data.failed = $failed
+                $data.skipped = [int]$suite.skipped
+                $data.passed = [int]$suite.tests - $failed - [int]$suite.skipped
+                $data.durationSec = [math]::Round([double]$suite.time, 1)
+            }
+        } catch {
+            # 件数が取れなくても exitCode だけで記録する
+        }
+    }
+    if ($JourneyDir -and (Test-Path (Join-Path $JourneyDir "report.html"))) {
+        $data.journeyReport = Join-Path $JourneyDir "report.html"
+    }
+    if ($FailureDir -and (Test-Path $FailureDir)) { $data.failureDir = $FailureDir }
+    Send-DashEvent -Kind "evidence.e2e" -StartPath $root -Data $data
 }
 
 # 設定解決: キット内（導入配置: <project>\uapp_e2e\e2e-config.json）→ プロジェクト直下（本リポジトリのサンプル配置）
@@ -117,8 +260,36 @@ if ($Editor) {
     try {
 
     # エディタが Pipeline 接続済みかを確認。未接続なら pipeline install → エディタ起動 → 接続待ち
-    $status = Invoke-UnityCli @("status", "--project-path", $projectDir) -AllowFail
+    # ドメインリロード直後などは status が一瞬応答しない。1 回の失敗で「未接続」と決めない
+    # （決めるとエディタを起動しにいく／下のロックファイル判定で無用に止まる）
+    $status = $null
+    for ($attempt = 0; $attempt -lt 3; $attempt++) {
+        if ($attempt -gt 0) { Start-Sleep -Seconds 3 }
+        $status = Invoke-UnityCli @("status", "--project-path", $projectDir) -AllowFail
+        if ($status -and $status.success -and $status.data.count -ge 1) { break }
+    }
+    # エディタが動いている（ロックファイルがある）のに応答しない理由の大半は
+    # **コンパイル/ドメインリロード中**。C# を直した直後に叩くのは日常なので、腰を据えて待つ
+    if ((-not $status -or -not $status.success -or $status.data.count -lt 1) -and
+        (Test-UnityProjectLocked -ProjectDir $projectDir)) {
+        Write-Host "[$projectName] エディタは起動中だが Pipeline が応答しない（コンパイル中の可能性）。最大 300 秒待ちます..."
+        $wait = [System.Diagnostics.Stopwatch]::StartNew()
+        while ($wait.Elapsed.TotalSeconds -lt 300) {
+            Start-Sleep -Seconds 3
+            $status = Invoke-UnityCli @("status", "--project-path", $projectDir) -AllowFail
+            if ($status -and $status.success -and $status.data.count -ge 1) { break }
+        }
+        Write-Host "[$projectName] 待機 $([int]$wait.Elapsed.TotalSeconds) 秒"
+    }
     if (-not $status -or -not $status.success -or $status.data.count -lt 1) {
+        # **既に開いているプロジェクトを二重に開かない**。Unity は開いている間 Temp\UnityLockfile を作る。
+        # status が一時的に応答しないだけで `unity open` すると、利用者の画面に
+        # 「プロジェクトは既に開かれています」ダイアログが出て操作を奪う
+        if (Test-UnityProjectLocked -ProjectDir $projectDir) {
+            throw ("エディタは既にこのプロジェクトを開いていますが、Pipeline に接続していません: $projectDir。" +
+                   "二重起動はしません。エディタ側で com.unity.pipeline が入っているか（Package Manager）、" +
+                   "接続が生きているか（unity status）を確認してください")
+        }
         Write-Host "[$projectName] エディタ未接続。Pipeline パッケージを確認してエディタを起動します..."
         # 注意: 未導入の場合 Packages\manifest.json に com.unity.pipeline が追加される（VCS差分になる）
         $null = Invoke-UnityCli @("pipeline", "install", "--project-path", $projectDir)
@@ -134,6 +305,18 @@ if ($Editor) {
         Write-Host "[$projectName] エディタ接続完了（$([int]$sw.Elapsed.TotalSeconds)秒）"
     }
 
+    # 版差の早期検出: Unity CLI と com.unity.pipeline の組み合わせが変わると、後続の失敗が
+    # 「400 Bad Request: Parameter Validation Failed」のような読み解きにくい形で出る
+    # （実例: pipeline 0.4 で eval の code が必須の名前付き引数になり、位置引数の呼び出しが全滅した）。
+    # 一番単純な eval を 1 回だけ叩いて、ここで切り分けを終わらせる
+    $probe = Invoke-UnityCli @("cmd", "eval", "--code", 'return "ok";') -AllowFail
+    if (-not $probe -or -not $probe.success -or $probe.data.result.result -ne "ok") {
+        $detail = if ($probe.errors) { ($probe.errors | ForEach-Object { $_.message }) -join " / " } else { "応答なし" }
+        throw ("Unity CLI / com.unity.pipeline のバージョンが想定と異なります（eval の疎通に失敗: $detail）。" +
+               "'unity --version' と <プロジェクト>\Packages\manifest.json の com.unity.pipeline を確認する。" +
+               "検証済みの組み合わせ: unity-cli 1.0.0-beta.3 / com.unity.pipeline 0.4.0-exp.1")
+    }
+
     # 排他ガード: stopped 以外（playing / paused）は他タスク/他セッションが使用中とみなしてフェイルファスト
     # （paused も既存 Play セッション。ここを通すと finally の editor_stop で他者の Play を強制終了してしまう）
     $es = Invoke-UnityCli @("cmd", "editor_status")
@@ -144,8 +327,11 @@ if ($Editor) {
     }
 
     # シーン: 未指定なら Build Settings の先頭有効シーン
+    # eval の C# コードは **--code で渡す**。com.unity.pipeline の CodeEvalCommand は
+    # code を必須の名前付き引数として宣言しており（[CliArg("code", Required = true)]）、
+    # 位置引数で渡すと 400 Parameter Validation Failed になる（0.4.0-exp.1 で実測）
     if (-not $Scene) {
-        $r = Invoke-UnityCli @("cmd", "eval",
+        $r = Invoke-UnityCli @("cmd", "eval", "--code",
             'foreach (var s in UnityEditor.EditorBuildSettings.scenes) { if (s.enabled) return s.path; } return "";')
         $Scene = $r.data.result.result
     }
@@ -184,18 +370,35 @@ if ($Editor) {
     Write-Host "[$projectName] Game view 解像度: $EditorResolution / Play 開始..."
 
     $null = Invoke-UnityCli @("cmd", "editor_play")
-    if ($JourneyDir) { Write-Host "[$projectName] ジャーニー記録: $JourneyDir（エディタ直結はスクリーンショットなし）" }
+    if ($JourneyDir) { Write-Host "[$projectName] ジャーニー記録: $JourneyDir（Game view を Unity CLI で撮影）" }
 
     $env:UAPP_E2E_EDITOR = "1"
+    # ジャーニーのスクリーンショットは adb ではなく Unity CLI の screenshot で撮る
+    # （エディタ直結で adb を使うと実機を検証してしまうため、経路自体を分けている）。
+    # 複数エディタが起動していても宛先を誤らないよう、対象プロジェクトも渡す
+    $env:UAPP_E2E_UNITY_CLI = $unityCli
+    $env:UAPP_E2E_PROJECT_PATH = $projectDir
     if ($JourneyDir) { $env:UAPP_E2E_JOURNEY_DIR = $JourneyDir }
     Push-Location (Join-Path $root "driver")
     try {
+        # @(...) で必ず配列にする: 1要素の戻り値はスカラー文字列に化け、@splat が1文字ずつ展開される
+        $junitArgs = @(Enable-JunitOutput -Tag "editor")
         if ($PytestArgs) {
-            python -m pytest $config.tests @($PytestArgs -split " ") -v
+            python -m pytest $config.tests @($PytestArgs -split " ") @junitArgs -v
         } else {
-            python -m pytest $config.tests -v
+            python -m pytest $config.tests @junitArgs -v
         }
         $exit = $LASTEXITCODE
+        # 失敗証跡: エディタ直結でも「AI が読める画像」を残す（Play を止める前に撮る）。
+        # これが無いと -Editor の失敗時に「Console と Editor.log を見ろ」しか言えず、
+        # AI から見える証跡がゼロになる
+        if ($exit -ne 0) {
+            $editorFailureDir = Join-Path $root "Builds\failure"
+            New-Item -ItemType Directory -Force $editorFailureDir | Out-Null
+            $shot = Join-Path $editorFailureDir "screen.png"
+            python -c "from e2e_driver import editor_screenshot as es; import sys; sys.exit(0 if es.capture(sys.argv[1]) else 1)" $shot
+            if ($LASTEXITCODE -eq 0) { Write-Host "失敗時のスクリーンショット: $shot" }
+        }
         if ($JourneyDir -and (Test-Path (Join-Path $JourneyDir "journey.json"))) {
             python -m e2e_driver.journey $JourneyDir
             if ($LASTEXITCODE -eq 0) { Write-Host "ジャーニーレポート: $(Join-Path $JourneyDir 'report.html')" }
@@ -214,8 +417,11 @@ if ($Editor) {
         $editorMutex.Dispose()
     }
 
+    Send-E2eEvidence -ExitCode $exit -Mode "editor"
     if ($exit -ne 0) {
-        Write-Host "失敗解析: エディタの Console と Editor.log（%LOCALAPPDATA%\Unity\Editor\Editor.log）を確認"
+        $shot = Join-Path $root "Builds\failure\screen.png"
+        Write-Host ("失敗解析: " + $(if (Test-Path $shot) { "$shot（画像として読む） → " } else { "" }) +
+                    "エディタの Console と Editor.log（%LOCALAPPDATA%\Unity\Editor\Editor.log）を確認")
         exit $exit
     }
     Write-Host "[$projectName] E2E テスト成功（エディタ直結）。"
@@ -235,9 +441,24 @@ if ($LASTEXITCODE -ne 0) { throw "デバイスが接続されていません (ad
 
 if (-not $SkipInstall) {
     if (-not (Test-Path $Apk)) { throw "APK がありません: $Apk （先に build-android.ps1 -Project $projectName を実行）" }
-    Write-Host "[$projectName] インストール中: $Apk"
-    adb @adbTarget install -r -g $Apk | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "adb install 失敗 (exit=$LASTEXITCODE)" }
+    $apkBytes = (Get-Item $Apk).Length
+    Write-Host "[$projectName] インストール中: $Apk （$([math]::Round($apkBytes / 1MB)) MB）"
+
+    # 入れてみて失敗するより先に空きを見る。計装アプリを複数並べると普通に足りなくなり、
+    # そのときの adb のメッセージは「テストが失敗した」ようにしか見えない（実際に嵌まった）
+    $freeBytes = Get-DeviceFreeBytes -AdbTarget $adbTarget
+    if ($freeBytes -gt 0 -and $freeBytes -lt ($apkBytes * 2.5)) {
+        Write-Warning ("デバイスの空き容量が少なくなっています（空き $([math]::Round($freeBytes / 1MB)) MB / " +
+                       "APK $([math]::Round($apkBytes / 1MB)) MB）。インストールに失敗する可能性があります。" +
+                       "不要なアプリを削除するか、AVD のディスクを拡張してください")
+    }
+
+    # install の出力は捨てない。失敗理由（ストレージ不足・署名不一致等）が全部ここに出る
+    $installOutput = (adb @adbTarget install -r -g $Apk 2>&1 | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0) {
+        throw (Format-InstallFailure -Output $installOutput -ExitCode $LASTEXITCODE -Apk $Apk `
+                                     -Package $package -FreeBytes $freeBytes)
+    }
 }
 
 # 縦横両対応アプリの初期向き指定（e2e-config.json の deviceRotation: 0=縦 1=横(左) 2=逆縦 3=横(右)）
@@ -276,10 +497,13 @@ if ($DeviceSerial) { $env:UAPP_E2E_DEVICE_SERIAL = $DeviceSerial }
 if ($JourneyDir) { $env:UAPP_E2E_JOURNEY_DIR = $JourneyDir }
 Push-Location (Join-Path $root "driver")
 try {
+    # ターゲット（デバイス・ホスト側ポート）ごとに XML を分ける＝並行実行が互いを壊さない。
+    # @(...) は必須（1要素の戻り値がスカラー化すると @splat が1文字ずつ展開される）
+    $junitArgs = @(Enable-JunitOutput -Tag ("device-" + $(if ($DeviceSerial) { "$DeviceSerial-" } else { "" }) + $HostPort))
     if ($PytestArgs) {
-        python -m pytest $config.tests @($PytestArgs -split " ") -v
+        python -m pytest $config.tests @($PytestArgs -split " ") @junitArgs -v
     } else {
-        python -m pytest $config.tests -v
+        python -m pytest $config.tests @junitArgs -v
     }
     $exit = $LASTEXITCODE
     # ジャーニーが記録されていれば自己完結レポートを更新する（失敗時も解析に使うため生成する）。
@@ -309,8 +533,10 @@ if ($exit -ne 0) {
     adb @adbTarget logcat -d -s "Unity:*" > (Join-Path $evidence "unity-logcat.txt")
     adb @adbTarget logcat -d -b crash > (Join-Path $evidence "crash.txt")
     Write-Host "失敗時の証跡を保存: $evidence （screen.png / unity-logcat.txt / crash.txt）"
+    Send-E2eEvidence -ExitCode $exit -Mode "device" -FailureDir $evidence
     exit $exit
 }
+Send-E2eEvidence -ExitCode $exit -Mode "device"
 Write-Host "[$projectName] E2E テスト成功。"
 
 

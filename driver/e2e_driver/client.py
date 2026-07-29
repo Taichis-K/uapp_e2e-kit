@@ -106,12 +106,32 @@ class BridgeError(Exception):
 
 
 class BlockedError(Exception):
-    """タップ対象が他のUI（全画面ブロッカー等）に遮られている。"""
+    """タップ対象に実タッチが届かない。理由は `blocked_by` に入る。
+
+    **待てば解ける遮蔽と、待っても永久に押せない状態を区別する**。混ぜると
+    `wait_until_hittable` でタイムアウトまで待つ無駄が起きる（実導入で報告）。
+    """
+
+    #: 待っても解決しない理由（対象自身の問題）。それ以外は遮蔽オブジェクトのパス
+    HOPELESS = {
+        "NOT_RAYCASTABLE": "対象（と子孫）に raycast を受ける要素が無い。指しているパスが違う",
+        "NO_EVENTSYSTEM": "シーンに EventSystem が無い",
+        "INACTIVE": "対象が非アクティブ",
+    }
 
     def __init__(self, path: str, blocked_by: str):
-        super().__init__(f"'{path}' is blocked by '{blocked_by}'")
+        hint = self.HOPELESS.get(blocked_by)
+        detail = f"'{path}' is blocked by '{blocked_by}'"
+        if hint:
+            detail += f" — {hint}（待っても変わらない）"
+        super().__init__(detail)
         self.path = path
         self.blocked_by = blocked_by
+
+    @property
+    def hopeless(self) -> bool:
+        """待っても解決しない種類か（呼び手が再試行の要否を判断できる）。"""
+        return self.blocked_by in self.HOPELESS
 
 
 class BridgeClient:
@@ -204,6 +224,54 @@ class BridgeClient:
 
     def pointer_reset(self) -> dict:
         return self.call("pointer_reset")
+
+    # --- UI を経由しない入力（キー / マウス / ゲームパッド）------------------
+    # hittable 判定は関係しない。アプリが InputAction で読んでいても
+    # デバイスを直読みしていても、実入力と同じ経路で届く。
+    # レガシー入力バックエンドのみの構成では INPUT_BACKEND_LEGACY で明示的に失敗する
+
+    def key_down(self, key: str) -> dict:
+        return self.call("key_down", key=key)
+
+    def key_up(self, key: str) -> dict:
+        return self.call("key_up", key=key)
+
+    def mouse_move(self, x: float, y: float) -> dict:
+        return self.call("mouse_move", x=x, y=y)
+
+    def mouse_down(self, button: str = "left", x: float | None = None, y: float | None = None) -> dict:
+        args: dict[str, Any] = {"button": button}
+        if x is not None and y is not None:
+            args.update(x=x, y=y)
+        return self.call("mouse_down", **args)
+
+    def mouse_up(self, button: str = "left") -> dict:
+        return self.call("mouse_up", button=button)
+
+    def mouse_scroll(self, dx: float = 0.0, dy: float = 0.0) -> dict:
+        return self.call("mouse_scroll", dx=dx, dy=dy)
+
+    def pad_button_down(self, button: str) -> dict:
+        return self.call("pad_button_down", button=button)
+
+    def pad_button_up(self, button: str) -> dict:
+        return self.call("pad_button_up", button=button)
+
+    def pad_stick(self, stick: str = "left", x: float = 0.0, y: float = 0.0) -> dict:
+        return self.call("pad_stick", stick=stick, x=x, y=y)
+
+    def input_reset(self) -> dict:
+        """押しっぱなしを全部離す（テスト間で状態を持ち越さない）。"""
+        return self.call("input_reset")
+
+    def input_devices(self) -> dict:
+        """接続中の入力デバイス一覧。**実機が刺さっているか**を確認するために使う。
+
+        エディタ実行の PC には本物のキーボード・マウス・ゲームパッドが同時に居る。
+        注入は専用の仮想デバイスへ行うが、人が実機を触れば `current` は奪われる。
+        原因不明の不安定さにしないよう、`realGamepads` 等で最初から見えるようにしている。
+        """
+        return self.call("input_devices")
 
     def ngui_event(self, path: str, event: str = "click") -> dict:
         """NGUI向けフレームワークレベルイベント送出（click | press | release）。

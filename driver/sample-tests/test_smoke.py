@@ -11,7 +11,7 @@ import time
 
 import pytest
 
-from e2e_driver import BlockedError, BridgeClient, adb
+from e2e_driver import BlockedError, BridgeClient, Gamepad, Keyboard, Mouse, adb
 
 
 def test_ping_and_dump(client):
@@ -144,3 +144,53 @@ def _collect_button_paths(nodes):
             paths.append(node["path"])
         stack.extend(node.get("children", []))
     return paths
+
+
+def test_direct_input_reaches_the_app(client):
+    """**UI を経由しない入力**（キー / マウス / パッド）がアプリに届くこと。
+
+    tap(path) は uGUI の当たり判定を通る道なので、キー入力やパッド操作を見ているコードは
+    検証できない。ここは Input System のデバイスへ直接注入する経路の回帰テスト。
+    注入先は専用の仮想デバイス（実機が刺さっていても、その報告に上書きされない）。
+    """
+    reporter, component = "DemoRoot/DirectInput", "DirectInputReporter"
+    keyboard, mouse, pad = Keyboard(client), Mouse(client), Gamepad(client)
+    client.input_reset()
+
+    before = client.get(reporter, component, "SpaceCount")
+    keyboard.press("space")
+    assert client.get(reporter, component, "SpaceCount") == before + 1
+
+    keyboard.down("w")
+    assert client.get(reporter, component, "WHeld") is True      # 押しっぱなしが保たれる
+    keyboard.up("w")
+    assert client.get(reporter, component, "WHeld") is False
+
+    before = client.get(reporter, component, "LeftClickCount")
+    mouse.click(540, 1200)
+    assert client.get(reporter, component, "LeftClickCount") == before + 1
+    assert client.get(reporter, component, "LastClickPos") == {"x": 540.0, "y": 1200.0}
+
+    before = client.get(reporter, component, "PadSouthCount")
+    pad.press("buttonSouth")                                     # 列挙名 South でも同じ
+    assert client.get(reporter, component, "PadSouthCount") == before + 1
+    pad.stick("left", 0.0, 1.0)
+    assert client.get(reporter, component, "LeftStick") == {"x": 0.0, "y": 1.0}
+    client.input_reset()
+    assert client.get(reporter, component, "LeftStick") == {"x": 0.0, "y": 0.0}
+
+
+def test_input_devices_reports_real_hardware(client):
+    """実機の入力デバイスが刺さっているかを見えるようにすること。
+
+    エディタ実行の PC には本物のキーボード・パッドが同時に居る。人が触れば current を奪われ、
+    テストが揺れる。原因不明の不安定さにしないため、一覧と実機の本数を返す。
+    """
+    info = client.input_devices()
+    assert isinstance(info["devices"], list)
+    for key in ("realGamepads", "realKeyboards", "realMice"):
+        assert isinstance(info[key], int)
+    # 注入したら、その仮想デバイスが一覧に出ること
+    Keyboard(client).press("space")
+    names = [d["name"] for d in client.input_devices()["devices"]]
+    assert "E2EVirtualKeyboard" in names

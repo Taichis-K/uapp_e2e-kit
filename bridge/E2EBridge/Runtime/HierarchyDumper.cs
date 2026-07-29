@@ -39,14 +39,14 @@ namespace E2EBridge
                 // NGUI ツリー（存在する場合のみ）
                 roots.AddRange(NguiAdapter.FindRoots().Where(r => !roots.Contains(r)));
             }
-            else // "all"
+            else // "scene" / "all"
             {
-                for (var i = 0; i < SceneManager.sceneCount; i++)
-                {
-                    var scene = SceneManager.GetSceneAt(i);
-                    if (scene.isLoaded)
-                        roots.AddRange(scene.GetRootGameObjects().Select(g => g.transform));
-                }
+                // **DontDestroyOnLoad 配下も列挙する**。SceneManager の列挙には出ないため、
+                // 以前は resolve では届くのに dump には出ないという食い違いがあった。
+                // 規約は「dump を見てから書く」なので、常駐オブジェクト（実プロジェクトの定石）が
+                // dump の空白地帯になっていると、AI はコードを読むまで存在に気づけない。
+                // Roots() は resolve と同じ並び（＝パス表記も一致する）
+                roots.AddRange(Roots());
             }
 
             var nodes = new JArray();
@@ -73,6 +73,10 @@ namespace E2EBridge
                     .Where(c => c != null)
                     .Select(c => c.GetType().Name))
             };
+            // 常駐オブジェクト（シーン切替で消えない）であることを示す。
+            // 「このシーンだけの UI か、常駐 UI か」でテストの書き方が変わる
+            if (IsDontDestroyOnLoad(go))
+                node["dontDestroyOnLoad"] = true;
 
             Rect? screenRect = null;
             var isNgui = false;
@@ -231,12 +235,27 @@ namespace E2EBridge
             {
                 var field = type.GetField(propertyName, BindingFlags.Instance | BindingFlags.Public);
                 if (field == null)
+                    // コンポーネント名を間違えたときは候補を出しているのに、プロパティ名の
+                    // 間違いでは出していなかった（名前を1文字違えるたびに手探りになる）
                     throw new BridgeException(ErrorCodes.NotFound,
-                        $"public property/field '{propertyName}' not found on {componentName}");
+                        $"public property/field '{propertyName}' not found on {componentName}. available: " +
+                        string.Join(", ", AvailableMembers(type)));
                 value = field.GetValue(component);
             }
 
             return new JObject { ["value"] = Serialize(value) };
+        }
+
+        /// <summary>読み取れる public のプロパティ／フィールド名（NOT_FOUND の候補表示用）。</summary>
+        private static IEnumerable<string> AvailableMembers(Type type)
+        {
+            // 読めないもの（インデクサ・書き込み専用）は候補に出さない。多すぎても選べないので
+            // 名前順に上限を設ける
+            var names = type.GetProperties(BindingFlags.Instance | BindingFlags.Public)
+                .Where(p => p.CanRead && p.GetIndexParameters().Length == 0)
+                .Select(p => p.Name)
+                .Concat(type.GetFields(BindingFlags.Instance | BindingFlags.Public).Select(f => f.Name));
+            return names.Distinct().OrderBy(n => n, StringComparer.Ordinal).Take(40);
         }
 
         private static JToken Serialize(object value)
@@ -274,9 +293,24 @@ namespace E2EBridge
                 // SceneManager.GetRootGameObjects だけだと DontDestroyOnLoad 配下の常駐UI
                 // （実プロジェクトでは UI ルートを DDOL に載せるのが定石）に到達できず、
                 // dump が返すパスで resolve すると NOT_FOUND になる。FindAll は DDOL も拾う。
-                foreach (var root in FindAll<Transform>())
+                // 子と同じく**実名を優先**して候補を並べる（`Item[0]` という名前のルートが実在しうる）
+                ParseSegment(segments[0], out var rootName, out var rootIndex);
+                var candidates = new List<Transform>();
+                foreach (var root in Roots())
+                    if (root.name == segments[0]) candidates.Add(root);
+                if (rootIndex >= 0)
                 {
-                    if (root.parent != null || root.name != segments[0]) continue;
+                    var seenRoots = 0;
+                    foreach (var root in Roots())
+                    {
+                        if (root.name != rootName) continue;
+                        if (seenRoots++ != rootIndex) continue;
+                        candidates.Add(root);
+                        break;
+                    }
+                }
+                foreach (var root in candidates)
+                {
                     var current = root;
                     var ok = true;
                     for (var s = 1; s < segments.Length && ok; s++)
@@ -289,11 +323,26 @@ namespace E2EBridge
                 return null;
             }
 
-            var matches = FindAll<Transform>()
+            // 名前だけの検索でも添字を受け付ける（dump が返した "Canvas[1]" をそのまま渡せる）。
+            // ここでも**実名一致を先に見る**（`Item[0]` という名前のオブジェクトを取りこぼさない）
+            var literal = FindAll<Transform>()
                 .Where(t => t.name == path && t.gameObject.scene.isLoaded)
                 .ToList();
+            if (literal.Count == 1) return literal[0].gameObject;
+
+            ParseSegment(path, out var wanted, out var wantedIndex);
+            var matches = literal.Count > 1
+                ? literal
+                : FindAll<Transform>().Where(t => t.name == wanted && t.gameObject.scene.isLoaded).ToList();
 
             if (matches.Count == 0) return null;
+            if (wantedIndex >= 0 && literal.Count == 0)
+            {
+                // 添字の意味は「同名の兄弟の中で何番目か」。dump が出す表記と必ず一致させるため、
+                // 検索順ではなく **GetPath の末尾セグメントが一致するもの** を選ぶ
+                var target = matches.FirstOrDefault(t => SegmentOf(t) == path);
+                return target != null ? target.gameObject : null;
+            }
             if (matches.Count > 1)
                 throw new BridgeException(ErrorCodes.Ambiguous,
                     $"'{path}' matches {matches.Count} objects: " +
@@ -319,12 +368,140 @@ namespace E2EBridge
 #endif
         }
 
-        private static Transform FindDirectChild(Transform parent, string name)
+        // 同名の兄弟を区別する添字（例: "Canvas[1]"）。**同名が複数あるときだけ**付けるので、
+        // 一意な名前のパスは従来どおり（既存のテストが壊れない）
+        private static readonly System.Text.RegularExpressions.Regex IndexSuffix =
+            new System.Text.RegularExpressions.Regex(@"^(?<name>.*)\[(?<index>\d+)\]$");
+
+        private static void ParseSegment(string segment, out string name, out int index)
         {
+            var match = IndexSuffix.Match(segment);
+            if (!match.Success) { name = segment; index = -1; return; }
+            name = match.Groups["name"].Value;
+            index = int.Parse(match.Groups["index"].Value);
+        }
+
+        private static Transform FindDirectChild(Transform parent, string segment)
+        {
+            // **実名を先に見る**。`Item[0]` のように名前自体が添字表記のオブジェクトは実在するので、
+            // 先に添字として解釈すると dump が返したパスで解決できなくなる
             for (var i = 0; i < parent.childCount; i++)
-                if (parent.GetChild(i).name == name)
+                if (parent.GetChild(i).name == segment)
                     return parent.GetChild(i);
+
+            ParseSegment(segment, out var name, out var index);
+            if (index < 0) return null;
+            var seen = 0;
+            for (var i = 0; i < parent.childCount; i++)
+            {
+                var child = parent.GetChild(i);
+                if (child.name != name) continue;
+                if (seen == index) return child;
+                seen++;
+            }
             return null;
+        }
+
+        // ルートの並びは GetPath と Find で必ず一致させる（片方だけ順序が違うと、
+        // dump が返したパスで resolve できなくなる）。1 フレーム内はキャッシュする
+        private static Transform[] _roots = System.Array.Empty<Transform>();
+        private static int _rootsFrame = -1;
+        private static int _rootsCount = -1;
+        private static Scene _ddolScene;      // DontDestroyOnLoad のシーン（件数の安い数え直し用）
+
+        /// <summary>キャッシュしてよいか。**破棄済みを掴んだままにしない**ことが最優先。</summary>
+        private static bool RootsCacheUsable()
+        {
+            // フレームが進んでいない＝同じ 1 コマンドの処理中、が基本の条件。ただし EditMode の
+            // テスト実行のようにフレームが進まない文脈があるため、ルート数の変化と
+            // 破棄済み参照の有無も見る（キャッシュを信じて破棄済みに触ると例外で全滅する）
+            if (_rootsFrame != Time.frameCount || _rootsCount != SceneRootCount()) return false;
+            foreach (var root in _roots)
+                if (root == null) return false;
+            return true;
+        }
+
+        /// <summary>DontDestroyOnLoad 配下か（Unity は専用シーンへ移す）。</summary>
+        private static bool IsDontDestroyOnLoad(GameObject go)
+        {
+            var scene = go.scene;
+            return scene.IsValid() && scene.buildIndex == -1 && scene.name == "DontDestroyOnLoad";
+        }
+
+        private static int SceneRootCount()
+        {
+            var total = 0;
+            for (var i = 0; i < SceneManager.sceneCount; i++)
+            {
+                var scene = SceneManager.GetSceneAt(i);
+                if (scene.isLoaded) total += scene.rootCount;
+            }
+            // **DontDestroyOnLoad のルートも数える**（SceneManager は DDOL を列挙しない）。
+            // 常駐UIを DDOL に置く実プロジェクトで、同じフレーム内に増えたルートが
+            // キャッシュから漏れると、そのルート配下のパスが解決できなくなる。
+            // 走査コストを避けるため、前回の構築時に掴んだ DDOL の Scene から件数だけ読む
+            if (_ddolScene.IsValid()) total += _ddolScene.rootCount;
+            return total;
+        }
+
+        private static Transform[] Roots()
+        {
+            if (RootsCacheUsable()) return _roots;
+
+            // 並べ替えキーで比較させない（Scene や GameObject は IComparable ではなく、
+            // OrderBy に渡すと実行時に「At least one object must implement IComparable」で落ちる）。
+            // シーンのルート配列の順にそのまま積み、そこに出てこないもの（DontDestroyOnLoad 配下）を
+            // 後ろに足す。順序が実行ごとに変わらなければ添字の意味が保てる
+            var ordered = new List<Transform>();
+            var seen = new HashSet<int>();
+            for (var i = 0; i < SceneManager.sceneCount; i++)
+            {
+                var scene = SceneManager.GetSceneAt(i);
+                if (!scene.isLoaded) continue;
+                foreach (var go in scene.GetRootGameObjects())
+                {
+                    ordered.Add(go.transform);
+                    seen.Add(go.GetInstanceID());
+                }
+            }
+            var extra = new List<Transform>();
+            foreach (var t in FindAll<Transform>())
+                if (t.parent == null && !seen.Contains(t.gameObject.GetInstanceID()))
+                {
+                    extra.Add(t);
+                    // 件数だけ安く数え直せるよう DDOL の Scene を覚えておく（SceneManager は列挙しない）
+                    if (!_ddolScene.IsValid()) _ddolScene = t.gameObject.scene;
+                }
+            extra.Sort((a, b) => a.GetInstanceID().CompareTo(b.GetInstanceID()));   // 実行間で安定させる
+            ordered.AddRange(extra);
+
+            _roots = ordered.ToArray();
+            _rootsFrame = Time.frameCount;
+            _rootsCount = SceneRootCount();
+            return _roots;
+        }
+
+        /// <summary>同名の兄弟が居るときだけ添字を付けた 1 セグメント分の名前。</summary>
+        private static string SegmentOf(Transform t)
+        {
+            if (t.parent == null)
+            {
+                var roots = Roots();
+                var same = roots.Where(r => r.name == t.name).ToList();
+                if (same.Count <= 1) return t.name;
+                return $"{t.name}[{same.IndexOf(t)}]";
+            }
+            var parent = t.parent;
+            var index = -1;
+            var count = 0;
+            for (var i = 0; i < parent.childCount; i++)
+            {
+                var child = parent.GetChild(i);
+                if (child.name != t.name) continue;
+                if (child == t) index = count;
+                count++;
+            }
+            return count <= 1 ? t.name : $"{t.name}[{index}]";
         }
 
         public static string GetPath(Transform t)
@@ -332,7 +509,7 @@ namespace E2EBridge
             var names = new List<string>();
             while (t != null)
             {
-                names.Add(t.name);
+                names.Add(SegmentOf(t));
                 t = t.parent;
             }
             names.Reverse();

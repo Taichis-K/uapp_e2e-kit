@@ -144,7 +144,31 @@ if (!defines.Contains("UAPP_E2E_BRIDGE")) defines.Add("UAPP_E2E_BRIDGE");
 PlayerSettings.SetScriptingDefineSymbols(NamedBuildTarget.Android, string.Join(";", defines));
 ```
 
-エディタ再生で使う場合は Player Settings（対象プラットフォーム）の Scripting Define Symbols に追加。
+エディタ再生で使う場合は Player Settings の Scripting Define Symbols に追加する。
+**追加先は Build Settings で選んでいるプラットフォーム**（エディタはアクティブなビルドターゲットの
+define でコンパイルする）。Android のままエディタ再生する構成でも、Standalone に切り替えた構成でも、
+その選んでいるターゲットに付いていればよい。
+
+installer の残手順は **`UAPP_E2E_BRIDGE` が付いているターゲット名を列挙する**ので、
+Build Settings の Platform と突き合わせて判断する。判定は運用モードで変わる:
+
+| `-Mode` | 判定 |
+|---|---|
+| `both`（既定）/ `device` | **Android に付いていること**（APK に計装を入れるため） |
+| `editor` | **どれか 1 つのターゲットに付いていること**（プラットフォームは問わない） |
+
+### 4.1 エディタ専用運用（Android を使わない）
+
+デスクトップ向けや「まずエディタ直結E2Eだけで回す」立ち上げ期は `-Mode editor` で導入する。
+
+```powershell
+.\install-to-project.ps1 -ProjectPath <対象> -Mode editor
+```
+
+- define の判定が上記のとおりプラットフォーム非依存になる
+- `e2e-config.json` の `package` / `activity` は**使わないので空でよい**（判定対象から外れる）
+- `config\local.json` の `avd` は不要
+- 実行は `run-e2e.ps1 -Editor` と `run-unity-tests.ps1 -Mode EditMode -Editor`
 
 ### 5. 実行環境設定（各自）
 

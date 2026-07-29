@@ -24,6 +24,11 @@ namespace E2EBridge
         public const string PointerAlreadyDown = "POINTER_ALREADY_DOWN";
         public const string PointerNotDown = "POINTER_NOT_DOWN";
         public const string NguiNotPresent = "NGUI_NOT_PRESENT";
+        public const string AlreadyPressed = "ALREADY_PRESSED";
+        public const string NotPressed = "NOT_PRESSED";
+        // レガシー入力バックエンドでは Input System への注入が届かない。
+        // 黙って何も起きないと、AI はアプリのバグを疑って延々と調べることになる
+        public const string InputBackendLegacy = "INPUT_BACKEND_LEGACY";
         public const string Internal = "INTERNAL";
     }
 }

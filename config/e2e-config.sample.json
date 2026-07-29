@@ -5,6 +5,6 @@
   "orientation": "portrait",
   "deviceRotation": null,
   "devicePort": 13333,
-  "editorBridgePort": 13333,
+  "editorBridgePort": 13343,
   "uiType": "ugui-nis"
 }

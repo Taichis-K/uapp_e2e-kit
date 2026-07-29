@@ -34,6 +34,18 @@ namespace E2EBridge
                     case "pointer_move":  result = TouchInjector.Move(args); break;
                     case "pointer_up":    result = TouchInjector.Up(args); break;
                     case "pointer_reset": result = TouchInjector.Reset(); break;
+                // UI を経由しない入力（キー・マウス・パッド）。hittable 判定は関係しない
+                case "key_down":         result = DeviceInjector.KeyDown(args); break;
+                case "key_up":           result = DeviceInjector.KeyUp(args); break;
+                case "mouse_move":       result = DeviceInjector.MouseMove(args); break;
+                case "mouse_down":       result = DeviceInjector.MouseDown(args); break;
+                case "mouse_up":         result = DeviceInjector.MouseUp(args); break;
+                case "mouse_scroll":     result = DeviceInjector.MouseScroll(args); break;
+                case "pad_button_down":  result = DeviceInjector.PadButtonDown(args); break;
+                case "pad_button_up":    result = DeviceInjector.PadButtonUp(args); break;
+                case "pad_stick":        result = DeviceInjector.PadStick(args); break;
+                case "input_reset":      result = DeviceInjector.Reset(); break;
+                case "input_devices":    result = DeviceInjector.Devices(); break;
                     case "ngui_event":    result = NguiAdapter.HandleEvent(args); break;
                     default:
                         throw new BridgeException(ErrorCodes.UnknownCommand, $"unknown command: {cmd}");

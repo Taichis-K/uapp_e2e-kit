@@ -130,8 +130,22 @@ class Gestures:
     # ---------------------------------------------------------------- waits
 
     def wait_until_hittable(self, path: str, timeout: float = 10.0, interval: float = 0.1) -> None:
-        self._wait(lambda: self._resolve_quiet(path).get("hittable") is True,
-                   timeout, interval, f"'{path}' が hittable になりません")
+        """hittable になるまで待つ。**待っても解決しない理由なら即座に失敗させる**。
+
+        「そもそも raycast の的でない」対象を待ち続けても状況は変わらない。
+        タイムアウトまで待ってから曖昧に失敗すると、AI は原因に辿り着けない（実導入で報告）。
+        """
+        def hittable_or_hopeless() -> bool:
+            resolved = self._resolve_quiet(path)
+            if resolved.get("hittable") is True:
+                return True
+            reason = resolved.get("blockedBy")
+            if reason in BlockedError.HOPELESS and reason != "INACTIVE":
+                # INACTIVE は表示待ちで解ける。それ以外の対象自身の問題は待っても無駄
+                raise BlockedError(path, reason)
+            return False
+
+        self._wait(hittable_or_hopeless, timeout, interval, f"'{path}' が hittable になりません")
 
     def wait_until_visible(self, path: str, timeout: float = 10.0, interval: float = 0.1) -> None:
         self._wait(lambda: self._resolve_quiet(path).get("active") is True,

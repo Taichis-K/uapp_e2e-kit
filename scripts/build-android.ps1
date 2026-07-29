@@ -81,7 +81,24 @@ $unityArgs = @(
 if ($Release) { $unityArgs += "-release" }
 
 Write-Host "[$projectName] Unity $unityVersion でビルド開始（初回は IL2CPP のため 10 分以上かかることがあります）..."
+$buildStarted = Get-Date
 $process = Start-Process -FilePath $UnityPath -ArgumentList $unityArgs -Wait -PassThru -NoNewWindow
+
+# エージェント開発ダッシュボードが導入されていればビルド結果を1行記録する（無ければ何もしない）
+$emitHelper = Join-Path $PSScriptRoot "emit-status.ps1"
+if (Test-Path -LiteralPath $emitHelper -PathType Leaf) {
+    . $emitHelper
+    $apkSize = if (Test-Path -LiteralPath $Output -PathType Leaf) { (Get-Item $Output).Length } else { $null }
+    Send-DashEvent -Kind "evidence.build" -StartPath $root -Data @{
+        target       = "Android"
+        project      = $projectName
+        exitCode     = $process.ExitCode
+        durationSec  = [math]::Round(((Get-Date) - $buildStarted).TotalSeconds, 1)
+        artifactPath = $Output
+        sizeBytes    = $apkSize
+        logPath      = $logFile
+    }
+}
 
 if ($process.ExitCode -ne 0) {
     Write-Host "--- $logFile 末尾 ---"

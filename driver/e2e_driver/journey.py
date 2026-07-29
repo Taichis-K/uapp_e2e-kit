@@ -24,7 +24,7 @@ from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 from typing import Any
 
-from . import adb
+from . import adb, editor_screenshot
 from .client import BridgeClient, resolve_port
 from .gestures import Gestures
 
@@ -211,11 +211,17 @@ class JourneyRecorder:
 
     def _screencap(self, screen_id: str) -> str | None:
         rel = f"screens/{_safe_name(screen_id)}.png"
+        if editor_screenshot.available():
+            # エディタ直結では adb が無いが、Unity CLI の screenshot で Game view を撮れる。
+            # 画像が無いとレポートが「画面の分からない一覧」になり、デバイス実行と価値が違いすぎる
+            if editor_screenshot.capture(self.out_dir / rel):
+                return rel
+            return None
         try:
             adb.screencap(self.out_dir / rel)
             return rel
         except Exception:
-            return None  # エディタ直結など adb の無い環境ではスクショなしで記録する
+            return None  # adb もエディタ経路も使えない環境ではスクショなしで記録する
 
     def _load(self) -> None:
         path = self.out_dir / "journey.json"

@@ -31,6 +31,8 @@ Android ビルドは1回十数分かかるため、③を回す頻度が高い�
 .\uapp_e2e\scripts\run-unity-tests.ps1 -Mode PlayMode -Filter <テスト名の一部>
 ```
 
+- **同じプロジェクトをエディタで開いたままだと実行できない**（排他ロックのため exit=6 で
+  結果XMLが出ない）。エディタを閉じてから回すこと
 - Unity CLI があればそれを、無ければ Unity 本体の `-batchmode -runTests` を自動で使う
   （エディタは `uapp_e2e/config/local.json` の editorRoots ＋ `ProjectVersion.txt` から解決）
 - 結果は NUnit XML。**失敗テスト名・メッセージ・スタック先頭が要約表示される**ので、そこから修正対象へ直行する
@@ -138,6 +140,19 @@ adb.uninstall(pkg); adb.install(apk)                      # クリーンイン�
 5. dump を再取得して期待した UI 状態との差分を見る
 
 判断基準: 失敗が「実ユーザーにも起きる」ならアプリを直す。「テストの前提が誤り」ならテストを直す。
+
+## （任意）エージェント開発ダッシュボード連携
+
+複数プロジェクト・複数タスクを並行で回すときのために、テスト・E2E・ビルドの結果を
+**1 行だけ外部へ記録する**エミッタ（`uapp_e2e/scripts/emit-status.ps1`）を同梱している。
+
+- **プロジェクト直下に `.agent-status/` があるとき（または環境変数 `UAPP_E2E_STATUS_DIR` が実在する
+  ディレクトリを指すとき）だけ書く**。探索は `uapp_e2e` とその親の 2 階層まで。無ければ完全に
+  何もしない＝**導入していない環境では挙動が一切変わらない**（ファイルも pytest の引数も増えない）
+- 追加の依存は無い（PowerShell が NDJSON を追記するだけ。ダッシュボード本体は別リポジトリの任意ツール）
+- 記録先: `run-unity-tests.ps1` → テスト結果 / `run-e2e.ps1` → E2E 件数と journey レポートのパス /
+  `build-android.ps1` → ビルド結果。作業単位を分けたいときは `UAPP_E2E_UNIT_ID` を渡す
+- 失敗は握りつぶすので、**連携が壊れてもテスト・ビルドの結果には影響しない**
 
 ## 開発時の注意
 

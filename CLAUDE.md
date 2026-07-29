@@ -54,6 +54,10 @@ pytest tests --journey ..\Builds\journey          # または環境変数 UAPP_E
 python -m e2e_driver.journey ..\Builds\journey    # → report.html 生成（詳細: docs/07-viewer.md）
 ```
 
+エージェント開発ダッシュボード（任意・別ツール）を使う場合のみ、テスト/E2E/ビルドの結果が
+`.agent-status\` へ1行ずつ記録される（`scripts\emit-status.ps1`）。**そのフォルダが無ければ何もしない**
+ので、使わない環境では意識しなくてよい（詳細: docs/ai-loop.md）。
+
 ## 設定
 
 - `e2e-config.json` — プロジェクト仕様（package / tests / 画面向き / devicePort / editorBridgePort）。git管理。
@@ -69,10 +73,14 @@ python -m e2e_driver.journey ..\Builds\journey    # → report.html 生成（詳
    仕様（先に閉じる/`wait_until_hittable`）かバグ（アプリ修正）かをそこから判断する
 3. 待機は `wait_until_visible / gone / hittable / until` を使う。`time.sleep` は
    「待てる条件が存在しない」場合（物理値の安定待ち・「何も起きない」ことの確認）のみ例外とし、理由をコメントに書く
-4. **NGUI のレガシーInput構成では `ngui_tap / ngui_press / ngui_release`**（`pointer_*` は届かない）。
+4. **UI を経由しない入力は `Keyboard` / `Mouse` / `Gamepad`**（`tap(path)` では動かせない）。
+   キー・パッドのボタン・マウスクリックを直接見ているコードが対象。専用の仮想デバイスへ注入するので、
+   PC に実機が刺さっていても混ざらない（`client.input_devices()` で接続状況を確認できる）。
+   テスト後は `client.input_reset()`。レガシー入力バックエンドのみの構成では `INPUT_BACKEND_LEGACY` で明示的に失敗する
+5. **NGUI のレガシーInput構成では `ngui_tap / ngui_press / ngui_release`**（`pointer_*` は届かない）。
    構成は `ping` の `ngui` と、NGUI が `Input.touchCount` を直読みしているかで判断
-5. マルチタッチテストには logcat 例外アサート（`adb.clear_logcat()` → 操作 → `adb.unity_exceptions()` 空）を付ける
-6. 描画の検証は `adb.screencap()` で画像を取得して読む
+6. マルチタッチテストには logcat 例外アサート（`adb.clear_logcat()` → 操作 → `adb.unity_exceptions()` 空）を付ける
+7. 描画の検証は `adb.screencap()` で画像を取得して読む（エディタ直結では journey のスクリーンショットを見る）
 
 ## 失敗解析の優先順位
 
@@ -82,9 +90,11 @@ python -m e2e_driver.journey ..\Builds\journey    # → report.html 生成（詳
 1. pytest の失敗メッセージ
 2. `Builds/failure/unity-logcat.txt`（マネージド例外スタック）
 3. `Builds/failure/screen.png`（画像として読む）
-4. **全テスト接続エラーなら `Builds/failure/crash.txt`**（ネイティブクラッシュはUnityタグに出ない）。
+4. **インストールで転んでいないか**（テスト失敗に見える）。空き容量・署名不一致が典型。
+   run-e2e が理由を翻訳して出すので、その案内に従う（`adb shell df /data` で空きを確認）
+5. **全テスト接続エラーなら `Builds/failure/crash.txt`**（ネイティブクラッシュはUnityタグに出ない）。
    `adb shell pidof <package>` が空ならプロセス死亡
-5. dump を再取得して期待とのUI差分を見る
+6. dump を再取得して期待とのUI差分を見る
 
 ## 制約
 

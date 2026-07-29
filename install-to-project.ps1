@@ -12,6 +12,10 @@
 param(
     [Parameter(Mandatory = $true)][string]$ProjectPath,
     [ValidateSet("claude", "codex", "both")][string]$Agents = "both",
+    # 運用モード。editor はエディタ直結E2Eだけで回す構成（Android を使わない）:
+    # define の検出対象を Standalone にし、package / activity / avd を必須扱いから外す。
+    # デスクトップ向けや「まずエディタだけで回す」立ち上げ期はこちら
+    [ValidateSet("editor", "device", "both")][string]$Mode = "both",
     [switch]$IncludeSampleTests,
     [switch]$RootAgentsMd
 )
@@ -188,7 +192,8 @@ $kit = Join-Path $target "uapp_e2e"
 foreach ($dir in @("scripts", "config")) {
     New-Item -ItemType Directory -Force (Join-Path $kit $dir) | Out-Null
 }
-foreach ($script in @("build-android.ps1", "run-e2e.ps1", "run-unity-tests.ps1", "start-emulator.ps1", "uninstall.ps1")) {
+foreach ($script in @("build-android.ps1", "run-e2e.ps1", "run-unity-tests.ps1", "start-emulator.ps1",
+                      "emit-status.ps1", "uninstall.ps1")) {
     Copy-Item (Join-Path $src.Scripts $script) (Join-Path $kit "scripts\$script") -Force
 }
 robocopy (Join-Path $src.Driver "e2e_driver") (Join-Path $kit "driver\e2e_driver") /E /XD __pycache__ /NFL /NDL /NJH /NJS | Out-Null
@@ -327,13 +332,17 @@ function Mark($done) { if ($done) { "[済]" } else { "[未]" } }
 $inputSystemVer = Get-ManifestDependencyVersion "com.unity.inputsystem"
 $newtonsoftVer = Get-ManifestDependencyVersion "com.unity.nuget.newtonsoft-json"
 $projSettings = Join-Path $target "ProjectSettings\ProjectSettings.asset"
-# Android 向けの define だけを対象に検出する（Standalone 等の他ターゲットのみへの付与は
-# asmdef の defineConstraints を満たさず APK にブリッジが入らないため [済] にしない）。
+# **どのビルドターゲットに付いているか**を集める。define は Player Settings のターゲット別に
+# 持つため、必要なターゲットは運用で変わる:
+#   device … Android に付いていないと APK にブリッジが入らない（Android を必須にする）
+#   editor … エディタが使うのは **Build Settings で選んでいるプラットフォーム**の define。
+#            それは Android のことも Standalone のことも iOS のこともあるので、
+#            特定のターゲットを決め打ちにせず「どこかに付いているか」で判定し、付いている
+#            ターゲット名を並べて人が突き合わせられるようにする
 # YAML を行単位で走査し、scriptingDefineSymbols: キー自身よりも深いインデントの行だけを
-# ブロックとみなす（同じか浅いインデントで打ち切り。後続の別ブロックの Android: 行を拾わない）。
-# キーは Android:（旧シリアライズ形式の数値キー 7: も許容）、シンボル名は両側語境界つきで照合
-# （NOT_UAPP_E2E_BRIDGE / UAPP_E2E_BRIDGE_XXX に誤反応しない）
-$defineFound = $false
+# ブロックとみなす（同じか浅いインデントで打ち切り。後続の別ブロックの行を拾わない）。
+# シンボル名は両側語境界つきで照合（NOT_UAPP_E2E_BRIDGE / UAPP_E2E_BRIDGE_XXX に誤反応しない）
+$defineTargets = @()          # UAPP_E2E_BRIDGE が付いているビルドターゲットのキー
 if (Test-Path $projSettings) {
     $keyIndent = $null
     foreach ($line in (Get-Content $projSettings)) {
@@ -343,12 +352,17 @@ if (Test-Path $projSettings) {
         }
         if ($line -notmatch '^([ \t]*)\S') { continue }
         if ($Matches[1].Length -le $keyIndent) { break }  # ブロック終端
-        if ($line -match '^\s*(Android|7):.*(^|[^A-Za-z0-9_])UAPP_E2E_BRIDGE($|[^A-Za-z0-9_])') {
-            $defineFound = $true
-            break
+        if ($line -match '^\s*([A-Za-z0-9_]+):.*(^|[^A-Za-z0-9_])UAPP_E2E_BRIDGE($|[^A-Za-z0-9_])') {
+            $defineTargets += $Matches[1]
         }
     }
 }
+# 旧シリアライズ形式の数値キーは名前に直して表示する（7 と言われても分からない）
+$legacyTargetNames = @{ "1" = "Standalone"; "7" = "Android"; "4" = "iOS"; "13" = "WebGL" }
+$defineTargets = @($defineTargets | ForEach-Object { if ($legacyTargetNames.ContainsKey($_)) { $legacyTargetNames[$_] } else { $_ } } | Select-Object -Unique)
+$androidDefine = @($defineTargets | Where-Object { $_ -eq "Android" }).Count -gt 0
+# device を含む運用は Android 必須。editor 専用ならどこかに付いていればよい
+$defineFound = if ($Mode -eq "editor") { $defineTargets.Count -gt 0 } else { $androidDefine }
 $localJsonDone = Test-Path (Join-Path $kit "config\local.json")
 $gitignorePath = Join-Path $target ".gitignore"
 # 行単位で照合（コメント行や uapp_e2e/Builds-old のような別パスに誤反応しない。
@@ -361,26 +375,63 @@ $gitignoreDone = (Test-Path $gitignorePath) -and
 # package が雛形のままでない かつ tests の指すパスが実在する（-IncludeSampleTests なし導入だと
 # 既定の tests/test_smoke.py は配置されないため、package だけ直して [済] になる偽陽性を防ぐ）。
 # orientation は実アプリと突き合わせできないため自動確認の対象外。
+# **editor モードでは package / activity を見ない**（adb を使わないので実際に使われない。
+# 使わない値の編集を求めると、直しようのない [未] が残り続ける）
 $configEdited = $false
 if ($configExisted) {
     try {
         $cfg = Get-Content $configDest -Raw | ConvertFrom-Json
         $testsPath = if ($cfg.tests) { Join-Path $kit "driver\$($cfg.tests)" } else { $null }
-        $configEdited = $cfg.package -and ($cfg.package -ne "com.yourcompany.yourapp") -and
-            $testsPath -and (Test-Path $testsPath)
+        $packageOk = ($Mode -eq "editor") -or ($cfg.package -and ($cfg.package -ne "com.yourcompany.yourapp"))
+        $configEdited = $packageOk -and $testsPath -and (Test-Path $testsPath)
     } catch { $configEdited = $false }
+}
+
+# ポートの重なりは実行してみるまで気付けない（別プロジェクトのブリッジが待受を握ると
+# 「bind failed」や別アプリへの誤接続として現れる）。導入時に静かに潰しておく
+$portNote = $null
+if (Test-Path $configDest) {     # 既存・新規生成のどちらでも見る（雛形の値のままでも重なりは重なり）
+    try {
+        $cfg = Get-Content $configDest -Raw | ConvertFrom-Json
+        $device = [int]$cfg.devicePort
+        $editor = [int]$cfg.editorBridgePort
+        if ($device -eq $editor) {
+            $portNote = "devicePort と editorBridgePort が同じ値（$device）。" +
+                        "同一マシンでデバイス実行とエディタ直結を並行させると衝突するので、片方をずらす（例: editorBridgePort = $($device + 1)）"
+        }
+    } catch { }
 }
 
 Write-Host ""
 Write-Host "=== 残りの手動手順（[済]=導入済みを検出。詳細: docs/05-install-to-project.md） ==="
+if ($Mode -eq "editor") {
+    Write-Host "モード: editor（エディタ直結E2Eのみ。Android ビルド・adb・AVD は使わない）"
+}
 Write-Host "1. Packages/manifest.json に以下を追加（Unityバージョンに応じて）:"
 Write-Host "     $(Mark $inputSystemVer) com.unity.inputsystem（2022.3系:1.7.0 / Unity6系:1.14+）$(if ($inputSystemVer) { " → $inputSystemVer 導入済み" })"
 Write-Host "     $(Mark $newtonsoftVer) com.unity.nuget.newtonsoft-json: 3.2.1$(if ($newtonsoftVer) { " → $newtonsoftVer 導入済み" })（既存 Newtonsoft DLL があれば不要）"
-Write-Host "2. $(Mark $configEdited) $configDest の package / tests / orientation を実アプリに合わせて編集$(if ($configEdited) { "（package 設定済み・tests 実在。orientation は自動確認外）" })"
-Write-Host "3. $(Mark $defineFound) テスト用ビルドに UAPP_E2E_BRIDGE define を付与（検出対象は Player Settings の Android 向け define のみ。"
-Write-Host "     自前ビルドスクリプト側で付与する構成は ProjectSettings に現れないため [未] 表示のままでよい）"
-Write-Host "4. $(Mark $localJsonDone) uapp_e2e\config\local.sample.json を local.json にコピーして各自の環境を記入"
+if ($Mode -eq "editor") {
+    Write-Host "2. $(Mark $configEdited) $configDest の tests / orientation を編集（package / activity は使わないので空でよい）"
+} else {
+    Write-Host "2. $(Mark $configEdited) $configDest の package / tests / orientation を実アプリに合わせて編集$(if ($configEdited) { "（package 設定済み・tests 実在。orientation は自動確認外）" })"
+}
+if ($Mode -eq "editor") {
+    Write-Host "3. $(Mark $defineFound) UAPP_E2E_BRIDGE define を付与（**エディタが使うのは Build Settings で選んでいる"
+    Write-Host "     プラットフォームの define**。Android のままエディタ再生する構成でも構わないが、そのプラットフォームに付いていること）"
+} else {
+    Write-Host "3. $(Mark $defineFound) テスト用ビルドに UAPP_E2E_BRIDGE define を付与（APK に入れるには Android 向けが必要）"
+}
+Write-Host "     $(if ($defineTargets.Count) { "→ 現在付いているターゲット: $($defineTargets -join ', ')" } else { "→ どのターゲットにも見つからない" })"
+Write-Host "     （自前ビルドスクリプト側で付与する構成は ProjectSettings に現れないため [未] 表示のままでよい）"
+if ($Mode -eq "editor") {
+    Write-Host "4. $(Mark $localJsonDone) uapp_e2e\config\local.sample.json を local.json にコピー（avd は空のままでよい）"
+} else {
+    Write-Host "4. $(Mark $localJsonDone) uapp_e2e\config\local.sample.json を local.json にコピーして各自の環境を記入"
+}
 Write-Host "5. $(Mark $gitignoreDone) .gitignore に追加: uapp_e2e/config/local.json, uapp_e2e/Builds/"
+Write-Host "6. $(Mark (-not $portNote)) 待受ポートが他と重ならないこと（devicePort / editorBridgePort）"
+if ($portNote) { Write-Host "     → $portNote" }
+Write-Host "     （同一デバイスに計装アプリを複数入れる場合も devicePort をアプリごとに分ける）"
 if ($installClaude) {
     Write-Host "（AI向け規約は .claude\rules\uapp-e2e.md 経由で自動参照される。CLAUDE.md の書き換えは不要）"
 }

@@ -129,6 +129,17 @@ Unity CLI が無い / Unity 6 未満の場合は以下の手動手順で行う�
 
 #### 5b. APK ビルドで実機/エミュレーター検証（十数分）
 
+**Android を使わない運用（エディタ直結E2Eだけで回す）なら 5b は行わない。**
+その場合は 5a の完了をもって導入完了とし、次のように扱う（installer に `-Mode editor` を渡すと
+残手順の表示もこの前提になる）:
+
+| 項目 | エディタ専用運用での扱い |
+|---|---|
+| `UAPP_E2E_BRIDGE` define | **Build Settings で選んでいるプラットフォーム**に付ける（Android のままでも Standalone でもよい。エディタはアクティブなターゲットの define でコンパイルする） |
+| `e2e-config.json` の `package` / `activity` | 使わないので空でよい（adb を使わないため） |
+| `config\local.json` の `avd` | 不要 |
+| 実行コマンド | `uapp_e2e\scripts\run-e2e.ps1 -Editor` と `run-unity-tests.ps1 -Mode EditMode -Editor` |
+
 1. ビルド: `uapp_e2e\scripts\build-android.ps1`（初回はIL2CPPで10分超）
 2. エミュレーター起動 → `uapp_e2e\scripts\run-e2e.ps1`（テスト未作成なら ping 疎通のみ。
    5a で Player Settings に足した define をビルドスクリプト付与へ戻す場合はここで外す）

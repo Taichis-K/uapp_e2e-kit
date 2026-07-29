@@ -63,7 +63,12 @@ Android ネイティブ座標（左上原点・物理ピクセル）へ変換が
 
 - `"Canvas/Panel/StartButton"`: シーンルートからの絶対パス（`/` 区切り）
 - `"StartButton"`（`/` なし）: 全シーンから名前検索。複数一致は `AMBIGUOUS` エラーで候補パスを返す
-- 制限: 同名兄弟はパスでは区別できない（v1 では先勝ち）。dump の path で確認すること
+- **同名の兄弟は添字で区別する**: `"Canvas[1]/Panel/Close"`。
+  **同名が 2 つ以上あるときだけ** dump が添字を付ける（一意な名前のパスは従来どおり）。
+  添字は「同じ親の下の同名兄弟の中で何番目か」（0 始まり・階層順）。ルート同士の同名も同様に付く。
+  添字を省くと先頭に解決される（`"Canvas/Panel"` ＝ `"Canvas[0]/Panel"`）
+- **dump が返したパスは必ずそのまま resolve できる**（表記と解決を一致させるのが最優先）。
+  実プロジェクトでは `Canvas` が複数あるのが普通で、添字が無いとどれを指すのか決まらない
 
 ## コマンド
 
@@ -80,7 +85,12 @@ UI 階層をツリー JSON で返す。AI がテストを書くための「地�
 ```json
 → {"cmd": "dump", "args": {"scope": "ui", "probe": "selectable"}}
 ```
-- `scope`: `"ui"`（ルートCanvas配下、既定）| `"all"`（全シーンルート）
+- `scope`: `"ui"`（ルートCanvas配下、既定）| `"all"` / `"scene"`（**全ルート**）。
+  **`DontDestroyOnLoad` 配下の常駐オブジェクトも列挙する**（`resolve` と同じ全ルート走査。
+  以前は SceneManager の列挙だけを見ていたため、resolve では届くのに dump には出ないという
+  食い違いがあった。常駐 UI は実プロジェクトの定石で、そこが空白地帯だと
+  「dump を見てから書く」規約どおりに動く AI が発見できない）。
+  常駐オブジェクトのノードには `"dontDestroyOnLoad": true` が付く
 - `path`: 指定するとそのサブツリーのみ
 - `probe`: hittable 判定の対象。`"selectable"`（Button等のみ、既定）| `"all"` | `"none"`
 
@@ -106,7 +116,16 @@ UI 階層をツリー JSON で返す。AI がテストを書くための「地�
 - `hittable`: その中心座標を実タッチしたとき対象（またはその子孫）に届くか。
   `EventSystem.RaycastAll` の最前面ヒットで判定
 - `blockedBy`: 遮られている場合の遮蔽オブジェクトのパス。特殊値:
-  `"INACTIVE"`（非アクティブ）/ `"NOTHING_HIT"` / `"NO_EVENTSYSTEM"`
+  `"INACTIVE"`（非アクティブ）/ **`"NOT_RAYCASTABLE"`** / `"NOTHING_HIT"` / `"NO_EVENTSYSTEM"`
+- **`hittable: false` の理由は 3 通りあり、対処が違う**（混ぜると AI が無関係な対象を追う）:
+
+  | 値 | 意味 | 対処 |
+  |---|---|---|
+  | 遮蔽オブジェクトのパス | 他の UI に覆われている | 先に閉じる / `wait_until_hittable` で待つ |
+  | `NOT_RAYCASTABLE` | 対象（と子孫）に raycast を受ける要素が無い（`Graphic.raycastTarget` も Collider も無い） | **待っても永久に押せない**。指しているパスが間違っている |
+  | `NOTHING_HIT` | その座標に何も無い（画面外・全要素が raycastTarget=false 等） | 座標・表示状態を疑う |
+
+  判定は **`NOT_RAYCASTABLE` が最優先**（対象自身の性質なので、その場に何が居るかより確実）
 - 非 RectTransform オブジェクトは `center`（メインカメラ基準）のみ。hittable 判定は UI 専用
 
 ### get
@@ -137,6 +156,39 @@ UI 階層をツリー JSON で返す。AI がテストを書くための「地�
 → {"cmd": "pointer_reset"}
 ← {"released": 2}
 ```
+
+### key_down / key_up / mouse_* / pad_*（UI を経由しない入力）
+
+**UI の当たり判定を通らない入力**（キーボード・マウス・ゲームパッド）を注入する。
+「何かキーが押された」「パッドのボタンが押された」「マウスでクリックされた」を直接見ている
+ゲームコードは `tap(path)` では動かせないので、こちらを使う。
+
+```json
+→ {"cmd": "key_down",        "args": {"key": "space"}}         ← Key 列挙名（space / w / escape / f1 …）
+→ {"cmd": "key_up",          "args": {"key": "space"}}
+→ {"cmd": "mouse_move",      "args": {"x": 540, "y": 1200}}
+→ {"cmd": "mouse_down",      "args": {"button": "left", "x": 540, "y": 1200}}   ← 座標は任意
+→ {"cmd": "mouse_up",        "args": {"button": "left"}}       ← left / right / middle
+→ {"cmd": "mouse_scroll",    "args": {"dx": 0, "dy": 120}}
+→ {"cmd": "pad_button_down", "args": {"button": "buttonSouth"}} ← South / A / Cross でも可
+→ {"cmd": "pad_button_up",   "args": {"button": "buttonSouth"}}
+→ {"cmd": "pad_stick",       "args": {"stick": "left", "x": 0, "y": 1}}  ← -1〜1 に丸める
+→ {"cmd": "input_reset"}                                       ← 押しっぱなしを全解除
+→ {"cmd": "input_devices"}
+← {"devices": [{"name": "E2EVirtualGamepad", "layout": "Gamepad", "virtual": true, "current": true}, …],
+   "realGamepads": 0, "realKeyboards": 1, "realMice": 1}
+```
+
+- **注入先は専用の仮想デバイス**（`E2EVirtualKeyboard` / `E2EVirtualMouse` / `E2EVirtualGamepad`）。
+  実デバイスに流すと、そのデバイス自身の報告（スティックのドリフト・人が触った操作・
+  ドライバの定期送信）に上書きされ、テストが不安定に見える
+- **`input_devices` で実機の接続状況が分かる**。エディタ実行の PC には本物のキーボードやパッドが
+  同時に居る。人が触れば `current` を奪われるので、原因不明の不安定さにしないために可視化する
+- **レガシー入力バックエンド（Input Manager のみ）では届かない** → `INPUT_BACKEND_LEGACY` で明示的に失敗する
+  （黙って無反応だと、AI はアプリ側のバグを疑って延々と調べる）
+- 押した状態はブリッジ側が保持する（複数キーの同時押しが崩れないため）。
+  テストの後始末に `input_reset` を呼ぶ
+- down と up の間は最低 1 フレーム空ける（`pointer_*` と同じ理由。ドライバ側で ~50ms 待つ）
 
 ### ngui_event（NGUI搭載アプリのみ）
 `UICamera.Notify` によるフレームワークレベルのイベント送出。
@@ -195,7 +247,7 @@ sequenceDiagram
 |---|---|
 | `BAD_REQUEST` | 引数不足・型不正・JSON 不正 |
 | `UNKNOWN_COMMAND` | 未知の cmd |
-| `NOT_FOUND` | オブジェクト/コンポーネント/プロパティが見つからない |
+| `NOT_FOUND` | オブジェクト/コンポーネント/プロパティが見つからない（**コンポーネント名・プロパティ名の誤りでは message に候補を列挙する**: `available: …`） |
 | `AMBIGUOUS` | 名前検索で複数一致（message に候補パス最大10件） |
 | `POINTER_ALREADY_DOWN` / `POINTER_NOT_DOWN` | ポインタ状態の不整合 |
 | `TIMEOUT` | メインスレッド 30 秒無応答 |

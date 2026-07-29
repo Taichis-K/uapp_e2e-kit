@@ -19,6 +19,14 @@ namespace E2EBridge
             if (eventSystem == null)
                 return (false, "NO_EVENTSYSTEM");
 
+            // **対象がそもそも raycast の的でない**ことを最初に判定する。
+            // これは対象自身の性質なので、その場に何が居るかより確実で、対処も違う:
+            //   遮蔽 → 先に閉じる / wait_until_hittable で待てば解ける
+            //   的でない → 待っても永久に押せない（指しているパスが間違っている）
+            // 後回しにすると NOTHING_HIT や無関係な遮蔽者のパスに埋もれて、AI が誤った対象を追う
+            if (!IsRaycastTarget(target))
+                return (false, "NOT_RAYCASTABLE");
+
             var pointer = new PointerEventData(eventSystem) { position = screenPos };
             _results.Clear();
             eventSystem.RaycastAll(pointer, _results);
@@ -32,6 +40,20 @@ namespace E2EBridge
                 return (true, null);
 
             return (false, HierarchyDumper.GetPath(top.transform));
+        }
+
+        /// <summary>対象自身か子孫に、raycast を受けられる要素が 1 つでもあるか。</summary>
+        private static bool IsRaycastTarget(GameObject target)
+        {
+            // uGUI: Graphic の raycastTarget が実質の判定。Selectable だけでは受けられない
+            foreach (var graphic in target.GetComponentsInChildren<UnityEngine.UI.Graphic>(true))
+                if (graphic != null && graphic.raycastTarget) return true;
+            // uGUI 以外（NGUI 等）の当たり判定はコライダー側にある
+            foreach (var collider in target.GetComponentsInChildren<Collider>(true))
+                if (collider != null && collider.enabled) return true;
+            foreach (var collider2d in target.GetComponentsInChildren<Collider2D>(true))
+                if (collider2d != null && collider2d.enabled) return true;
+            return false;
         }
     }
 }
