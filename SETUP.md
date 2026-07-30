@@ -155,3 +155,14 @@ Unity CLI が無い / Unity 6 未満の場合は以下の手動手順で行う�
 `uapp_e2e/CLAUDE.md` の失敗解析手順と `docs/05-install-to-project.md` のトラブルシューティングを参照。
 判断に迷う変更（プロジェクト設定の書き換え等）は実行前にユーザーへ提示すること。
 
+## ライセンスと商標
+
+このキットは **MIT ライセンス**（同梱の `LICENSE`）。計装コード・ドライバ・スクリプトはすべて
+このキットの著作物で、有償アセットや伝播性ライセンスのコードは含まない。
+
+- NGUI 連携（`NguiAdapter`）は**リフレクションで型名を参照するだけ**で、NGUI のコードは同梱しない。
+  NGUI を使うかどうかは導入先プロジェクトの資産とライセンスに従う
+- Unity・Input System・Newtonsoft.Json・Android SDK・Python 等は**再配布していない**。
+  それぞれの提供元から導入し、各ライセンス・利用規約に従うこと
+- Unity は Unity Technologies、Android は Google LLC、NGUI は各権利者の商標。
+  **このキットは Unity Technologies 公式の製品ではなく、提携・承認も受けていない**

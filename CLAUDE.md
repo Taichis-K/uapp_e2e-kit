@@ -76,6 +76,8 @@ python -m e2e_driver.journey ..\Builds\journey    # → report.html 生成（詳
 4. **UI を経由しない入力は `Keyboard` / `Mouse` / `Gamepad`**（`tap(path)` では動かせない）。
    キー・パッドのボタン・マウスクリックを直接見ているコードが対象。専用の仮想デバイスへ注入するので、
    PC に実機が刺さっていても混ざらない（`client.input_devices()` で接続状況を確認できる）。
+   **仮想デバイスは種別ごとに初回注入時に生成される**ので、注入前の `devices` に出ないのは正常
+   （生成済みかは `virtualDevices` の `created`。注入前に `devices` を名前で引くと `KeyError` になる）。
    テスト後は `client.input_reset()`。レガシー入力バックエンドのみの構成では `INPUT_BACKEND_LEGACY` で明示的に失敗する
 5. **NGUI のレガシーInput構成では `ngui_tap / ngui_press / ngui_release`**（`pointer_*` は届かない）。
    構成は `ping` の `ngui` と、NGUI が `Input.touchCount` を直読みしているかで判断

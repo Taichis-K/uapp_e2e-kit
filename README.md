@@ -33,7 +33,12 @@ Claude Code 等の AI エージェントによる自律テスト開発を前提�
   `UAPP_E2E_BRIDGE` define の確認も、Build Settings で選んでいるプラットフォームに合わせて判定する）
 - **内側ループ（C#テスト）も1コマンド**: `run-unity-tests.ps1` で EditMode/PlayMode テストを実行し、
   失敗したテスト名・メッセージ・該当行を要約表示する（Unity CLI が無ければ Unity 本体の
-  batchmode へ自動フォールバック）
+  batchmode へ自動フォールバック。**CLI 側が不調なときは `-NoUnityCli` で Unity 本体の経路に
+  直接入れる**。指定しなくても CLI が 60 秒応答しなければ警告を出して切り替わる。v0.1.5）
+- **UI を経由しない入力も注入できる**（v0.1.4）: キーボード・マウス・ゲームパッドを**専用の仮想デバイス**へ
+  注入するので、`tap(path)` では動かせない「キーが押された」を直接読むゲームコードを E2E から操作できる
+  （PC に刺さっている実機と混ざらない。仮想デバイスは種別ごとに初回注入時に生成され、
+  `input_devices()` の `virtualDevices` で生成状況が分かる。v0.1.5）
 - **ジャーニー記録**: テスト実行から画面遷移マップ＋スクリーンショット＋カバレッジの
   自己完結HTMLレポートを自動生成（[docs/07-viewer.md](docs/07-viewer.md)）
 - **AI向けランブック同梱**: [SETUP.md](SETUP.md)（導入手順書）と e2e-setup / e2e-run / e2e-write-test /
@@ -70,7 +75,9 @@ cd uapp_e2e-kit
 - AIエージェント（任意・人手運用も可）: Claude Code、または OpenAI Codex CLI v0.94.0 以降
 - [Unity CLI](https://docs.unity.com/en-us/unity-cli)（任意）: `run-e2e.ps1 -Editor`（エディタ直結E2Eの
   自動化）に必要。**Unity 6 以降**が対象（`com.unity.pipeline` の要件）。
-  `run-unity-tests.ps1` は Unity CLI が無くても動く（batchmode へ自動フォールバック）
+  `run-unity-tests.ps1` は Unity CLI が無くても動く（batchmode へ自動フォールバック。
+  CLI を入れていて不調な場合は `-NoUnityCli`）。CLI は認証セッションが切れると無言で長時間
+  応答しなくなるため、応答しないときは `unity doctor` / `unity auth login` を確認する
 
 Unity・Android SDK・Python 等は別途用意し、それぞれのライセンス・利用規約に従うこと。
 

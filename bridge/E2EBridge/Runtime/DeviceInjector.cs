@@ -114,11 +114,33 @@ namespace E2EBridge
             return new JObject
             {
                 ["devices"] = list,
+                // **仮想デバイスは種別ごとに「初回注入時」に生成される**（遅延生成）。
+                // 注入前に一覧を取ると仮想デバイスが 1 つも出ないため、
+                // 「実機のデバイスに注入しているのでは」と誤読される（導入先で実際に誤読され、
+                // テストが KeyError: 'E2EVirtualMouse' で落ちた）。未生成の種別も created:false で並べる
+                ["virtualDevices"] = new JArray
+                {
+                    VirtualDeviceEntry("keyboard", VirtualKeyboardName),
+                    VirtualDeviceEntry("mouse", VirtualMouseName),
+                    VirtualDeviceEntry("gamepad", VirtualGamepadName)
+                },
                 // 実機の入力機器が同時に居るか（居ても動くが、人が触れば当然干渉する）
                 ["realGamepads"] = CountReal<Gamepad>(VirtualGamepadName),
                 ["realKeyboards"] = CountReal<Keyboard>(VirtualKeyboardName),
                 ["realMice"] = CountReal<Mouse>(VirtualMouseName)
             };
+        }
+
+        // 未生成でも「その種別は存在しうる」ことを見せる（created:false）。
+        // 注入すればこの名前で生成される、という対応を一覧の中で読み取れるようにする
+        private static JObject VirtualDeviceEntry(string kind, string name)
+        {
+            var created = false;
+            foreach (var device in InputSystem.devices)
+            {
+                if (device.name == name) { created = true; break; }
+            }
+            return new JObject { ["kind"] = kind, ["name"] = name, ["created"] = created };
         }
 
         private static bool IsCurrent(InputDevice device)

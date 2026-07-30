@@ -270,6 +270,16 @@ class BridgeClient:
         エディタ実行の PC には本物のキーボード・マウス・ゲームパッドが同時に居る。
         注入は専用の仮想デバイスへ行うが、人が実機を触れば `current` は奪われる。
         原因不明の不安定さにしないよう、`realGamepads` 等で最初から見えるようにしている。
+
+        **仮想デバイスは種別ごとに「初回注入時」に生成される（遅延生成）。**
+        つまり `key_down` / `mouse_move` / `pad_stick` を一度も呼んでいない種別は
+        `devices` に出てこない。**これは実機に注入しているのではない**（注入先は常に仮想デバイス）。
+        どの種別が生成済みかは `virtualDevices` を見る:
+
+            {"virtualDevices": [{"kind": "mouse", "name": "E2EVirtualMouse", "created": false}, ...]}
+
+        `devices` を名前で引くコードは、注入前だと KeyError になる（導入先で実際に踏まれた）。
+        注入後に取り直すか、`virtualDevices` の `created` を見ること。
         """
         return self.call("input_devices")
 

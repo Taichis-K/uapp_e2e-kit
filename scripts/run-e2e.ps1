@@ -19,6 +19,13 @@ param(
     [switch]$Editor,             # エディタ直結モード（Unity CLI で Play 制御。ヘッダコメント参照）
     [string]$Scene,              # -Editor: 開くシーン（未指定: Build Settings の先頭シーン）
     [string]$EditorResolution,   # -Editor: Game view 解像度 "幅x高さ"（未指定: orientation から 1080x2340/2340x1080）
+    # -Editor: エディタが pipeline コマンドに応答するまで待つ上限（秒）。コールドスタート直後は
+    # アセットインポート/コンパイルで手が塞がっており、接続済み（unity status=ready）でも
+    # 軽いコマンドがタイムアウトする。大規模プロジェクトの初回インポートは分単位になるので延ばせるようにする
+    [int]$EditorReadyTimeoutSeconds = 600,
+    # -Editor: `unity status`（最初の CLI 呼び出し）を打ち切るまでの秒数。CLI の認証セッションが
+    # stale になると無言で 10 分以上ハングするため、必ず時間を区切って原因を示して止める
+    [int]$UnityCliProbeSeconds = 60,
     [string]$PytestArgs = ""
 )
 
@@ -233,6 +240,54 @@ if ($Editor) {
                "手動手順: エディタで Play → `$env:UAPP_E2E_EDITOR='1' で pytest")
     }
 
+    function Invoke-UnityCliStatus {
+        <#
+          .SYNOPSIS
+          `unity status` を時間制限つきで叩き、@{ TimedOut; Json; Raw } を返す。
+
+          .NOTES
+          Unity CLI は認証セッションが stale になると**無言で 10 分以上ハングする**（導入先で実測）。
+          `& $unityCli` で直に呼ぶと打ち切れず、利用者からは「何も起きない」ようにしか見えないので、
+          **エディタの状態を見る呼び出しだけは必ず時間を区切る**（ここが一番最初の CLI 呼び出し）。
+          パスは明示的に引用する（`-ArgumentList` の配列は空白結合されるため、空白入りのパスが割れる）。
+        #>
+        param([int]$TimeoutSeconds = 60, [string]$WaitMessage)
+        $outFile = [System.IO.Path]::GetTempFileName()
+        $errFile = [System.IO.Path]::GetTempFileName()
+        try {
+            $process = Start-Process -FilePath $unityCli -PassThru -NoNewWindow `
+                -ArgumentList @("status", "--project-path", "`"$projectDir`"", "--format", "json", "--no-banner") `
+                -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            $announced = $false
+            while (-not $process.HasExited -and $sw.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
+                if ($WaitMessage -and $sw.Elapsed.TotalSeconds -ge 5 -and -not $announced) {
+                    Write-Host $WaitMessage
+                    $announced = $true
+                }
+                Start-Sleep -Milliseconds 500
+            }
+            if (-not $process.HasExited) {
+                try { $process.Kill() } catch {}
+                $process.WaitForExit(10000) | Out-Null
+                return @{ TimedOut = $true; Json = $null; Raw = "" }
+            }
+            $raw = ((Get-Content $outFile -Raw -ErrorAction SilentlyContinue) +
+                    (Get-Content $errFile -Raw -ErrorAction SilentlyContinue))
+            $json = $null
+            try { $json = $raw | ConvertFrom-Json } catch { $json = $null }
+            return @{ TimedOut = $false; Json = $json; Raw = $raw }
+        } finally {
+            Remove-Item $outFile, $errFile -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    function Test-CliConnected {
+        # `unity status` が「このプロジェクトを開いたエディタが居る」と言っているか
+        param($Status)
+        [bool]($Status -and $Status.Json -and $Status.Json.success -and $Status.Json.data.count -ge 1)
+    }
+
     function Invoke-UnityCli {
         param([string[]]$CliArgs, [switch]$AllowFail)
         # cmd 系は常に対象プロジェクトへスコープする（複数エディタ起動時に別プロジェクトを操作・停止しない）
@@ -265,23 +320,31 @@ if ($Editor) {
     $status = $null
     for ($attempt = 0; $attempt -lt 3; $attempt++) {
         if ($attempt -gt 0) { Start-Sleep -Seconds 3 }
-        $status = Invoke-UnityCli @("status", "--project-path", $projectDir) -AllowFail
-        if ($status -and $status.success -and $status.data.count -ge 1) { break }
+        $status = Invoke-UnityCliStatus -TimeoutSeconds $UnityCliProbeSeconds `
+            -WaitMessage "[$projectName] Unity CLI の応答を待っています（unity status）..."
+        if (Test-CliConnected -Status $status) { break }
+        if ($status.TimedOut) {
+            # CLI 自体が壊れている（認証セッション stale 等）。-Editor は CLI 経由でしか
+            # 成立しないので、黙って待ち続けずに原因と代替手段を示して止める
+            throw ("Unity CLI が $UnityCliProbeSeconds 秒応答しません（unity status）。" +
+                   "'unity doctor' で状態を確認し、認証セッションが切れているなら 'unity auth login' で復帰させてください。" +
+                   "CLI を使わない手順: エディタで対象シーンを開いて Play → `$env:UAPP_E2E_EDITOR='1' で pytest" +
+                   "（待ち時間は -UnityCliProbeSeconds で延ばせる）")
+        }
     }
     # エディタが動いている（ロックファイルがある）のに応答しない理由の大半は
     # **コンパイル/ドメインリロード中**。C# を直した直後に叩くのは日常なので、腰を据えて待つ
-    if ((-not $status -or -not $status.success -or $status.data.count -lt 1) -and
-        (Test-UnityProjectLocked -ProjectDir $projectDir)) {
+    if (-not (Test-CliConnected -Status $status) -and (Test-UnityProjectLocked -ProjectDir $projectDir)) {
         Write-Host "[$projectName] エディタは起動中だが Pipeline が応答しない（コンパイル中の可能性）。最大 300 秒待ちます..."
         $wait = [System.Diagnostics.Stopwatch]::StartNew()
         while ($wait.Elapsed.TotalSeconds -lt 300) {
             Start-Sleep -Seconds 3
-            $status = Invoke-UnityCli @("status", "--project-path", $projectDir) -AllowFail
-            if ($status -and $status.success -and $status.data.count -ge 1) { break }
+            $status = Invoke-UnityCliStatus -TimeoutSeconds $UnityCliProbeSeconds
+            if (Test-CliConnected -Status $status) { break }
         }
         Write-Host "[$projectName] 待機 $([int]$wait.Elapsed.TotalSeconds) 秒"
     }
-    if (-not $status -or -not $status.success -or $status.data.count -lt 1) {
+    if (-not (Test-CliConnected -Status $status)) {
         # **既に開いているプロジェクトを二重に開かない**。Unity は開いている間 Temp\UnityLockfile を作る。
         # status が一時的に応答しないだけで `unity open` すると、利用者の画面に
         # 「プロジェクトは既に開かれています」ダイアログが出て操作を奪う
@@ -293,13 +356,13 @@ if ($Editor) {
         Write-Host "[$projectName] エディタ未接続。Pipeline パッケージを確認してエディタを起動します..."
         # 注意: 未導入の場合 Packages\manifest.json に com.unity.pipeline が追加される（VCS差分になる）
         $null = Invoke-UnityCli @("pipeline", "install", "--project-path", $projectDir)
-        Start-Process -FilePath $unityCli -ArgumentList @("open", $projectDir) | Out-Null
+        # **パスは引用する**（-ArgumentList の配列は空白結合されるため、空白入りのパスが割れる）
+        Start-Process -FilePath $unityCli -ArgumentList @("open", "`"$projectDir`"") | Out-Null
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
         while ($true) {
             Start-Sleep -Seconds 5
-            $status = Invoke-UnityCli @("status", "--project-path", $projectDir) -AllowFail
-            if ($status -and $status.success -and $status.data.count -ge 1 -and
-                $status.data.instances[0].state -eq "ready") { break }
+            $status = Invoke-UnityCliStatus -TimeoutSeconds $UnityCliProbeSeconds
+            if ((Test-CliConnected -Status $status) -and $status.Json.data.instances[0].state -eq "ready") { break }
             if ($sw.Elapsed.TotalSeconds -gt 600) { throw "エディタの Pipeline 接続待ちがタイムアウト（600秒）。Editor.log を確認" }
         }
         Write-Host "[$projectName] エディタ接続完了（$([int]$sw.Elapsed.TotalSeconds)秒）"
@@ -308,8 +371,36 @@ if ($Editor) {
     # 版差の早期検出: Unity CLI と com.unity.pipeline の組み合わせが変わると、後続の失敗が
     # 「400 Bad Request: Parameter Validation Failed」のような読み解きにくい形で出る
     # （実例: pipeline 0.4 で eval の code が必須の名前付き引数になり、位置引数の呼び出しが全滅した）。
-    # 一番単純な eval を 1 回だけ叩いて、ここで切り分けを終わらせる
-    $probe = Invoke-UnityCli @("cmd", "eval", "--code", 'return "ok";') -AllowFail
+    # 一番単純な eval を叩いて、ここで切り分けを終わらせる。
+    #
+    # **`unity status` が ready を返すことと、pipeline コマンドに応答できることは別**。
+    # コールドスタート直後のエディタはアセットインポートとスクリプトコンパイルで手が塞がっており、
+    # この軽い eval でも既定 30 秒（--timeout の既定値）でタイムアウトする。
+    # インポートが終われば同じコマンドが 1 秒未満で返るので、**タイムアウトの間は待って再試行**する
+    # （--timeout を伸ばすだけだと「本当に固まっている」ケースと区別できない）。
+    # タイムアウト以外の失敗＝版差なので、待たずに下の判定へ落とす
+    $probe = $null
+    $probeWait = [System.Diagnostics.Stopwatch]::StartNew()
+    $probeNotified = $false
+    while ($true) {
+        $probe = Invoke-UnityCli @("cmd", "eval", "--code", 'return "ok";') -AllowFail
+        if ($probe -and $probe.success) { break }
+        $probeError = if ($probe.errors) { ($probe.errors | ForEach-Object { $_.message }) -join " / " } else { "応答なし" }
+        if ($probeError -notmatch "timed out|timeout") { break }
+        if (-not $probeNotified) {
+            Write-Host ("[$projectName] エディタは接続済みだが pipeline コマンドに応答しない" +
+                        "（インポート/コンパイル中の可能性）。最大 $EditorReadyTimeoutSeconds 秒待ちます...")
+            $probeNotified = $true
+        }
+        if ($probeWait.Elapsed.TotalSeconds -ge $EditorReadyTimeoutSeconds) {
+            throw ("エディタが $([int]$probeWait.Elapsed.TotalSeconds) 秒たっても pipeline コマンドに応答しません: $probeError。" +
+                   "エディタ側でインポート/コンパイルが終わらない、または Console でエラーが出ていないか確認する" +
+                   "（待ち時間は -EditorReadyTimeoutSeconds で延ばせる）")
+        }
+        Write-Host "[$projectName] 待機 $([int]$probeWait.Elapsed.TotalSeconds) 秒"
+        Start-Sleep -Seconds 3
+    }
+    if ($probeNotified) { Write-Host "[$projectName] エディタ応答を確認（待機 $([int]$probeWait.Elapsed.TotalSeconds) 秒）" }
     if (-not $probe -or -not $probe.success -or $probe.data.result.result -ne "ok") {
         $detail = if ($probe.errors) { ($probe.errors | ForEach-Object { $_.message }) -join " / " } else { "応答なし" }
         throw ("Unity CLI / com.unity.pipeline のバージョンが想定と異なります（eval の疎通に失敗: $detail）。" +

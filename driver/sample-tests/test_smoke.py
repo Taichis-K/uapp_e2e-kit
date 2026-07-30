@@ -190,7 +190,17 @@ def test_input_devices_reports_real_hardware(client):
     assert isinstance(info["devices"], list)
     for key in ("realGamepads", "realKeyboards", "realMice"):
         assert isinstance(info[key], int)
-    # 注入したら、その仮想デバイスが一覧に出ること
+    # **仮想デバイスは遅延生成**（初回注入時）。未生成の種別も created:false で並ぶこと
+    # （並ばないと「実機に注入している」と誤読され、devices を名前で引いて KeyError になる）
+    virtuals = {v["kind"]: v for v in info["virtualDevices"]}
+    assert set(virtuals) == {"keyboard", "mouse", "gamepad"}
+    assert virtuals["keyboard"]["name"] == "E2EVirtualKeyboard"
+    assert virtuals["mouse"]["name"] == "E2EVirtualMouse"
+    assert virtuals["gamepad"]["name"] == "E2EVirtualGamepad"
+    for entry in virtuals.values():
+        assert isinstance(entry["created"], bool)
+    # 注入したら、その仮想デバイスが一覧に出て created も真になること
     Keyboard(client).press("space")
-    names = [d["name"] for d in client.input_devices()["devices"]]
-    assert "E2EVirtualKeyboard" in names
+    after = client.input_devices()
+    assert "E2EVirtualKeyboard" in [d["name"] for d in after["devices"]]
+    assert {v["kind"]: v["created"] for v in after["virtualDevices"]}["keyboard"] is True

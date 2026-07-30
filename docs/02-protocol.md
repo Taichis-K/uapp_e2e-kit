@@ -176,12 +176,19 @@ UI 階層をツリー JSON で返す。AI がテストを書くための「地�
 → {"cmd": "input_reset"}                                       ← 押しっぱなしを全解除
 → {"cmd": "input_devices"}
 ← {"devices": [{"name": "E2EVirtualGamepad", "layout": "Gamepad", "virtual": true, "current": true}, …],
+   "virtualDevices": [{"kind": "keyboard", "name": "E2EVirtualKeyboard", "created": true},
+                      {"kind": "mouse",    "name": "E2EVirtualMouse",    "created": false},
+                      {"kind": "gamepad",  "name": "E2EVirtualGamepad",  "created": true}],
    "realGamepads": 0, "realKeyboards": 1, "realMice": 1}
 ```
 
 - **注入先は専用の仮想デバイス**（`E2EVirtualKeyboard` / `E2EVirtualMouse` / `E2EVirtualGamepad`）。
   実デバイスに流すと、そのデバイス自身の報告（スティックのドリフト・人が触った操作・
   ドライバの定期送信）に上書きされ、テストが不安定に見える
+- **仮想デバイスは種別ごとに初回注入時に生成される（遅延生成）**。一度も注入していない種別は
+  `devices` に出てこないが、**実機に注入しているわけではない**。生成済みかどうかは
+  `virtualDevices` の `created` で分かる（注入前に `devices` を名前で引くコードは
+  `KeyError: 'E2EVirtualMouse'` になる。導入先で実際に踏まれた）
 - **`input_devices` で実機の接続状況が分かる**。エディタ実行の PC には本物のキーボードやパッドが
   同時に居る。人が触れば `current` を奪われるので、原因不明の不安定さにしないために可視化する
 - **レガシー入力バックエンド（Input Manager のみ）では届かない** → `INPUT_BACKEND_LEGACY` で明示的に失敗する

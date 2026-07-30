@@ -8,6 +8,11 @@ AIエージェント（Claude Code / Codex 等）がこの E2E 基盤を使っ�
 シーン→Game view解像度→Play→pytest→Play終了まで全自動（ビルド・デバイス・adb 不要）。
 実機依存の検証（logcat・adbタップ・実機描画）だけデバイス実行に回す。
 
+エディタが閉じている状態からの実行（コールドスタート）では、**接続後にエディタが実際に応答するまで待つ**
+（`unity status=ready` と「pipeline コマンドに応答できる」は別。インポート/コンパイル中は
+軽いコマンドでも 30 秒のタイムアウトに達する）。待ちの上限は `-EditorReadyTimeoutSeconds`（既定600秒）で、
+待機中は「待機 N 秒」が出る。
+
 ## 全体ループ
 
 ```mermaid
@@ -35,6 +40,12 @@ Android ビルドは1回十数分かかるため、③を回す頻度が高い�
   結果XMLが出ない）。エディタを閉じてから回すこと
 - Unity CLI があればそれを、無ければ Unity 本体の `-batchmode -runTests` を自動で使う
   （エディタは `uapp_e2e/config/local.json` の editorRoots ＋ `ProjectVersion.txt` から解決）
+- **Unity CLI 側だけが壊れている場合は `-NoUnityCli`** で Unity 本体の経路に直接入る
+  （CLI は認証セッションが切れると `unity status` が無言で 10 分以上ハングする。`unity auth login` で復帰）。
+  指定しなくても CLI が `-UnityCliProbeSeconds`（既定60秒）応答しなければ警告を出して自動で切り替わる。
+  **待っている間は「待機 N 秒」が出る**ので、無言なら別の原因を疑う。
+  ただし `-Editor`（エディタ内実行・エディタ直結E2E）は CLI 経由でしか成立しないため切り替えられず、
+  「CLI が応答しない」と明示エラーで止まる（`unity auth login` で直すか、`-Editor` を外して回す）
 - 結果は NUnit XML。**失敗テスト名・メッセージ・スタック先頭が要約表示される**ので、そこから修正対象へ直行する
 - 終了ハング対策に `-TimeoutSeconds`（既定1800）で強制終了し、出力済みの結果XMLで判定する
 - EditMode は既定で `-nographics`（グラフィックス初期化と USB スキャンを避ける。実行が数割速くなる）。
