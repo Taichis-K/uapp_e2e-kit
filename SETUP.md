@@ -104,6 +104,11 @@ Codex ユーザーでルート `AGENTS.md` が無いプロジェクトは `-Root
 # adb を使うテストがある場合は除外: -PytestArgs "--deselect tests/xxx.py::test_yyy"
 ```
 
+結果に **`test_bridge_ping` の PASSED が含まれていることを確認する**（キット同梱の疎通スモーク。
+単体テストだけの「N passed」はブリッジに一度も接続していないので、導入検証の証明にならない。
+`test_bridge_ping` が SKIPPED のままなら run-e2e 経由で実行できていない）。
+**`-PytestArgs "-k …"` や `--deselect` で絞ると、このスモークごと外れて「passed」だけが残る**ので、
+導入検証の一発目は絞り込みなしで（`tests` を個別ファイルに変えずに）実行すること。
 エディタが別タスクで Play 中の場合は明示エラーで停止する（排他ガード）。
 Unity CLI が無い / Unity 6 未満の場合は以下の手動手順で行う。
 

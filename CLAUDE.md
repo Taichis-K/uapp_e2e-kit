@@ -18,6 +18,8 @@ Codex 等は `uapp_e2e/AGENTS.md`（同）から参照される。
 .\scripts\run-e2e.ps1 -Editor                 # エディタ直結E2E（Unity CLI＋Unity 6以降。ビルド/デバイス/adb不要・
                                               # シーン→解像度→Play→pytest→Play終了まで全自動。既にPlay中なら明示エラー）
 .\scripts\run-unity-tests.ps1 -Mode EditMode  # 内側ループ（C#のEditMode/PlayModeテスト。失敗は要約表示）
+.\scripts\unity-editor-status.ps1             # **このプロジェクト**のエディタが開いているかを判定（-Json 可）
+                                              # Get-Process Unity では判定できない（他プロジェクトと混同する）
 ```
 
 複数ターゲット同時: `-DeviceSerial emulator-5556 -HostPort 13335` のように分離する。
@@ -78,7 +80,11 @@ python -m e2e_driver.journey ..\Builds\journey    # → report.html 生成（詳
    PC に実機が刺さっていても混ざらない（`client.input_devices()` で接続状況を確認できる）。
    **仮想デバイスは種別ごとに初回注入時に生成される**ので、注入前の `devices` に出ないのは正常
    （生成済みかは `virtualDevices` の `created`。注入前に `devices` を名前で引くと `KeyError` になる）。
-   テスト後は `client.input_reset()`。レガシー入力バックエンドのみの構成では `INPUT_BACKEND_LEGACY` で明示的に失敗する
+   テスト後は `client.input_reset()`（注入に使うデバイスが無効化されたままなら再有効化する
+   ＝復旧路も兼ねる。実機のキーボード・マウス・パッドには触らない）。
+   エディタ再生では Game view のフォーカスに注入が左右されないよう初回注入時に Input System 設定を
+   自動で切り替える（再生終了時に復元。適用状態は `input_devices` の `editorFocusOverride`）。
+   レガシー入力バックエンドのみの構成では `INPUT_BACKEND_LEGACY` で明示的に失敗する
 5. **NGUI のレガシーInput構成では `ngui_tap / ngui_press / ngui_release`**（`pointer_*` は届かない）。
    構成は `ping` の `ngui` と、NGUI が `Input.touchCount` を直読みしているかで判断
 6. マルチタッチテストには logcat 例外アサート（`adb.clear_logcat()` → 操作 → `adb.unity_exceptions()` 空）を付ける
@@ -97,6 +103,13 @@ python -m e2e_driver.journey ..\Builds\journey    # → report.html 生成（詳
 5. **全テスト接続エラーなら `Builds/failure/crash.txt`**（ネイティブクラッシュはUnityタグに出ない）。
    `adb shell pidof <package>` が空ならプロセス死亡
 6. dump を再取得して期待とのUI差分を見る
+
+**切り分けでやってはいけないこと（エディタ直結）**: `InputSystem.DisableDevice(...)` での
+デバイス無効化と、`IPointerDownHandler` 等のイベントハンドラの直接呼び出し。どちらも
+**その Play セッションの注入が壊れたまま戻らなくなる**（実マウスの干渉排除やハンドラ疎通確認の
+つもりでも使わない）。壊してしまったら `client.input_reset()` が**注入に使うデバイス**
+（仮想デバイスと Touchscreen）を再有効化する。実機のキーボード・マウス・パッドは戻さないので、
+それらを止めてしまった場合と、それでも戻らない場合は Play を再起動する
 
 ## 制約
 

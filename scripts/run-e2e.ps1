@@ -91,14 +91,43 @@ function Format-InstallFailure {
 function Test-UnityProjectLocked {
     <#
       .SYNOPSIS
-      エディタがこのプロジェクトを実際に開いているか（Temp\UnityLockfile を掴んでいるか）。
+      エディタがこのプロジェクトを掴んでいるか（二重に開かないためのガード）。
 
       .NOTES
-      **ファイルの存在だけで判断しない**。エディタが異常終了するとロックファイルは残るため、
-      存在で判定すると「既に開いています」と言い続けて永久に起動できなくなる（実際に踏んだ）。
-      排他で開けたら誰も掴んでいない＝古い残骸。
+      **単一の根拠では判定できない**（2026-07-30 に Unity 6000.3.6f1 で実測。
+      内訳の表示は `scripts\unity-editor-status.ps1`）:
+
+      1. `-projectPath <対象>` を持つ GUI の Unity.exe プロセス … 起動直後から分かる唯一の信号
+      2. `Library\EditorInstance.json` の `process_id` の生存 … **ロード完了後**にしか現れず、
+         異常終了で古い pid が残る（生存確認が必須）
+      3. `Temp\UnityLockfile` の排他オープン … **開いているのに排他オープンできてしまう状態がある**
+         （起動途中・モーダルダイアログ待ち）。存在で判定するのも誤り（残骸で永久に開いている扱い）
     #>
     param([Parameter(Mandatory)][string]$ProjectDir)
+
+    try {
+        $target = (Resolve-Path -LiteralPath $ProjectDir).Path.TrimEnd('\')
+        foreach ($p in Get-CimInstance Win32_Process -Filter "Name='Unity.exe'" -ErrorAction Stop) {
+            $cmd = $p.CommandLine
+            if (-not $cmd) { continue }
+            if ($cmd -match '(^|\s)-batchmode(\s|$)') { continue }
+            if ($cmd -match '-projectPath\s+"?([^"]+?)"?(\s+-|\s*$)') {
+                $path = $Matches[1].Trim()
+                try { $path = (Resolve-Path -LiteralPath $path).Path.TrimEnd('\') } catch { }
+                if ($path -ieq $target) { return $true }
+            }
+        }
+    } catch { }
+
+    $instanceFile = Join-Path $ProjectDir "Library\EditorInstance.json"
+    if (Test-Path -LiteralPath $instanceFile) {
+        try {
+            $editorPid = [int]((Get-Content $instanceFile -Raw | ConvertFrom-Json).process_id)
+            $proc = if ($editorPid) { Get-Process -Id $editorPid -ErrorAction SilentlyContinue } else { $null }
+            if ($proc -and $proc.ProcessName -eq "Unity") { return $true }
+        } catch { }
+    }
+
     $lock = Join-Path $ProjectDir "Temp\UnityLockfile"
     if (-not (Test-Path -LiteralPath $lock)) { return $false }
     try {
@@ -449,8 +478,13 @@ if ($Editor) {
         $EditorResolution = if ($config.orientation -eq "landscape") { "2340x1080" } else { "1080x2340" }
     }
     $wh = $EditorResolution -split "x"
-    # C#文字列リテラルの二重引用符はコマンドライン経由で壊れやすいため eval_file（一時ファイル）で渡す
-    $evalTmp = Join-Path ([System.IO.Path]::GetTempPath()) ("uapp_e2e-eval-" + [System.IO.Path]::GetRandomFileName() + ".cs")
+    # C#文字列リテラルの二重引用符はコマンドライン経由で壊れやすいため eval_file（一時ファイル）で渡す。
+    # 置き場所は TEMP でなく Builds\ 配下（gitignore 済み）: サンドボックス環境では TEMP が
+    # 8.3 短縮パス（C:\Users\XXXXXX~1.YYY\...）で渡り、その形のパスは Move-Item / Remove-Item が
+    # -ErrorAction SilentlyContinue でも抑止されない失敗になる（導入先で実測）
+    $evalTmpDir = Join-Path $root "Builds\tmp"
+    New-Item -ItemType Directory -Force $evalTmpDir | Out-Null
+    $evalTmp = Join-Path $evalTmpDir ("uapp_e2e-eval-" + [System.IO.Path]::GetRandomFileName() + ".cs")
     try {
         [System.IO.File]::WriteAllText($evalTmp,
             "UnityEditor.PlayModeWindow.SetCustomRenderingResolution($($wh[0]), $($wh[1]), `"uapp_e2e E2E`");`nreturn `"ok`";`n")
@@ -498,6 +532,10 @@ if ($Editor) {
         Pop-Location
         Remove-Item Env:\UAPP_E2E_EDITOR -ErrorAction SilentlyContinue
         Remove-Item Env:\UAPP_E2E_JOURNEY_DIR -ErrorAction SilentlyContinue
+        # 設定した分は全部消す（消し漏れると、次に手で pytest を回したときに
+        # 古いプロジェクトのエディタへスクリーンショットを撮りに行く）
+        Remove-Item Env:\UAPP_E2E_UNITY_CLI -ErrorAction SilentlyContinue
+        Remove-Item Env:\UAPP_E2E_PROJECT_PATH -ErrorAction SilentlyContinue
         # Play は必ず終了させる（次のタスクのために排他資源を解放）
         $null = Invoke-UnityCli @("cmd", "editor_stop") -AllowFail
     }
@@ -571,7 +609,6 @@ if ($HostPort -eq 0) {
 }
 adb @adbTarget forward "tcp:$HostPort" "tcp:$devicePort" | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "adb forward 失敗 (exit=$LASTEXITCODE)。ポート $HostPort が他ターゲットと重複していないか確認" }
-$env:UAPP_E2E_BRIDGE_PORT = $HostPort
 adb @adbTarget logcat -c
 # -S: 起動前に対象プロセスを確実にkill（前回実行の状態残留を防ぐ） / -W: 起動完了まで待つ
 # -a MAIN -c LAUNCHER: ランチャー起動と同じ Intent にする（action 無しだと起動直後に
@@ -582,6 +619,11 @@ if ($LASTEXITCODE -ne 0) { throw "アプリ起動失敗 (exit=$LASTEXITCODE)" }
 Write-Host "[$projectName] アプリ起動（$(if ($DeviceSerial) { $DeviceSerial } else { '既定デバイス' }) / port $HostPort）。テストを実行します..."
 if ($JourneyDir) { Write-Host "[$projectName] ジャーニー記録: $JourneyDir" }
 
+# pytest へ渡す環境変数は、この直後の try/finally で必ず消せる位置でだけ設定する
+#（起動失敗で throw する箇所より前に置くと、呼び出し元のシェルに残る。残った
+#  UAPP_E2E_BRIDGE_PORT は、次に手で pytest を回したときに疎通スモークを
+#  「run-e2e 経由」と誤認させ、待受のいないポートへ接続しにいく）
+$env:UAPP_E2E_BRIDGE_PORT = $HostPort
 $env:UAPP_E2E_PACKAGE = $package
 $env:UAPP_E2E_DEVICE_PORT = $devicePort
 if ($DeviceSerial) { $env:UAPP_E2E_DEVICE_SERIAL = $DeviceSerial }

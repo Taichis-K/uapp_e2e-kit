@@ -173,9 +173,11 @@ UI 階層をツリー JSON で返す。AI がテストを書くための「地�
 → {"cmd": "pad_button_down", "args": {"button": "buttonSouth"}} ← South / A / Cross でも可
 → {"cmd": "pad_button_up",   "args": {"button": "buttonSouth"}}
 → {"cmd": "pad_stick",       "args": {"stick": "left", "x": 0, "y": 1}}  ← -1〜1 に丸める
-→ {"cmd": "input_reset"}                                       ← 押しっぱなしを全解除
+→ {"cmd": "input_reset"}                                       ← 押しっぱなしを全解除＋無効化デバイスの再有効化
+← {"released": 2, "reenabledDevices": 0}
 → {"cmd": "input_devices"}
 ← {"devices": [{"name": "E2EVirtualGamepad", "layout": "Gamepad", "virtual": true, "current": true}, …],
+   "editorFocusOverride": false,
    "virtualDevices": [{"kind": "keyboard", "name": "E2EVirtualKeyboard", "created": true},
                       {"kind": "mouse",    "name": "E2EVirtualMouse",    "created": false},
                       {"kind": "gamepad",  "name": "E2EVirtualGamepad",  "created": true}],
@@ -193,6 +195,21 @@ UI 階層をツリー JSON で返す。AI がテストを書くための「地�
   同時に居る。人が触れば `current` を奪われるので、原因不明の不安定さにしないために可視化する
 - **レガシー入力バックエンド（Input Manager のみ）では届かない** → `INPUT_BACKEND_LEGACY` で明示的に失敗する
   （黙って無反応だと、AI はアプリ側のバグを疑って延々と調べる）
+- **エディタ再生では、初回注入時に Input System の設定を自動で切り替える**
+  （`editorInputBehaviorInPlayMode=AllDeviceInputAlwaysGoesToGameView` /
+  `backgroundBehavior=IgnoreFocus` / `Application.runInBackground=true` の 3 点セット。
+  再生終了時に元へ戻す）。既定設定のままだと、**Game view が Scene view 等にフォーカスを
+  奪われている間、Pointer / Keyboard のイベントは Editor 更新でしか処理されない** —
+  アクション駆動の uGUI は動くのに、`wasPressedThisFrame` 等をポーリングするコードには
+  一切届かないという分かりにくい形で壊れる（導入先で実際に発生。OS のウィンドウフォーカスは
+  無関係で、エディタ内のビュー間フォーカスだけが効く）。適用状態は `input_devices` の
+  `editorFocusOverride` で確認できる
+- **`input_reset` は復旧路を兼ねる**: 無効化されたままのデバイスを再有効化する（`reenabledDevices`）。
+  **対象は E2E が注入に使うデバイスだけ**＝ブリッジの仮想デバイス（`E2EVirtual*`）と、
+  タッチの注入先である `Touchscreen`。実機のキーボード・マウス・パッドは E2E が使わないので触らない
+  （アプリが意図的に無効化している可能性があるものを後始末コマンドが勝手に起こさない）。
+  センサー類も「既定で無効」が正常なので対象外。触られなかったデバイスの状態は
+  `input_devices` の `enabled` で分かる（戻したければ Play を再起動する）
 - 押した状態はブリッジ側が保持する（複数キーの同時押しが崩れないため）。
   テストの後始末に `input_reset` を呼ぶ
 - down と up の間は最低 1 フレーム空ける（`pointer_*` と同じ理由。ドライバ側で ~50ms 待つ）

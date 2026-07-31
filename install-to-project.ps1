@@ -52,6 +52,7 @@ function Get-KitOwnedFiles($target) {
                      (Join-Path $kit "driver\tests\test_journey_unit.py"),
                      (Join-Path $kit "driver\tests\test_adb_ui.py"),
                      (Join-Path $kit "driver\tests\test_client_unit.py"),
+                     (Join-Path $kit "driver\tests\test_bridge_smoke.py"),
                      (Join-Path $kit "config\local.sample.json"),
                      (Join-Path $kit "config\e2e-config.sample.json"),
                      (Join-Path $kit "CLAUDE.md"),
@@ -128,6 +129,8 @@ Write-Host "導入先: $target"
 # 上書き対象（キット所有領域）を uapp_e2e\Builds\update-backup-<日時>.zip へ退避する。
 # Builds\（ジャーニー記録・過去バックアップ・APK）は容量が大きく、かつ上書き対象外なので含めない。
 $kit = Join-Path $target "uapp_e2e"
+# 前回導入時にキットが所有していたファイル一覧（新規導入では $null のまま）
+$prevOwned = $null
 if (Test-Path $kit) {
     $backupPaths = @(Get-ChildItem $kit -Exclude "Builds" | ForEach-Object { $_.FullName })
     foreach ($p in @((Join-Path $target "Assets\uapp_e2e"),
@@ -143,7 +146,9 @@ if (Test-Path $kit) {
         # zip内は導入先ルートからの相対パスを保つ（Compress-Archive に複数パスを直接渡すと
         # 末端名で格納され .claude\skills と .agents\skills が同名衝突して復元不能になるため、
         # ステージングへ相対パス付きで複製してからディレクトリごと圧縮する）
-        $backupStage = Join-Path ([System.IO.Path]::GetTempPath()) ("uapp_e2e-backup-" + [System.IO.Path]::GetRandomFileName())
+        # ステージングは TEMP でなく Builds\ 配下（gitignore 済み）: サンドボックス環境では TEMP が
+        # 8.3 短縮パスで渡り、Move-Item / Remove-Item が抑止不能の失敗になる（導入先で実測）
+        $backupStage = Join-Path $kit ("Builds\tmp-backup-" + [System.IO.Path]::GetRandomFileName())
         try {
             foreach ($p in $backupPaths) {
                 $dest = Join-Path $backupStage $p.Substring($target.Length + 1)
@@ -163,6 +168,9 @@ if (Test-Path $kit) {
     $manifestPath = Join-Path $kit "kit-manifest.json"
     if (Test-Path $manifestPath) {
         $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
+        # 「前回の導入でキットが所有していたファイル」の一覧。
+        # キットが新しく所有し始めた名前と、導入先の自作ファイルとの衝突判定に使う
+        $prevOwned = @($manifest.PSObject.Properties.Name)
         $modified = @()
         foreach ($entry in $manifest.PSObject.Properties) {
             if ($entry.Name -like "__*") { continue }  # ファイルでないメタ記録（__rootAgentsMdByInstaller 等）
@@ -192,6 +200,10 @@ $kit = Join-Path $target "uapp_e2e"
 foreach ($dir in @("scripts", "config")) {
     New-Item -ItemType Directory -Force (Join-Path $kit $dir) | Out-Null
 }
+# Builds\ は導入直後から在る前提の置き場（ジャーニー記録・失敗証跡・一時ファイル）。
+# **無いと pytest の `--basetemp ..\Builds\pytest-tmp`（SETUP.md がサンドボックス環境向けに
+# 案内している回避策）が「親が無い」で落ちる**。gitignore 対象なので作っても追跡はされない
+New-Item -ItemType Directory -Force (Join-Path $kit "Builds") | Out-Null
 foreach ($script in @("build-android.ps1", "run-e2e.ps1", "run-unity-tests.ps1", "start-emulator.ps1",
                       "emit-status.ps1", "uninstall.ps1")) {
     Copy-Item (Join-Path $src.Scripts $script) (Join-Path $kit "scripts\$script") -Force
@@ -208,8 +220,27 @@ if (-not (Test-Path $conftestDest)) {
 } else {
     Write-Host "  [SKIP] driver\tests\conftest.py（既存を維持）"
 }
-foreach ($t in @("test_journey_unit.py", "test_adb_ui.py", "test_client_unit.py")) {
-    Copy-Item (Join-Path $src.Driver "tests\$t") (Join-Path $kit "driver\tests\$t") -Force
+# キット所有のテストは上書き更新する。ただし**キットが新しく所有し始めた名前**（例: 疎通スモーク）は、
+# 旧版ではプロジェクト所有領域だったため、導入先が同名の自作テストを持っていることがある。
+# 0.5 のローカル改変検知は「前回もキット所有だったファイル」しか見ないので、そのままだと
+# 自作テストが無警告で消える（バックアップzipには残るが、実行ツリーからは失われる）。
+# **前回の所有記録が無い場合（手動導入・kit-manifest.json の削除・不完全な導入）も警告する** —
+# 「所有していた証拠が無い既存ファイル」は自作テストかもしれず、黙って消してよい根拠が無い
+$testNameConflicts = @()
+foreach ($t in @("test_journey_unit.py", "test_adb_ui.py", "test_client_unit.py", "test_bridge_smoke.py")) {
+    $testDest = Join-Path $kit "driver\tests\$t"
+    if ((Test-Path $testDest) -and (($null -eq $prevOwned) -or ($prevOwned -notcontains "uapp_e2e\driver\tests\$t"))) {
+        $testNameConflicts += $t
+    }
+    Copy-Item (Join-Path $src.Driver "tests\$t") $testDest -Force
+}
+if ($testNameConflicts.Count -gt 0) {
+    Write-Host ""
+    Write-Host "  [警告] キット所有と記録されていない同名ファイルを上書きしました（このまま更新を続けます）:"
+    foreach ($c in $testNameConflicts) { Write-Host "    - uapp_e2e\driver\tests\$c" }
+    Write-Host "  キットが新しく所有し始めた名前か、前回の所有記録（kit-manifest.json）が無い導入です。"
+    Write-Host "  自作テストだった場合は上のバックアップzipから取り出し、別名で戻すこと"
+    Write-Host ""
 }
 if ($IncludeSampleTests) {
     # サンプルテストは「コピペして育てる」起点なので初回のみ生成（プロジェクトの改修を上書きしない）
@@ -364,26 +395,55 @@ $androidDefine = @($defineTargets | Where-Object { $_ -eq "Android" }).Count -gt
 # device を含む運用は Android 必須。editor 専用ならどこかに付いていればよい
 $defineFound = if ($Mode -eq "editor") { $defineTargets.Count -gt 0 } else { $androidDefine }
 $localJsonDone = Test-Path (Join-Path $kit "config\local.json")
-$gitignorePath = Join-Path $target ".gitignore"
 # 行単位で照合（コメント行や uapp_e2e/Builds-old のような別パスに誤反応しない。
 # 区切りは / のみ受理: gitignore のバックスラッシュはパス区切りでなくエスケープなので無効な記述。
-# 行頭空白もパターンの一部として扱われるため許容しない。末尾空白は Git が無視するので許容）
-$gitignoreDone = (Test-Path $gitignorePath) -and
-    (Select-String -Path $gitignorePath -Pattern '^/?uapp_e2e/config/local\.json\s*$' -Quiet) -and
-    (Select-String -Path $gitignorePath -Pattern '^/?uapp_e2e/Builds/?\s*$' -Quiet)
-# e2e-config.json は「存在」でなく「編集済み」で判定する:
-# package が雛形のままでない かつ tests の指すパスが実在する（-IncludeSampleTests なし導入だと
-# 既定の tests/test_smoke.py は配置されないため、package だけ直して [済] になる偽陽性を防ぐ）。
-# orientation は実アプリと突き合わせできないため自動確認の対象外。
+# 行頭空白もパターンの一部として扱われるため許容しない。末尾空白は Git が無視するので許容）。
+# Unity プロジェクトが git ルートのサブディレクトリにある構成（<repo>\<unity-project>）では
+# 除外はプロジェクト直下でなく上位の .gitignore や .git\info\exclude に書かれるため、
+# .git が見つかるまで上位も照合する（上位では相対プレフィックス付きのパターンを要求する）
+function Test-GitignoreEntries([string]$file, [string]$relPrefix) {
+    if (-not (Test-Path $file -PathType Leaf)) { return $false }
+    $p = [regex]::Escape($relPrefix)
+    ((Select-String -Path $file -Pattern "^/?${p}uapp_e2e/config/local\.json\s*$" -Quiet) -and
+     (Select-String -Path $file -Pattern "^/?${p}uapp_e2e/Builds/?\s*$" -Quiet))
+}
+$gitignoreDone = $false
+$gitignoreProbe = $target
+$gitignoreRel = ""
+while ($true) {
+    if (Test-GitignoreEntries (Join-Path $gitignoreProbe ".gitignore") $gitignoreRel) { $gitignoreDone = $true; break }
+    if (Test-Path (Join-Path $gitignoreProbe ".git")) {
+        # git ルートに到達。ローカル除外（.git\info\exclude）も同じ書式で照合する
+        #（.git がファイルの worktree / submodule 構成では exclude の実体が別階層にあり、ここでは追わない）
+        $gitignoreDone = Test-GitignoreEntries (Join-Path $gitignoreProbe ".git\info\exclude") $gitignoreRel
+        break
+    }
+    $gitignoreParent = Split-Path $gitignoreProbe -Parent
+    if (-not $gitignoreParent -or $gitignoreParent -eq $gitignoreProbe) { break }
+    $gitignoreRel = (Split-Path $gitignoreProbe -Leaf) + "/" + $gitignoreRel
+    $gitignoreProbe = $gitignoreParent
+}
+# e2e-config.json の判定: package が雛形のままでない かつ tests の指すパスが実在すること。
+# **雛形の既定 `tests`（ディレクトリ）は常に実在するので、editor モードではこの印は
+# 実質「壊れていない」の確認**（かつての既定 `tests/test_smoke.py` は -IncludeSampleTests なし導入だと
+# 存在せず、導入直後の run-e2e が落ちた。テストファイルを明示指定へ変えた場合の実在検査として残す）。
+# orientation は実アプリと突き合わせできないため自動確認の対象外 — 表示側で「何が確認済みで
+# 何が人の判断か」を書き分けること（[済] を「全部やった」と読ませない）。
 # **editor モードでは package / activity を見ない**（adb を使わないので実際に使われない。
 # 使わない値の編集を求めると、直しようのない [未] が残り続ける）
 $configEdited = $false
+# 既存 e2e-config.json は更新でも上書きしないので、**古い既定値がそのまま残る**。
+# 旧既定 tests/test_smoke.py は -IncludeSampleTests なし導入だと実在せず、
+# run-e2e が pytest の「ファイルなし」で落ちる。既存導入の更新経路ではここでしか気付けないので、
+# 「実在しない tests を指している」ことを名指しで出す
+$testsStale = $null
 if ($configExisted) {
     try {
         $cfg = Get-Content $configDest -Raw | ConvertFrom-Json
         $testsPath = if ($cfg.tests) { Join-Path $kit "driver\$($cfg.tests)" } else { $null }
         $packageOk = ($Mode -eq "editor") -or ($cfg.package -and ($cfg.package -ne "com.yourcompany.yourapp"))
         $configEdited = $packageOk -and $testsPath -and (Test-Path $testsPath)
+        if ($testsPath -and -not (Test-Path $testsPath)) { $testsStale = $cfg.tests }
     } catch { $configEdited = $false }
 }
 
@@ -411,9 +471,24 @@ Write-Host "1. Packages/manifest.json に以下を追加（Unityバージョン�
 Write-Host "     $(Mark $inputSystemVer) com.unity.inputsystem（2022.3系:1.7.0 / Unity6系:1.14+）$(if ($inputSystemVer) { " → $inputSystemVer 導入済み" })"
 Write-Host "     $(Mark $newtonsoftVer) com.unity.nuget.newtonsoft-json: 3.2.1$(if ($newtonsoftVer) { " → $newtonsoftVer 導入済み" })（既存 Newtonsoft DLL があれば不要）"
 if ($Mode -eq "editor") {
-    Write-Host "2. $(Mark $configEdited) $configDest の tests / orientation を編集（package / activity は使わないので空でよい）"
+    # [済] が意味するのは「tests の指すパスが実在する」だけ。既定 `tests` のままでも動くので
+    # ここは基本 [済] になる。**orientation は人が実アプリに合わせる項目**で自動確認できないため、
+    # [済] を「この行はもう何もしなくてよい」と読ませないよう、残る判断を明示する
+    Write-Host "2. $(Mark $configEdited) $configDest の orientation を実アプリの画面向きに合わせる"
+    Write-Host ("     （tests は既定の `"tests`" のままでよい＝同梱の単体テスト・疎通スモークと自作テストをまとめて実行する。" +
+                "package / activity は editor モードでは使わないので空でよい。" +
+                $(if ($configEdited) { "[済] は tests のパスが実在することのみ＝orientation は人が確認する" }
+                  else { "tests の指すパスが見つからないか、まだ生成しただけ" }) + "）")
 } else {
-    Write-Host "2. $(Mark $configEdited) $configDest の package / tests / orientation を実アプリに合わせて編集$(if ($configEdited) { "（package 設定済み・tests 実在。orientation は自動確認外）" })"
+    Write-Host "2. $(Mark $configEdited) $configDest の package / orientation を実アプリに合わせて編集"
+    Write-Host ("     （tests は既定の `"tests`" のままでよい。" +
+                $(if ($configEdited) { "[済] は package 設定済み・tests のパスが実在することまで＝orientation は人が確認する" }
+                  else { "package が雛形のまま、または tests の指すパスが見つからない" }) + "）")
+}
+if ($testsStale) {
+    Write-Host ("     → **tests が実在しないパスを指しています: `"$testsStale`"**。" +
+                "既存の e2e-config.json は更新でも上書きしないので、手で `"tests`" へ直すこと" +
+                "（このままだと run-e2e が pytest のファイル未検出で落ちる）")
 }
 if ($Mode -eq "editor") {
     Write-Host "3. $(Mark $defineFound) UAPP_E2E_BRIDGE define を付与（**エディタが使うのは Build Settings で選んでいる"
@@ -429,9 +504,18 @@ if ($Mode -eq "editor") {
     Write-Host "4. $(Mark $localJsonDone) uapp_e2e\config\local.sample.json を local.json にコピーして各自の環境を記入"
 }
 Write-Host "5. $(Mark $gitignoreDone) .gitignore に追加: uapp_e2e/config/local.json, uapp_e2e/Builds/"
+# [済] が言えるのは「その行が .gitignore（または .git/info/exclude）にある」ことまで。
+# 既に追跡済みのファイルは ignore 行を足しても追跡され続けるし、後続の否定規則（!…）で
+# 再包含されることもある。判定できないことを [済] に含めて読ませない
+Write-Host "     （判定はパターンの有無まで。既にコミット済みのファイルは行を足しても追跡され続けるので、"
+Write-Host "     その場合は git rm --cached が別途必要）"
 Write-Host "6. $(Mark (-not $portNote)) 待受ポートが他と重ならないこと（devicePort / editorBridgePort）"
 if ($portNote) { Write-Host "     → $portNote" }
 Write-Host "     （同一デバイスに計装アプリを複数入れる場合も devicePort をアプリごとに分ける）"
+if ($Mode -eq "editor") {
+    Write-Host "7. 初回の run-e2e.ps1 -Editor は Packages/manifest.json へ com.unity.pipeline（Unity CLI 連携）を"
+    Write-Host "     自動追加する（追跡ファイルが変わる。コミットするか事前にチームで方針を決めておく）"
+}
 if ($installClaude) {
     Write-Host "（AI向け規約は .claude\rules\uapp-e2e.md 経由で自動参照される。CLAUDE.md の書き換えは不要）"
 }

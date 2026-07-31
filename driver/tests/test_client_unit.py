@@ -6,15 +6,25 @@ import threading
 
 import pytest
 
-from e2e_driver.client import DEFAULT_PORT, BridgeClient, resolve_port
+from e2e_driver.client import CONFIG_SEARCH_PARENTS, DEFAULT_PORT, BridgeClient, resolve_port
 
 
 @pytest.fixture(autouse=True)
-def _isolate(monkeypatch, tmp_path):
-    """環境変数と CWD を隔離する（実行元の e2e-config.json やポート設定を拾わないように）。"""
+def work(monkeypatch, tmp_path):
+    """環境変数と CWD を隔離した作業ディレクトリ。**tmp_path をそのまま使わない。**
+
+    e2e-config.json の探索は起点から親を遡るので、pytest の一時領域が導入先ツリーの中に
+    ある場合（SETUP.md が案内する `--basetemp ..\\Builds\\pytest-tmp`）、tmp_path の上位に
+    ある**実物の** e2e-config.json を拾ってしまい、「設定なし」を前提にしたテストが落ちる。
+    探索が tmp_path の外へ出ない深さまで掘り下げ、そこを基準にする
+    （深さは実装の CONFIG_SEARCH_PARENTS に追随させる）。
+    """
     monkeypatch.delenv("UAPP_E2E_BRIDGE_PORT", raising=False)
     monkeypatch.delenv("UAPP_E2E_EDITOR", raising=False)
-    monkeypatch.chdir(tmp_path)
+    root = tmp_path.joinpath(*[f"w{i}" for i in range(CONFIG_SEARCH_PARENTS + 1)])
+    root.mkdir(parents=True)
+    monkeypatch.chdir(root)
+    return root
 
 
 def _write_config(dir_path, port):
@@ -22,40 +32,40 @@ def _write_config(dir_path, port):
         json.dumps({"editorBridgePort": port}), encoding="utf-8")
 
 
-def test_explicit_arg_wins(monkeypatch, tmp_path):
+def test_explicit_arg_wins(monkeypatch, work):
     monkeypatch.setenv("UAPP_E2E_BRIDGE_PORT", "14000")
-    _write_config(tmp_path, 13399)
+    _write_config(work, 13399)
     assert resolve_port(15000) == 15000
     assert BridgeClient(port=15000).port == 15000
 
 
-def test_env_wins_over_config(monkeypatch, tmp_path):
-    _write_config(tmp_path, 13399)
+def test_env_wins_over_config(monkeypatch, work):
+    _write_config(work, 13399)
     monkeypatch.setenv("UAPP_E2E_BRIDGE_PORT", "14000")
     assert resolve_port() == 14000
 
 
-def test_config_found_from_subdirectory(monkeypatch, tmp_path):
+def test_config_found_from_subdirectory(monkeypatch, work):
     # <プロジェクト>/uapp_e2e/driver/tests からの実行を模し、親を辿って解決できること
-    _write_config(tmp_path, 13399)
-    sub = tmp_path / "driver" / "tests"
+    _write_config(work, 13399)
+    sub = work / "driver" / "tests"
     sub.mkdir(parents=True)
     monkeypatch.chdir(sub)
     assert resolve_port() == 13399
     assert BridgeClient().port == 13399
 
 
-def test_default_without_env_and_config(tmp_path):
+def test_default_without_env_and_config(work):
     assert resolve_port() == DEFAULT_PORT
 
 
 @pytest.mark.parametrize("env_value", ["70000", "0", "-1", "abc", "13_333"])
-def test_invalid_env_skipped_to_next_candidate(monkeypatch, tmp_path, env_value):
+def test_invalid_env_skipped_to_next_candidate(monkeypatch, work, env_value):
     """値域外・不正な環境変数は（Unity側と同じく）スキップして次候補へ。片側だけの採用を防ぐ。"""
     monkeypatch.setenv("UAPP_E2E_BRIDGE_PORT", env_value)
     with pytest.warns(UserWarning, match="無視します"):
         assert resolve_port() == DEFAULT_PORT  # config なし → 既定へ
-    _write_config(tmp_path, 13399)
+    _write_config(work, 13399)
     with pytest.warns(UserWarning, match="無視します"):
         assert resolve_port() == 13399  # config あり → config を採用
 
@@ -83,17 +93,17 @@ def test_explicit_invalid_raises(bad_port):
     '{"editorBridgePort": "13_333"}',       # Pythonのint()は通るがC#のTryParseは拒否する表記
     '{"editorBridgePort": true}',           # bool（int()だと1に化けてしまう。C#はキャスト失敗）
 ])
-def test_broken_config_falls_back_to_default(tmp_path, content):
-    (tmp_path / "e2e-config.json").write_text(content, encoding="utf-8")
+def test_broken_config_falls_back_to_default(work, content):
+    (work / "e2e-config.json").write_text(content, encoding="utf-8")
     assert resolve_port() == DEFAULT_PORT
 
 
-def test_resolve_port_start_overrides_cwd(monkeypatch, tmp_path):
+def test_resolve_port_start_overrides_cwd(monkeypatch, work):
     """探索起点 start を指定すると CWD ではなくそこから探す（journey serve が使う）。"""
-    journey_side = tmp_path / "proj" / "Builds" / "journey"
+    journey_side = work / "proj" / "Builds" / "journey"
     journey_side.mkdir(parents=True)
-    _write_config(tmp_path / "proj", 13398)
-    elsewhere = tmp_path / "elsewhere"
+    _write_config(work / "proj", 13398)
+    elsewhere = work / "elsewhere"
     elsewhere.mkdir()
     monkeypatch.chdir(elsewhere)  # CWD 側には config が無い
     assert resolve_port(start=journey_side) == 13398
@@ -120,10 +130,10 @@ class _FakeBridge:
             conn.sendall((json.dumps(response) + "\n").encode("utf-8"))
 
 
-def test_editor_direct_connect_via_config(monkeypatch, tmp_path):
+def test_editor_direct_connect_via_config(monkeypatch, work):
     """引数・環境変数・adb なしで、e2e-config.json の editorBridgePort だけで接続できる。"""
     bridge = _FakeBridge()
-    _write_config(tmp_path, bridge.port)
+    _write_config(work, bridge.port)
     client = BridgeClient(timeout=5.0)
     assert client.port == bridge.port
     assert client.connect(retries=1).ping()["platform"] == "FakeEditor"

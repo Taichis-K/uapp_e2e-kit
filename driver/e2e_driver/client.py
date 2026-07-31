@@ -17,6 +17,12 @@ from typing import Any
 
 DEFAULT_PORT = 13333
 
+# e2e-config.json を探すときに起点から遡る親の数。
+# 導入先レイアウト（<プロジェクト>/uapp_e2e/driver/tests から実行 → 設定は uapp_e2e/ 直下）を
+# 拾える深さで、それ以上は遡らない。**無制限にすると、たまたま上位にある無関係な設定を
+# 拾ってしまう**（pytest の一時領域を導入先ツリー内に置いた場合など）
+CONFIG_SEARCH_PARENTS = 4
+
 _PORT_RE = re.compile(r"[+-]?[0-9]+")
 
 
@@ -57,7 +63,7 @@ def _config_editor_port(start: Path | None = None) -> int | None:
     設定が無い・読めない・値の型が想定外の場合は None（既定値へフォールバック）。
     """
     start = Path(start) if start is not None else Path.cwd()
-    for parent in [start, *list(start.parents)[:4]]:
+    for parent in [start, *list(start.parents)[:CONFIG_SEARCH_PARENTS]]:
         config = parent / "e2e-config.json"
         if config.exists():
             try:

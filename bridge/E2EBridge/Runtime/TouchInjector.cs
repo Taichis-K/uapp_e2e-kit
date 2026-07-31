@@ -32,9 +32,24 @@ namespace E2EBridge
             get
             {
                 if (_device == null || !_device.added)
-                    _device = Touchscreen.current ?? InputSystem.AddDevice<Touchscreen>("E2EVirtualTouchscreen");
+                    _device = Touchscreen.current
+                              ?? InputSystem.AddDevice<Touchscreen>(DeviceInjector.VirtualTouchscreenName);
                 return _device;
             }
+        }
+
+        /// <summary>
+        /// **今まさに注入先にしているデバイス**（まだ 1 度も注入していなければ null）。
+        ///
+        /// 復旧処理（<see cref="DeviceInjector.RepairDisabledDevices"/>）が
+        /// 「E2E が実際に使っているデバイスだけ」を再有効化するために使う。
+        /// `Touchscreen.current` で代用してはならない — ここは最初に選んだデバイスを
+        /// 掴み続けるので、別のタッチデバイスが入力を出せば `current` は移り、
+        /// 「注入先でないものを起こして、注入先は無効のまま」になる。
+        /// </summary>
+        internal static Touchscreen CurrentTarget
+        {
+            get { return (_device != null && _device.added) ? _device : null; }
         }
 
         public static JToken Down(JObject args)
@@ -84,7 +99,16 @@ namespace E2EBridge
 
         private static void Queue(int touchId, TouchPhase phase, Vector2 pos, Vector2 delta)
         {
-            InputSystem.QueueStateEvent(Device, new TouchState
+            // エディタでは Game view のフォーカス状態に注入が左右されないようにする（初回のみ）
+            EditorInputRouting.EnsureGameViewRouting();
+            // **注入先を確定させてから**、無効なら起こす。順序が逆だと初回注入で漏れる:
+            // EnsureGameViewRouting 内の復旧は「E2E が使っているデバイス」しか触らないが、
+            // 1 度も注入していない時点では注入先がまだ決まっていない。そのまま無効な
+            // Touchscreen をキャッシュすると、以後 input_reset まで一切届かない
+            //（キー/マウス/パッドは注入先が固定名の仮想デバイスなのでこの穴は無い）
+            var device = Device;
+            DeviceInjector.EnsureEnabled(device);
+            InputSystem.QueueStateEvent(device, new TouchState
             {
                 touchId = touchId,
                 phase = phase,

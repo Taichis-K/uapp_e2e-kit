@@ -123,7 +123,7 @@ Codex ユーザーでルートに `AGENTS.md` が無い場合は `-RootAgentsMd`
 {
   "package": "com.yourcompany.yourapp",      // 実アプリのapplicationId
   "activity": "com.unity3d.player.UnityPlayerActivity",  // カスタムActivityならそれ
-  "tests": "tests/test_smoke.py",            // 自アプリ用テストのパス（uapp_e2e/driver/からの相対）
+  "tests": "tests",                          // テストのパス（uapp_e2e/driver/からの相対。既定はディレクトリごと＝同梱の単体テスト＋疎通スモーク＋自作テスト）
   "orientation": "landscape",                // portrait | landscape | auto（横画面アプリはlandscape）
   "deviceRotation": null,                    // 縦横両対応で起動向きを固定したい場合 0-3
   "devicePort": 13333,                       // デバイス内でブリッジが待ち受けるポート（計装アプリを複数入れる場合はアプリごとに分ける）
@@ -256,7 +256,7 @@ AVDとエディタ、複数エディタの同時運用のポート設計は [doc
 
 | 区分 | 対象 | 更新時の挙動 |
 |---|---|---|
-| **キット所有** | `Assets/uapp_e2e/E2EBridge/`・`uapp_e2e/driver/e2e_driver/`・`uapp_e2e/scripts/`・`uapp_e2e/docs/`・`uapp_e2e/CLAUDE.md`/`AGENTS.md`/`SETUP.md`/`VERSION`・`.claude/skills/e2e-*`・`.agents/skills/e2e-*`・`.claude/rules/uapp-e2e.md`・`uapp_e2e/driver/tests/test_journey_unit.py`/`test_adb_ui.py`/`test_client_unit.py` | **上書き更新**（手を入れない前提。変更したい場合はキット側へ還元する） |
+| **キット所有** | `Assets/uapp_e2e/E2EBridge/`・`uapp_e2e/driver/e2e_driver/`・`uapp_e2e/scripts/`・`uapp_e2e/docs/`・`uapp_e2e/CLAUDE.md`/`AGENTS.md`/`SETUP.md`/`VERSION`・`.claude/skills/e2e-*`・`.agents/skills/e2e-*`・`.claude/rules/uapp-e2e.md`・`uapp_e2e/driver/tests/test_journey_unit.py`/`test_adb_ui.py`/`test_client_unit.py`/`test_bridge_smoke.py` | **上書き更新**（手を入れない前提。変更したい場合はキット側へ還元する） |
 | **プロジェクト所有** | `uapp_e2e/e2e-config.json`・`uapp_e2e/driver/tests/` の自作テスト・`uapp_e2e/config/local.json`・`uapp_e2e/Builds/`（ジャーニー記録含む）・ルート `AGENTS.md`（`-RootAgentsMd` で作成した場合も以後は触らない） | **触らない** |
 | **初回のみ生成** | `uapp_e2e/driver/tests/conftest.py`（キット取り込みの1行＋プロジェクト追記領域） | 既存があれば**保持**（フィクスチャの実体は `e2e_driver` パッケージ側にあるため、conftest を更新しなくてもキットの新機能が届く） |
 

@@ -37,7 +37,13 @@ Android ビルドは1回十数分かかるため、③を回す頻度が高い�
 ```
 
 - **同じプロジェクトをエディタで開いたままだと実行できない**（排他ロックのため exit=6 で
-  結果XMLが出ない）。エディタを閉じてから回すこと
+  結果XMLが出ない）。エディタを閉じてから回すこと。
+  **開いているかどうかは `uapp_e2e\scripts\unity-editor-status.ps1` で確認する**
+  （`-Json` で機械可読）。`Get-Process Unity` では判定できない—プロセスが居ることと
+  **このプロジェクトが**開いていることは別物で、他プロジェクトのエディタを自分のものと
+  誤認する（逆に自分のを見落とす）。`state` は 3 値:
+  `closed`＝batchmode が使える / `open`＝`-Editor` 系が使える /
+  `starting-or-blocked`＝**起動途中かモーダルダイアログ待ちでどちらも失敗する**（画面を確認する）
 - Unity CLI があればそれを、無ければ Unity 本体の `-batchmode -runTests` を自動で使う
   （エディタは `uapp_e2e/config/local.json` の editorRoots ＋ `ProjectVersion.txt` から解決）
 - **Unity CLI 側だけが壊れている場合は `-NoUnityCli`** で Unity 本体の経路に直接入る

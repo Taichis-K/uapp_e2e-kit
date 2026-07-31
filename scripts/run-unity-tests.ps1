@@ -35,14 +35,48 @@ $ErrorActionPreference = "Stop"
 function Test-UnityProjectLocked {
     <#
       .SYNOPSIS
-      エディタがこのプロジェクトを実際に開いているか（Temp\UnityLockfile を掴んでいるか）。
+      エディタがこのプロジェクトを掴んでいるか（＝batchmode が排他ロックで失敗するか）。
 
       .NOTES
-      **ファイルの存在だけで判断しない**。エディタが異常終了するとロックファイルは残るため、
-      存在で判定すると「既に開いています」と言い続けて永久に起動できなくなる（実際に踏んだ）。
-      排他で開けたら誰も掴んでいない＝古い残骸。
+      **単一の根拠では判定できない**（2026-07-30 に Unity 6000.3.6f1 で実測）。3 つを合成する:
+
+      1. `-projectPath <対象>` を持つ GUI の Unity.exe プロセス … 起動直後から分かる唯一の信号
+      2. `Library\EditorInstance.json` の `process_id` の生存 … Unity 自身が書くが**ロード完了後**
+         にしか現れず、異常終了で古い pid が残る（生存確認が必須）
+      3. `Temp\UnityLockfile` の排他オープン … 従来ここだけを見ていたが、**開いているのに
+         排他オープンできてしまう状態を実測した**（起動途中・モーダルダイアログ待ち）。
+         ファイルの存在で判定するのも誤り（残骸で永久に「開いています」と言い続ける）
+
+      詳しい内訳を人が見たいときは `scripts\unity-editor-status.ps1`（プロジェクト単位の状態表示）。
     #>
     param([Parameter(Mandatory)][string]$ProjectDir)
+
+    # 1. プロセスのコマンドラインで対象プロジェクトを掴んでいる GUI エディタを探す
+    try {
+        $target = (Resolve-Path -LiteralPath $ProjectDir).Path.TrimEnd('\')
+        foreach ($p in Get-CimInstance Win32_Process -Filter "Name='Unity.exe'" -ErrorAction Stop) {
+            $cmd = $p.CommandLine
+            if (-not $cmd) { continue }
+            if ($cmd -match '(^|\s)-batchmode(\s|$)') { continue }   # 自前で起動した batchmode は対象外
+            if ($cmd -match '-projectPath\s+"?([^"]+?)"?(\s+-|\s*$)') {
+                $path = $Matches[1].Trim()
+                try { $path = (Resolve-Path -LiteralPath $path).Path.TrimEnd('\') } catch { }
+                if ($path -ieq $target) { return $true }
+            }
+        }
+    } catch { }
+
+    # 2. Unity 自身が書く EditorInstance.json（pid の生存を必ず確かめる）
+    $instanceFile = Join-Path $ProjectDir "Library\EditorInstance.json"
+    if (Test-Path -LiteralPath $instanceFile) {
+        try {
+            $editorPid = [int]((Get-Content $instanceFile -Raw | ConvertFrom-Json).process_id)
+            $proc = if ($editorPid) { Get-Process -Id $editorPid -ErrorAction SilentlyContinue } else { $null }
+            if ($proc -and $proc.ProcessName -eq "Unity") { return $true }
+        } catch { }
+    }
+
+    # 3. ロックファイルの排他オープン（掴まれていれば失敗する）
     $lock = Join-Path $ProjectDir "Temp\UnityLockfile"
     if (-not (Test-Path -LiteralPath $lock)) { return $false }
     try {

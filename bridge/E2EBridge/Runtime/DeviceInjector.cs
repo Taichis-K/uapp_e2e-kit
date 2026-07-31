@@ -55,6 +55,15 @@ namespace E2EBridge
         public const string VirtualKeyboardName = "E2EVirtualKeyboard";
         public const string VirtualMouseName = "E2EVirtualMouse";
         public const string VirtualGamepadName = "E2EVirtualGamepad";
+        // タッチだけは実機の Touchscreen をそのまま使い、無い環境（PC エディタ）でのみ生成する
+        //（TouchInjector を参照。実機のタッチ座標系をそのまま使いたいため）
+        public const string VirtualTouchscreenName = "E2EVirtualTouchscreen";
+
+        private static bool IsBridgeVirtual(InputDevice device)
+        {
+            return device.name == VirtualKeyboardName || device.name == VirtualMouseName
+                || device.name == VirtualGamepadName || device.name == VirtualTouchscreenName;
+        }
 
         private static Keyboard KeyboardDevice
         {
@@ -98,9 +107,7 @@ namespace E2EBridge
             var list = new JArray();
             foreach (var device in InputSystem.devices)
             {
-                var isVirtual = device.name == VirtualKeyboardName || device.name == VirtualMouseName
-                                || device.name == VirtualGamepadName
-                                || device.name == "E2EVirtualTouchscreen";
+                var isVirtual = IsBridgeVirtual(device);
                 list.Add(new JObject
                 {
                     ["name"] = device.name,
@@ -114,6 +121,9 @@ namespace E2EBridge
             return new JObject
             {
                 ["devices"] = list,
+                // エディタで「Game view 非フォーカスでも注入が届く」設定へ切り替え済みか
+                //（初回注入時に自動適用。デバイスビルドでは常に false）
+                ["editorFocusOverride"] = EditorInputRouting.Applied,
                 // **仮想デバイスは種別ごとに「初回注入時」に生成される**（遅延生成）。
                 // 注入前に一覧を取ると仮想デバイスが 1 つも出ないため、
                 // 「実機のデバイスに注入しているのでは」と誤読される（導入先で実際に誤読され、
@@ -180,6 +190,8 @@ namespace E2EBridge
 
         private static void FlushKeyboard()
         {
+            // エディタでは Game view のフォーカス状態に注入が左右されないようにする（初回のみ）
+            EditorInputRouting.EnsureGameViewRouting();
             // 押している集合をまとめて 1 つの状態として送る（差分ではなく状態を送る API のため）
             var state = new KeyboardState();
             foreach (var key in _keys) state.Set(key, true);
@@ -228,6 +240,7 @@ namespace E2EBridge
 
         private static void FlushMouse(Vector2 scroll)
         {
+            EditorInputRouting.EnsureGameViewRouting();
             var state = new MouseState { position = _mousePos, scroll = scroll };
             if (_mouseButtons.Contains("left")) state.WithButton(MouseButton.Left);
             if (_mouseButtons.Contains("right")) state.WithButton(MouseButton.Right);
@@ -275,6 +288,7 @@ namespace E2EBridge
 
         private static void FlushGamepad()
         {
+            EditorInputRouting.EnsureGameViewRouting();
             var state = new GamepadState { leftStick = _leftStick, rightStick = _rightStick };
             foreach (var button in _padButtons) state.WithButton(button);
             InputSystem.QueueStateEvent(GamepadDevice, state);
@@ -285,6 +299,9 @@ namespace E2EBridge
         /// <summary>押しっぱなしを全部離す。テスト間で状態を持ち越さないための後始末。</summary>
         public static JToken Reset()
         {
+            // 診断目的の InputSystem.DisableDevice で入力パイプラインが壊れたまま戻らない事故の
+            // 復旧路を兼ねる（Play を再起動しなくても input_reset で戻れるように）
+            var reenabled = RepairDisabledDevices();
             var released = _keys.Count + _mouseButtons.Count + _padButtons.Count;
             _keys.Clear();
             _mouseButtons.Clear();
@@ -296,7 +313,56 @@ namespace E2EBridge
             FlushMouse(Vector2.zero);
             FlushGamepad();
 #endif
-            return new JObject { ["released"] = released };
+            return new JObject { ["released"] = released, ["reenabledDevices"] = reenabled };
+        }
+
+        /// <summary>
+        /// 無効化されたままの入力デバイスを再有効化する。
+        ///
+        /// <para>**対象は E2E が実際に注入先にしているデバイスだけ**＝ブリッジの仮想デバイスと、
+        /// <see cref="TouchInjector.CurrentTarget"/>（タッチの注入先。実機の Touchscreen で
+        /// あることが多い）。実機のキーボード・マウス・パッドや、注入先でない 2 台目以降の
+        /// Touchscreen は触らない — **アプリが意図的に無効化しているかもしれないデバイスを、
+        /// 後始末コマンドが黙って起こしてはならない**。無効のまま残っているかは
+        /// `input_devices` の `enabled` で確認でき、戻したければ Play を再起動する。</para>
+        ///
+        /// <para>タッチの注入先だけは実機のデバイスでも起こす。無効のままだと `pointer_*` が
+        /// 丸ごと動かないまま Play 終了まで戻らないため（アプリが意図して止めている場合、
+        /// そもそも E2E からのタッチ操作は成立しない）。</para>
+        ///
+        /// <para>センサー類（加速度計など）も「既定で無効」が正常状態なので対象外。</para>
+        /// </summary>
+        /// <summary>
+        /// 確定した注入先が無効化されていたら起こす。
+        ///
+        /// <see cref="RepairDisabledDevices"/> は「今 E2E が使っているデバイス」を対象にするので、
+        /// **まだ注入先が決まっていない初回**は取りこぼす。注入先を解決した直後にこれを呼ぶことで、
+        /// 「無効なデバイスに投げ続けて一切届かない」状態にならないようにする。
+        /// </summary>
+        internal static void EnsureEnabled(InputDevice device)
+        {
+            if (device == null || device.enabled)
+                return;
+            InputSystem.EnableDevice(device);
+            Debug.Log($"[E2EBridge] 注入先 '{device.name}' が無効化されていたので再有効化した");
+        }
+
+        public static int RepairDisabledDevices()
+        {
+            var touchTarget = TouchInjector.CurrentTarget;
+            var repaired = 0;
+            foreach (var device in InputSystem.devices)
+            {
+                if (device.enabled)
+                    continue;
+                if (!IsBridgeVirtual(device) && !ReferenceEquals(device, touchTarget))
+                    continue;
+                InputSystem.EnableDevice(device);
+                repaired++;
+            }
+            if (repaired > 0)
+                Debug.Log($"[E2EBridge] 無効化されていた注入用の入力デバイスを {repaired} 台再有効化した");
+            return repaired;
         }
 
         // --------------------------------------------------------------- helper

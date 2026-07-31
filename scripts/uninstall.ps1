@@ -76,7 +76,7 @@ if ($Purge) {
                        "CLAUDE.md", "AGENTS.md", "SETUP.md", "VERSION", "kit-manifest.json",
                        "driver\pytest.ini", "driver\requirements.txt",
                        "driver\tests\test_journey_unit.py", "driver\tests\test_adb_ui.py",
-                       "driver\tests\test_client_unit.py",
+                       "driver\tests\test_client_unit.py", "driver\tests\test_bridge_smoke.py",
                        "config\local.sample.json", "config\e2e-config.sample.json")) {
         Remove-Reported (Join-Path $kit $rel) "uapp_e2e\$rel"
     }
