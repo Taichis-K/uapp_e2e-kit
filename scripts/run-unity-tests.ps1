@@ -100,12 +100,45 @@ else {
     $projectDir = Join-Path $root $Project
 }
 if (-not (Test-Path $projectDir)) { throw "プロジェクトがありません: $projectDir" }
+# **末尾の `\` を落とす**。タブ補完は `unity-nis\` の形を作り、`Resolve-Path` はそれを保つ。
+# 付いたまま `"$projectDir"` と引用すると、閉じ引用符が `\"`（エスケープされた引用符）と
+# 解釈され、**後続の引数までパスに飲み込まれる**（Windows の引数解釈規則。実測済み:
+# `--project-path "…\unity-nis\" --format json --no-banner` が 1 引数になる）。
+# ここで 1 度だけ正規化して、以降の全ての受け渡し（Start-Process 経由を含む）を安全にする。
+# **ドライブ直下（`C:\`）だけは落とせない** — `C:` はドライブ相対を指す別物になるため。
+# この 1 ケースは引用側（Format-CliArg）で吸収するので、パスの引用は必ずそこを通すこと
+if ($projectDir -notmatch '^[A-Za-z]:\\$') { $projectDir = $projectDir.TrimEnd('\') }
 $projectName = Split-Path $projectDir -Leaf
 
 $buildsDir = Join-Path $root "Builds"
 New-Item -ItemType Directory -Force $buildsDir | Out-Null
 if (-not $Output) { $Output = Join-Path $buildsDir "test-results-$projectName-$Mode.xml" }
 if (Test-Path $Output) { Remove-Item $Output -Force }   # 前回結果を誤読しない
+
+function Format-CliArg {
+    <#
+      .SYNOPSIS
+      ネイティブプロセスへ渡す引数 1 個を引用する（末尾の `\` を正しく退避する）。
+
+      .NOTES
+      **閉じ引用符の直前の `\` は、引用符そのものをエスケープする**（Windows の引数解釈規則）。
+      `"C:\"` は 1 引数として閉じず、後続の引数まで飲み込む（実測: `--project-path "C:\"
+      --format json --no-banner` が 1 引数になる）。末尾の `\` だけを倍にすればリテラルの
+      `\` 1 個として渡り、**値そのものは変わらない**。
+
+      $projectDir は末尾の `\` を落として正規化してあるが、**ドライブ直下（`C:\`）だけは
+      落とせない** — `C:` はドライブ相対（そのドライブのカレントディレクトリ）を指す別物になる。
+      `C:\.` のような等価表現でも代用できない: **Unity CLI はプロジェクトパスを正規化せず
+      文字列で突き合わせる**ので、実行中のエディタに一致しなくなる
+      （実測: `unity status --project-path <プロジェクト>\.` が STATUS_NO_INSTANCES を返す）。
+      値を保ったまま安全に渡せるのはこの引用だけなので、パスの引用は必ずここを通す。
+    #>
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Value)
+    # `"` の直前の `\` は連続ぶんだけ倍にしてから `\"` で退避し、末尾の `\` も倍にする
+    $escaped = [regex]::Replace($Value, '(\\*)"', { param($m) ($m.Groups[1].Value * 2) + '\"' })
+    $escaped = [regex]::Replace($escaped, '(\\+)$', { param($m) $m.Groups[1].Value * 2 })
+    return '"' + $escaped + '"'
+}
 
 function Invoke-WithTimeout {
     <#
@@ -167,7 +200,7 @@ function Get-UnityCliStatus {
         [string]$WaitMessage
     )
     $probe = Invoke-WithTimeout -FilePath $Cli -TimeoutSeconds $TimeoutSeconds `
-        -Arguments @("status", "--project-path", "`"$ProjectDir`"", "--format", "json", "--no-banner") `
+        -Arguments @("status", "--project-path", (Format-CliArg $ProjectDir), "--format", "json", "--no-banner") `
         -WaitMessage $WaitMessage
     $json = $null
     if (-not $probe.TimedOut) {
@@ -281,8 +314,25 @@ if ($Editor) {
     # Unity CLI の有無は上（解決直後）で判定済み。ここへ来る時点で $unityCli は必ずある
 
     function Invoke-Pipeline {
-        param([string[]]$CmdArgs, [switch]$AllowFail)
-        $raw = & $unityCli cmd --project-path $projectDir @CmdArgs --format json --no-banner 2>&1 | Out-String
+        <#
+          .NOTES
+          `-TimeoutSeconds` を渡すと**呼び出し 1 回ごとに時間制限**を掛ける。
+          Unity CLI は認証セッションが stale になると無言でハングする（Invoke-WithTimeout の注記）ので、
+          ポーリングの中から時間制限なしで呼ぶと外側のストップウォッチが進まず、
+          「上限で中断する」という約束が守られない（無期限に黙って止まる）。
+          長時間かかるのが正常な run_tests は従来どおり制限なしで呼ぶ（CLI 側の --timeout で縛る）。
+        #>
+        param([string[]]$CmdArgs, [switch]$AllowFail, [int]$TimeoutSeconds = 0)
+        if ($TimeoutSeconds -gt 0) {
+            # **空白を含む引数は明示的に引用する**（Start-Process -ArgumentList の配列は
+            # 空白で結合されるため、引用しないと eval のコードやパスが複数引数に割れる）
+            $quoted = @("cmd", "--project-path", (Format-CliArg $projectDir)) +
+                      @($CmdArgs | ForEach-Object { if ("$_" -match "\s") { Format-CliArg "$_" } else { "$_" } }) +
+                      @("--format", "json", "--no-banner")
+            $raw = (Invoke-WithTimeout -FilePath $unityCli -Arguments $quoted -TimeoutSeconds $TimeoutSeconds).Output
+        } else {
+            $raw = & $unityCli cmd --project-path $projectDir @CmdArgs --format json --no-banner 2>&1 | Out-String
+        }
         $parsed = $null
         try { $parsed = $raw | ConvertFrom-Json } catch {}
         if (-not $AllowFail -and (-not $parsed -or -not $parsed.success)) {
@@ -335,7 +385,7 @@ if ($Editor) {
         Write-Host "[$projectName] エディタ未接続。Pipeline パッケージを確認してエディタを起動します..."
         & $unityCli pipeline install --project-path $projectDir --format json --no-banner | Out-Null
         # **パスは引用する**（-ArgumentList の配列は空白結合されるため、空白入りのパスが割れる）
-        Start-Process -FilePath $unityCli -ArgumentList @("open", "`"$projectDir`"") | Out-Null
+        Start-Process -FilePath $unityCli -ArgumentList @("open", (Format-CliArg $projectDir)) | Out-Null
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
         while ($true) {
             Start-Sleep -Seconds 5
@@ -347,15 +397,55 @@ if ($Editor) {
     }
 
     # 直前の編集を反映させてから走らせる（未コンパイルのまま古いアセンブリで通ると偽の緑になる）。
-    # recompile_status の result は**オブジェクトではなく JSON 文字列**で返るため正規化する
     # **ここで妥協すると「古いアセンブリで通った緑」を返す**ことになるので、
-    # 応答不能・タイムアウトは黙って進まずに止める（-AllowFail を使わない）
+    # 応答不能・タイムアウトは黙って進まずに止める（-AllowFail を使わない）。
+    #
+    # **`recompile` は非同期で、直後の `recompile_status` は前回の結果を返しうる。**
+    # とくに `up_to_date` は「まだ新しいコンパイルが始まっていない」ときにも返るため、
+    # これを完了と解釈すると待機がまったく機能しない（導入先で実測: コンパイルエラーのあるコードで
+    # 古いアセンブリのテストが「39/39 成功」になり、新規テスト 24 件が 1 件も含まれていなかった）。
+    # **偽の緑は失敗より悪い** — 落ちれば直すが、緑が出たら次へ進んでしまう。
+    #
+    # そこで「始まったことを確かめてから終わりを待つ」。ただし本当に変更が無ければ
+    # コンパイルは始まらないので、**開始待ちは短い猶予で打ち切る**（無変更なら待つ意味がない）。
+    # そのうえで最後に必ず `EditorUtility.scriptCompilationFailed` を見る。これは
+    # 「まだ走っていない」に影響されず、**現在のアセンブリが壊れているか**をそのまま返す
     Write-Host "[$projectName] コンパイルを確認中..."
-    Invoke-Pipeline @("recompile") | Out-Null
+    # **`recompile` 自身の戻り値を捨てない**（これが「走り出したか」の一次情報）。
+    # com.unity.pipeline の RecompileCommand は AssetDatabase.Refresh() のあと
+    # `EditorApplication.isCompiling` を見て `compiling`（走り出した）/
+    # `up_to_date`（何も要らなかった）を返す。解釈できない応答（版差）は
+    # 「不明」として扱い、下のポーリングと最後の砦に判断を委ねる
+    $trigger = Invoke-Pipeline @("recompile") -TimeoutSeconds 120
+    $triggerState = $trigger.data.result
+    if ($triggerState -is [string]) { try { $triggerState = $triggerState | ConvertFrom-Json } catch {} }
+    # 状態は idle | triggered | compiling | completed | up_to_date。
+    # **`triggered` は「Refresh 中でまだ compilationStarted が来ていない」進行中の状態**であり、
+    # これを完了側に落とすと待機がすり抜けて偽の緑に戻る（版差に備えて進行中側は広めに取る。
+    # `completed` は "compil" にも "pending" にも一致しないので終了側のまま）
+    $inProgress = "compil|reload|pending|running|triggered"
+    # **走り出したあとの完了は、終端状態が返ったときだけ**とみなす。
+    # `idle`（状態ファイルが消えた等）を完了と読むと、コンパイル中のまま先へ進んで偽の緑になる
+    $terminal = "completed|up[_-]?to[_-]?date"
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $compileDone = $false
+    $sawCompiling = ("$($triggerState.status)" -match $inProgress)
+    $phase = "$($triggerState.status)"
+    $compileErrors = @()
+    $compileFailed = $false
     while ($sw.Elapsed.TotalSeconds -lt 300) {
-        $probe = Invoke-Pipeline @("recompile_status")
+        # コンパイル成功後のドメインリロード中は HTTP サーバーごと落ちて応答が無い
+        # （パッケージが「クライアントは接続エラーを許容すること」と明記している）。
+        # **走り出したと分かっている間だけ**それを許容する（そうでなければ従来どおり即エラー）
+        $probe = Invoke-Pipeline @("recompile_status") -AllowFail -TimeoutSeconds 60
+        if (-not $probe -or -not $probe.success) {
+            if (-not $sawCompiling) {
+                throw ("recompile_status が応答しません（コンパイルは開始していない）。" +
+                       "エディタと Pipeline の接続を確認してください")
+            }
+            Start-Sleep -Milliseconds 700
+            continue
+        }
         $state = $probe.data.result
         # recompile_status の result は**オブジェクトではなく JSON 文字列**で返る
         if ($state -is [string]) {
@@ -364,13 +454,67 @@ if ($Editor) {
         }
         $phase = "$($state.status)$($state.state)"
         if (-not $phase) { throw "recompile_status が状態を返しません（Unity CLI / pipeline の版を確認）" }
-        if ($phase -notmatch "compil|reload|pending|running") { $compileDone = $true; break }
+        # **失敗の事実はエラー配列と別に握る**（`failed=true` なのに errors が空でも止める。
+        # 自分の recompile が状態ファイルを書き直したあとしか読まないので、前回の結果は混じらない）
+        if ($state.failed) {
+            $compileFailed = $true
+            if (@($state.errors).Count -gt 0) { $compileErrors = @($state.errors) }
+        }
+
+        if ($phase -match $inProgress) {
+            $sawCompiling = $true            # 走り出した。ここから先は「終わる」まで待つ
+        }
+        elseif ($sawCompiling) {
+            # 走り出したあとは、終端状態を見るまで完了にしない
+            if ($phase -match $terminal) { $compileDone = $true; break }
+        }
+        elseif ($sw.Elapsed.TotalSeconds -ge 5) {
+            # 5 秒待っても走り出さない＝変更が無い（この経路は下の最後の砦で必ず裏を取る）
+            $compileDone = $true
+            break
+        }
         Start-Sleep -Milliseconds 700
     }
     if (-not $compileDone) {
         throw ("コンパイルが 300 秒で終わりません（最後の状態: $phase）。" +
                "エディタの Console でコンパイルエラーを確認してください。" +
                "この状態で走らせると古いアセンブリのまま緑になりうるので中断します")
+    }
+
+    # **最後の砦**: 状態遷移をどう読み違えても、アセンブリが壊れていればここで止まる。
+    # `recompile_status.failed` はコンパイルが実際に走った場合しか立たないので、これだけに頼れない。
+    # **「いまコンパイル中でないこと」も同時に見る** — 状態ファイルを信じて抜けたあとに
+    # コンパイルが始まっていると、scriptCompilationFailed は前の（壊れる前の）結果を返す。
+    # 2=コンパイル中 / 1=壊れている / 0=通っている（**C# の文字列リテラルを使わない**:
+    # 二重引用符はコマンドライン経由で壊れるため。数値なら --code で安全に渡せる）
+    $probeCode = ("return UnityEditor.EditorApplication.isCompiling ? 2 : " +
+                  "(UnityEditor.EditorUtility.scriptCompilationFailed ? 1 : 0);")
+    # ドメインリロード中はサーバーごと落ちるので少し粘る。
+    # **応答が無い・まだコンパイル中を「壊れていない」と読んではならない** — 確認できなければ止める
+    $probeResult = $null
+    $probeWait = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($probeWait.Elapsed.TotalSeconds -lt 120) {
+        $failedProbe = Invoke-Pipeline @("eval", "--code", $probeCode) -AllowFail -TimeoutSeconds 60
+        if ($failedProbe -and $failedProbe.success) {
+            $probeResult = "$($failedProbe.data.result.result)"
+            if ($probeResult -ne "2") { break }      # コンパイル中でなくなるまで待つ
+        }
+        Start-Sleep -Seconds 2
+    }
+    if ($probeResult -notmatch "^[01]$") {
+        throw ("コンパイルが通ったかを確認できません（応答: '$probeResult'。" +
+               "120 秒たってもコンパイル中のままか、eval が返らない）。" +
+               "確認できないまま走らせると古いアセンブリで緑になりうるので中断します")
+    }
+    $compilationBroken = $probeResult -eq "1"
+    if ($compilationBroken -or $compileFailed -or $compileErrors.Count -gt 0) {
+        Write-Host ""
+        Write-Host "=== コンパイルエラー ==="
+        foreach ($e in ($compileErrors | Select-Object -First 20)) { Write-Host "  $e" }
+        if ($compileErrors.Count -eq 0) { Write-Host "  （詳細はエディタの Console を確認）" }
+        Write-Host ""
+        throw ("スクリプトのコンパイルが通っていません。テストは実行しません" +
+               "（このまま走らせると古いアセンブリで緑になり、壊れたコードを通してしまう）")
     }
 
     Write-Host "[$projectName] $Mode テストを実行中（開いているエディタ内）..."
@@ -448,9 +592,12 @@ if ($unityCli) {
                    "Unity CLI を導入すればエディタ解決も自動になる: https://docs.unity.com/en-us/unity-cli")
         }
     }
-    $unityArgs = @("-batchmode", "-runTests", "-projectPath", "`"$projectDir`"",
-                   "-testPlatform", $Mode, "-testResults", "`"$Output`"", "-logFile", "`"$logFile`"")
-    if ($Filter) { $unityArgs += @("-testFilter", $Filter) }
+    $unityArgs = @("-batchmode", "-runTests", "-projectPath", (Format-CliArg $projectDir),
+                   "-testPlatform", $Mode, "-testResults", (Format-CliArg $Output),
+                   "-logFile", (Format-CliArg $logFile))
+    # **フィルタも引用する**（パスと同じ理由。`-ArgumentList` の配列は空白で結合されるので、
+    # 空白を含むフィルタは複数引数に割れて、意図と違うテストが走るか 0 件になる）
+    if ($Filter) { $unityArgs += @("-testFilter", (Format-CliArg $Filter)) }
     if ($NoGraphics) { $unityArgs += "-nographics" }
     $process = Start-Process -FilePath $UnityPath -ArgumentList $unityArgs -PassThru -NoNewWindow
     # Unity は終了時にハングすることがあるため、タイムアウトで強制終了して結果XMLで判断する

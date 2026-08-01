@@ -39,7 +39,38 @@ else {
     $projectDir = Join-Path $root $Project
 }
 if (-not (Test-Path $projectDir)) { throw "プロジェクトがありません: $projectDir" }
+# **末尾の `\` を落とす**（run-e2e.ps1 / run-unity-tests.ps1 と同じ正規化）。
+# タブ補完は `unity-nis\` の形を作り、`Resolve-Path` はそれを保つ。付いたまま引用すると
+# 閉じ引用符が `\"` と解釈され、**後続の引数までパスに飲み込まれる**。
+# **ドライブ直下（`C:\`）だけは落とせない** — `C:` はドライブ相対を指す別物になるため。
+# この 1 ケースは引用側（Format-CliArg）で吸収するので、パスの引用は必ずそこを通すこと
+if ($projectDir -notmatch '^[A-Za-z]:\\$') { $projectDir = $projectDir.TrimEnd('\') }
 $projectName = Split-Path $projectDir -Leaf
+
+function Format-CliArg {
+    <#
+      .SYNOPSIS
+      ネイティブプロセスへ渡す引数 1 個を引用する（末尾の `\` を正しく退避する）。
+
+      .NOTES
+      **閉じ引用符の直前の `\` は、引用符そのものをエスケープする**（Windows の引数解釈規則）。
+      `"C:\"` は 1 引数として閉じず、後続の引数まで飲み込む（実測: `--project-path "C:\"
+      --format json --no-banner` が 1 引数になる）。末尾の `\` だけを倍にすればリテラルの
+      `\` 1 個として渡り、**値そのものは変わらない**。
+
+      $projectDir は末尾の `\` を落として正規化してあるが、**ドライブ直下（`C:\`）だけは
+      落とせない** — `C:` はドライブ相対（そのドライブのカレントディレクトリ）を指す別物になる。
+      `C:\.` のような等価表現でも代用できない: **Unity CLI はプロジェクトパスを正規化せず
+      文字列で突き合わせる**ので、実行中のエディタに一致しなくなる
+      （実測: `unity status --project-path <プロジェクト>\.` が STATUS_NO_INSTANCES を返す）。
+      値を保ったまま安全に渡せるのはこの引用だけなので、パスの引用は必ずここを通す。
+    #>
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Value)
+    # `"` の直前の `\` は連続ぶんだけ倍にしてから `\"` で退避し、末尾の `\` も倍にする
+    $escaped = [regex]::Replace($Value, '(\\*)"', { param($m) ($m.Groups[1].Value * 2) + '\"' })
+    $escaped = [regex]::Replace($escaped, '(\\+)$', { param($m) $m.Groups[1].Value * 2 })
+    return '"' + $escaped + '"'
+}
 
 function Test-UnityProjectLocked {
     param([Parameter(Mandatory)][string]$Dir)
@@ -103,7 +134,7 @@ function Get-CliStatus {
     $errFile = [System.IO.Path]::GetTempFileName()
     try {
         $p = Start-Process -FilePath $Cli -PassThru -NoNewWindow `
-            -ArgumentList @("status", "--project-path", "`"$projectDir`"", "--format", "json", "--no-banner") `
+            -ArgumentList @("status", "--project-path", (Format-CliArg $projectDir), "--format", "json", "--no-banner") `
             -RedirectStandardOutput $outFile -RedirectStandardError $errFile
         if (-not $p.WaitForExit($CliTimeoutSeconds * 1000)) {
             try { $p.Kill() } catch { }

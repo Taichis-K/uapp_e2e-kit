@@ -88,6 +88,31 @@ function Format-InstallFailure {
     return "adb install 失敗 (exit=$ExitCode): $hint`n--- adb の出力 ---`n$Output"
 }
 
+function Format-CliArg {
+    <#
+      .SYNOPSIS
+      ネイティブプロセスへ渡す引数 1 個を引用する（末尾の `\` を正しく退避する）。
+
+      .NOTES
+      **閉じ引用符の直前の `\` は、引用符そのものをエスケープする**（Windows の引数解釈規則）。
+      `"C:\"` は 1 引数として閉じず、後続の引数まで飲み込む（実測: `--project-path "C:\"
+      --format json --no-banner` が 1 引数になる）。末尾の `\` だけを倍にすればリテラルの
+      `\` 1 個として渡り、**値そのものは変わらない**。
+
+      $projectDir は末尾の `\` を落として正規化してあるが、**ドライブ直下（`C:\`）だけは
+      落とせない** — `C:` はドライブ相対（そのドライブのカレントディレクトリ）を指す別物になる。
+      `C:\.` のような等価表現でも代用できない: **Unity CLI はプロジェクトパスを正規化せず
+      文字列で突き合わせる**ので、実行中のエディタに一致しなくなる
+      （実測: `unity status --project-path <プロジェクト>\.` が STATUS_NO_INSTANCES を返す）。
+      値を保ったまま安全に渡せるのはこの引用だけなので、パスの引用は必ずここを通す。
+    #>
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Value)
+    # `"` の直前の `\` は連続ぶんだけ倍にしてから `\"` で退避し、末尾の `\` も倍にする
+    $escaped = [regex]::Replace($Value, '(\\*)"', { param($m) ($m.Groups[1].Value * 2) + '\"' })
+    $escaped = [regex]::Replace($escaped, '(\\+)$', { param($m) $m.Groups[1].Value * 2 })
+    return '"' + $escaped + '"'
+}
+
 function Test-UnityProjectLocked {
     <#
       .SYNOPSIS
@@ -151,6 +176,13 @@ else {
     $projectDir = Join-Path $root $Project
     $isRepoSample = $true   # 開発リポジトリのサンプル（Builds を3プロジェクトで共有する）
 }
+# **末尾の `\` を落とす**。タブ補完は `unity-nis\` の形を作り、`Resolve-Path` はそれを保つ。
+# 付いたまま `"$projectDir"` と引用すると閉じ引用符が `\"` と解釈され、**後続の引数まで
+# パスに飲み込まれる**（Windows の引数解釈規則。`Start-Process -ArgumentList` 経由の
+# `unity status` / `unity open` が引数エラーで即失敗する）。
+# **ドライブ直下（`C:\`）だけは落とせない** — `C:` はドライブ相対を指す別物になるため。
+# この 1 ケースは引用側（Format-CliArg）で吸収するので、パスの引用は必ずそこを通すこと
+if ($projectDir -notmatch '^[A-Za-z]:\\$') { $projectDir = $projectDir.TrimEnd('\') }
 $projectName = Split-Path $projectDir -Leaf
 
 # ジャーニー記録（docs/07-viewer.md）の出力先を固定する:
@@ -285,7 +317,7 @@ if ($Editor) {
         $errFile = [System.IO.Path]::GetTempFileName()
         try {
             $process = Start-Process -FilePath $unityCli -PassThru -NoNewWindow `
-                -ArgumentList @("status", "--project-path", "`"$projectDir`"", "--format", "json", "--no-banner") `
+                -ArgumentList @("status", "--project-path", (Format-CliArg $projectDir), "--format", "json", "--no-banner") `
                 -RedirectStandardOutput $outFile -RedirectStandardError $errFile
             $sw = [System.Diagnostics.Stopwatch]::StartNew()
             $announced = $false
@@ -318,14 +350,78 @@ if ($Editor) {
     }
 
     function Invoke-UnityCli {
+        <#
+          .SYNOPSIS
+          pipeline コマンドを叩く。**タイムアウトは待って再試行する**（`-AllowFail` を除く）。
+
+          .NOTES
+          タイムアウトは「失敗」ではなく「エディタがまだ手空きでない」。コールドスタート直後は
+          アセットインポートとコンパイルで塞がっており、**軽い eval は通るのに editor_status
+          （EditorApplication の状態を集める）はまだ返らない**状態が実在する（導入先で実測）。
+          そのため疎通プローブ 1 か所だけを再試行しても、その直後の呼び出しが同じ理由で落ちた。
+          再試行はコマンド共通の関心事なので、**呼び出し側ではなくここに置く**
+          （open_scene / editor_play / list_open_scenes も同じ危険を持つ）。
+
+          `--timeout` を伸ばす対処は採らない。伸ばすと「本当に固まっている」と区別できなくなる。
+          **タイムアウト以外の失敗は再試行せず即座に上げる**（版差・実エラーの切り分けを保つ）。
+          `-AllowFail` の呼び出しは再試行しない — 失敗を織り込んで呼び手が分岐するためのもので、
+          待つかどうかも呼び手が決める。
+
+          **再試行してよいのは「二度実行しても害が無い」コマンドだけ**。
+          クライアント側のタイムアウトは「実行されなかった」ことを保証しない（サーバーは
+          メインスレッド待ちのまま残り、手が空いた時点で実行する）ため、再試行は重複実行に
+          なりうる。下の一覧は com.unity.pipeline の実装で確認したもの
+          （editor_play / editor_stop は現在の状態を見て何もしない・status 系は読み取りのみ・
+          このスクリプトが渡す eval / eval_file は「有効シーンを読む」「Game view 解像度を
+          設定する」だけ）。**一覧に無いコマンドは待たずに落とす**。
+          たとえば editor_pause はトグルなので二度実行すると状態が反転する。
+          **open_scene もあえて外す**: 1 回目が実行されたあとに（sceneOpened のコールバック等で）
+          シーンが dirty になっていると、2 回目の OpenSceneMode.Single が
+          その未保存変更を捨てる — 事前の dirty 検査は再試行の前には効かない。
+          なお editor_status が同じ待機を通るので、そこを抜けた時点でエディタは手空きであり、
+          外したことで v0.1.5 以前より悪くなる経路は無い。
+        #>
         param([string[]]$CliArgs, [switch]$AllowFail)
+        $retrySafe = @("pipeline", "editor_status", "list_open_scenes", "editor_play", "editor_stop",
+                       "eval", "eval_file", "screenshot")
         # cmd 系は常に対象プロジェクトへスコープする（複数エディタ起動時に別プロジェクトを操作・停止しない）
         if ($CliArgs[0] -eq "cmd") {
+            $cmdName = $CliArgs[1]
             $CliArgs = @("cmd", "--project-path", $projectDir) + $CliArgs[1..($CliArgs.Count - 1)]
+        } else {
+            $cmdName = $CliArgs[0]
         }
-        $raw = & $unityCli @CliArgs --format json --no-banner 2>&1 | Out-String
-        $parsed = $null
-        try { $parsed = $raw | ConvertFrom-Json } catch {}
+        $label = ($CliArgs | Where-Object { $_ -notmatch "^-" -and $_ -ne $projectDir }) -join " "
+        $wait = [System.Diagnostics.Stopwatch]::StartNew()
+        $notified = $false
+        while ($true) {
+            $raw = & $unityCli @CliArgs --format json --no-banner 2>&1 | Out-String
+            $parsed = $null
+            try { $parsed = $raw | ConvertFrom-Json } catch {}
+            if ($parsed -and $parsed.success) {
+                if ($notified) {
+                    Write-Host "[$projectName] $label が応答（待機 $([int]$wait.Elapsed.TotalSeconds) 秒）"
+                }
+                return $parsed
+            }
+            $detail = if ($parsed.errors) { ($parsed.errors | ForEach-Object { $_.message }) -join " / " } else { $raw }
+            # **タイムアウト判定は構造化されたエラーだけで行う**。生出力には `--timeout` の
+            # 用法説明などが混ざるので、版差で出たヘルプを「待てば直る」と誤読すると
+            # すぐ落ちるべき失敗を延々と待つことになる
+            $isTimeout = $parsed -and $parsed.errors -and $detail -match "timed out|timeout"
+            if ($AllowFail -or -not $isTimeout -or $retrySafe -notcontains $cmdName) { break }
+            if ($wait.Elapsed.TotalSeconds -ge $EditorReadyTimeoutSeconds) {
+                throw ("エディタが $([int]$wait.Elapsed.TotalSeconds) 秒たっても '$label' に応答しません: $detail。" +
+                       "エディタ側でインポート/コンパイルが終わらない、または Console でエラーが出ていないか確認する" +
+                       "（待ち時間は -EditorReadyTimeoutSeconds で延ばせる）")
+            }
+            if (-not $notified) {
+                Write-Host ("[$projectName] エディタは接続済みだが '$label' に応答しない" +
+                            "（インポート/コンパイル中の可能性）。最大 $EditorReadyTimeoutSeconds 秒待ちます...")
+                $notified = $true
+            }
+            Start-Sleep -Seconds 3
+        }
         if (-not $AllowFail -and (-not $parsed -or -not $parsed.success)) {
             throw "unity $($CliArgs -join ' ') が失敗: $raw"
         }
@@ -386,7 +482,7 @@ if ($Editor) {
         # 注意: 未導入の場合 Packages\manifest.json に com.unity.pipeline が追加される（VCS差分になる）
         $null = Invoke-UnityCli @("pipeline", "install", "--project-path", $projectDir)
         # **パスは引用する**（-ArgumentList の配列は空白結合されるため、空白入りのパスが割れる）
-        Start-Process -FilePath $unityCli -ArgumentList @("open", "`"$projectDir`"") | Out-Null
+        Start-Process -FilePath $unityCli -ArgumentList @("open", (Format-CliArg $projectDir)) | Out-Null
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
         while ($true) {
             Start-Sleep -Seconds 5
@@ -402,35 +498,15 @@ if ($Editor) {
     # （実例: pipeline 0.4 で eval の code が必須の名前付き引数になり、位置引数の呼び出しが全滅した）。
     # 一番単純な eval を叩いて、ここで切り分けを終わらせる。
     #
-    # **`unity status` が ready を返すことと、pipeline コマンドに応答できることは別**。
-    # コールドスタート直後のエディタはアセットインポートとスクリプトコンパイルで手が塞がっており、
-    # この軽い eval でも既定 30 秒（--timeout の既定値）でタイムアウトする。
-    # インポートが終われば同じコマンドが 1 秒未満で返るので、**タイムアウトの間は待って再試行**する
-    # （--timeout を伸ばすだけだと「本当に固まっている」ケースと区別できない）。
-    # タイムアウト以外の失敗＝版差なので、待たずに下の判定へ落とす
-    $probe = $null
-    $probeWait = [System.Diagnostics.Stopwatch]::StartNew()
-    $probeNotified = $false
-    while ($true) {
-        $probe = Invoke-UnityCli @("cmd", "eval", "--code", 'return "ok";') -AllowFail
-        if ($probe -and $probe.success) { break }
-        $probeError = if ($probe.errors) { ($probe.errors | ForEach-Object { $_.message }) -join " / " } else { "応答なし" }
-        if ($probeError -notmatch "timed out|timeout") { break }
-        if (-not $probeNotified) {
-            Write-Host ("[$projectName] エディタは接続済みだが pipeline コマンドに応答しない" +
-                        "（インポート/コンパイル中の可能性）。最大 $EditorReadyTimeoutSeconds 秒待ちます...")
-            $probeNotified = $true
-        }
-        if ($probeWait.Elapsed.TotalSeconds -ge $EditorReadyTimeoutSeconds) {
-            throw ("エディタが $([int]$probeWait.Elapsed.TotalSeconds) 秒たっても pipeline コマンドに応答しません: $probeError。" +
-                   "エディタ側でインポート/コンパイルが終わらない、または Console でエラーが出ていないか確認する" +
-                   "（待ち時間は -EditorReadyTimeoutSeconds で延ばせる）")
-        }
-        Write-Host "[$projectName] 待機 $([int]$probeWait.Elapsed.TotalSeconds) 秒"
-        Start-Sleep -Seconds 3
-    }
-    if ($probeNotified) { Write-Host "[$projectName] エディタ応答を確認（待機 $([int]$probeWait.Elapsed.TotalSeconds) 秒）" }
-    if (-not $probe -or -not $probe.success -or $probe.data.result.result -ne "ok") {
+    # **これは版差の検出であって「準備完了」の判定ではない**。
+    # プローブが 1 回で通っても、エディタが手空きとは限らない（軽い eval は通るのに
+    # editor_status はまだ返らない状態が実在する）。準備完了の待機は Invoke-UnityCli が
+    # コマンドごとに行うので、ここで待つ必要はない — タイムアウトは版差でなく手空きでないだけなので
+    # 素通しし、後続の呼び出し（同関数が待って再試行する）に判断を委ねる
+    $probe = Invoke-UnityCli @("cmd", "eval", "--code", 'return "ok";') -AllowFail
+    $probeTimedOut = $probe -and -not $probe.success -and
+                     ((($probe.errors | ForEach-Object { $_.message }) -join " / ") -match "timed out|timeout")
+    if (-not $probeTimedOut -and (-not $probe -or -not $probe.success -or $probe.data.result.result -ne "ok")) {
         $detail = if ($probe.errors) { ($probe.errors | ForEach-Object { $_.message }) -join " / " } else { "応答なし" }
         throw ("Unity CLI / com.unity.pipeline のバージョンが想定と異なります（eval の疎通に失敗: $detail）。" +
                "'unity --version' と <プロジェクト>\Packages\manifest.json の com.unity.pipeline を確認する。" +
@@ -477,7 +553,15 @@ if ($Editor) {
     if (-not $EditorResolution) {
         $EditorResolution = if ($config.orientation -eq "landscape") { "2340x1080" } else { "1080x2340" }
     }
-    $wh = $EditorResolution -split "x"
+    # **数値であることを検証してから C# へ埋める**。ここは文字列連結でコードを組み立てているので、
+    # 検証せずに通すと値の中身がそのままコードになる（`-EditorResolution '1080x2340);…//'` で
+    # 任意の文を差し込めてしまい、「eval に渡すのは固定コードだから再試行しても安全」という
+    # Invoke-UnityCli の前提も崩れる）。打ち間違いをその場で弾ける利点もある
+    if ($EditorResolution -notmatch '^\s*(\d+)\s*[xX]\s*(\d+)\s*$') {
+        throw "-EditorResolution は '幅x高さ'（例: 1080x2340）で指定してください: '$EditorResolution'"
+    }
+    $wh = @([int]$Matches[1], [int]$Matches[2])
+    if ($wh[0] -le 0 -or $wh[1] -le 0) { throw "-EditorResolution の幅・高さは 1 以上: '$EditorResolution'" }
     # C#文字列リテラルの二重引用符はコマンドライン経由で壊れやすいため eval_file（一時ファイル）で渡す。
     # 置き場所は TEMP でなく Builds\ 配下（gitignore 済み）: サンドボックス環境では TEMP が
     # 8.3 短縮パス（C:\Users\XXXXXX~1.YYY\...）で渡り、その形のパスは Move-Item / Remove-Item が

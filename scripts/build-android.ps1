@@ -27,7 +27,32 @@ else {
     $isSample = $true
 }
 if (-not (Test-Path $projectPath)) { throw "プロジェクトがありません: $projectPath" }
+# **末尾の `\` を落とす**（run-e2e.ps1 / run-unity-tests.ps1 と同じ正規化）。
+# タブ補完は `unity-nis\` の形を作り、`Resolve-Path` はそれを保つ。付いたまま引用すると
+# 閉じ引用符が `\"` と解釈され、**後続の引数までパスに飲み込まれる**
+# （`-executeMethod` 以降が Unity に届かず、原因の分かりにくいビルド失敗になる）。
+# **ドライブ直下（`C:\`）だけは落とせない** — `C:` はドライブ相対を指す別物になるため。
+# この 1 ケースは引用側（Format-CliArg）で吸収するので、パスの引用は必ずそこを通すこと
+if ($projectPath -notmatch '^[A-Za-z]:\\$') { $projectPath = $projectPath.TrimEnd('\') }
 $projectName = Split-Path $projectPath -Leaf
+
+function Format-CliArg {
+    <#
+      .SYNOPSIS
+      ネイティブプロセスへ渡す引数 1 個を引用する（末尾の `\` を正しく退避する）。
+
+      .NOTES
+      **閉じ引用符の直前の `\` は、引用符そのものをエスケープする**（Windows の引数解釈規則）。
+      `"C:\"` は 1 引数として閉じず、後続の引数まで飲み込む。末尾の `\` だけを倍にすれば
+      リテラルの `\` 1 個として渡り、**値そのものは変わらない**。
+      パス（ドライブ直下を含む）を Start-Process へ渡すときは必ずここを通す。
+    #>
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Value)
+    # `"` の直前の `\` は連続ぶんだけ倍にしてから `\"` で退避し、末尾の `\` も倍にする
+    $escaped = [regex]::Replace($Value, '(\\*)"', { param($m) ($m.Groups[1].Value * 2) + '\"' })
+    $escaped = [regex]::Replace($escaped, '(\\+)$', { param($m) $m.Groups[1].Value * 2 })
+    return '"' + $escaped + '"'
+}
 
 # Unity バージョンは ProjectVersion.txt（Unity自身が維持する正）から読む
 $versionFile = Join-Path $projectPath "ProjectSettings\ProjectVersion.txt"
@@ -73,10 +98,10 @@ if (-not $ExecuteMethod) {
 
 $unityArgs = @(
     "-batchmode", "-quit",
-    "-projectPath", "`"$projectPath`"",
+    "-projectPath", (Format-CliArg $projectPath),
     "-executeMethod", $ExecuteMethod,
-    "-buildOutput", "`"$Output`"",
-    "-logFile", "`"$logFile`""
+    "-buildOutput", (Format-CliArg $Output),
+    "-logFile", (Format-CliArg $logFile)
 )
 if ($Release) { $unityArgs += "-release" }
 

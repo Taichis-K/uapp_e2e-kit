@@ -204,9 +204,16 @@ foreach ($dir in @("scripts", "config")) {
 # **無いと pytest の `--basetemp ..\Builds\pytest-tmp`（SETUP.md がサンドボックス環境向けに
 # 案内している回避策）が「親が無い」で落ちる**。gitignore 対象なので作っても追跡はされない
 New-Item -ItemType Directory -Force (Join-Path $kit "Builds") | Out-Null
-foreach ($script in @("build-android.ps1", "run-e2e.ps1", "run-unity-tests.ps1", "start-emulator.ps1",
-                      "emit-status.ps1", "uninstall.ps1")) {
-    Copy-Item (Join-Path $src.Scripts $script) (Join-Path $kit "scripts\$script") -Force
+# **配るスクリプトを列挙しない**。v0.1.6 で追加した unity-editor-status.ps1 が
+# この列挙から漏れ、キットの CLAUDE.md が案内するコマンドが導入先に存在しない状態になった
+# （エラーにならず静かに欠けるので、AI が実行して「ファイルが無い」で初めて気づく）。
+# 配布キットから実行する場合、scripts\ の中身はそれ自体が配布対象。開発リポジトリから
+# 実行する場合だけ、**導入先では使わない開発専用スクリプト**を除く（除外は増えにくく、
+# 配布対象が増えたときは何もしなくても届く＝同じ漏れ方をしない）
+$devOnlyScripts = @("install-to-project.ps1", "package-kit.ps1", "publish-kit.ps1", "verify-all.ps1")
+foreach ($script in (Get-ChildItem (Join-Path $src.Scripts "*.ps1") |
+                     Where-Object { $devOnlyScripts -notcontains $_.Name })) {
+    Copy-Item $script.FullName (Join-Path $kit "scripts\$($script.Name)") -Force
 }
 robocopy (Join-Path $src.Driver "e2e_driver") (Join-Path $kit "driver\e2e_driver") /E /XD __pycache__ /NFL /NDL /NJH /NJS | Out-Null
 Copy-Item (Join-Path $src.Driver "pytest.ini") (Join-Path $kit "driver\pytest.ini") -Force
@@ -352,6 +359,57 @@ foreach ($f in (Get-KitOwnedFiles $target | Sort-Object)) {
 }
 $manifestEntries | ConvertTo-Json | Set-Content $manifestPath -Encoding utf8
 Write-Host "  [OK] uapp_e2e\kit-manifest.json（次回更新時のローカル改変検知用）"
+
+# --- 4.5 ドキュメントが案内するスクリプトが実在するかの検査 ---
+# キットの文書は `.\scripts\<名前>.ps1` の形でコマンドを案内する。
+# **案内しているのに配られていない**と、読んだ AI が実行して初めて「ファイルが無い」と気づく
+# （v0.1.6 で実際に起きた: unity-editor-status.ps1 が配布の列挙から漏れていた）。
+# 配布の仕組みを列挙から一括コピーへ変えたうえで、食い違いをここでも検出する。
+# **見る文書も列挙しない**（同じ漏れ方をする）。AI が読むのは CLAUDE.md / SETUP.md だけでなく、
+# docs\ai-loop.md やスキル（.claude\skills / .agents\skills）にも `.\scripts\*.ps1` が出てくる
+$docRoots = @((Join-Path $kit "CLAUDE.md"), (Join-Path $kit "AGENTS.md"),
+              (Join-Path $kit "SETUP.md"), (Join-Path $kit "docs"),
+              (Join-Path $target ".claude\rules\uapp-e2e.md"))
+# **スキルはキット所有の e2e-* だけ**を見る（Get-KitOwnedFiles と同じ範囲）。
+# skills\ 全体を走査すると、ユーザーの無関係なスキル文書が `scripts\…ps1` に言及しただけで
+# 「キットが案内しているのに無い」と誤警告する
+foreach ($skillsRoot in @(".claude\skills", ".agents\skills")) {
+    foreach ($name in @("e2e-setup", "e2e-run", "e2e-write-test", "e2e-dump")) {
+        $docRoots += Join-Path $target "$skillsRoot\$name"
+    }
+}
+$docFiles = @()
+foreach ($docRoot in $docRoots) {
+    if (-not (Test-Path $docRoot)) { continue }
+    if (Test-Path $docRoot -PathType Container) {
+        $docFiles += @(Get-ChildItem $docRoot -Recurse -Filter "*.md" -File | ForEach-Object { $_.FullName })
+    } else {
+        $docFiles += $docRoot
+    }
+}
+$docScriptRefs = @()
+foreach ($doc in ($docFiles | Select-Object -Unique)) {
+    # **空ファイルで落とさない**。`Get-Content -Raw` は $null を返し、[regex]::Matches が
+    # 例外になる（$ErrorActionPreference=Stop なので、ここまでのコピーを済ませた状態で
+    # installer 全体が中断する）。検査は付加価値であって、導入を止める理由にしない
+    $raw = Get-Content $doc -Raw -ErrorAction SilentlyContinue
+    if ([string]::IsNullOrEmpty($raw)) { continue }
+    foreach ($m in [regex]::Matches($raw, 'scripts[\\/]([A-Za-z0-9._-]+\.ps1)')) {
+        $docScriptRefs += $m.Groups[1].Value
+    }
+}
+# 開発専用スクリプトは除く。文書は「開発リポジトリから実行する場合」として
+# `.\scripts\install-to-project.ps1 …` にも言及するが、これは導入先に置くものではない
+$missingDocScripts = @($docScriptRefs | Select-Object -Unique |
+                       Where-Object { $devOnlyScripts -notcontains $_ } |
+                       Where-Object { -not (Test-Path (Join-Path $kit "scripts\$_")) })
+if ($missingDocScripts.Count -gt 0) {
+    Write-Host ""
+    Write-Host "  [警告] キットの文書が案内しているのに配置されていないスクリプトがあります:"
+    foreach ($m in $missingDocScripts) { Write-Host "    - uapp_e2e\scripts\$m" }
+    Write-Host "  キット側の不具合です（配布物の作り方かドキュメントのどちらかが間違っている）。報告してください"
+    Write-Host ""
+}
 
 # --- 5. 残りの手動手順の表示（検出できる項目は導入状況を照合して [済]/[未] を付ける） ---
 function Get-ManifestDependencyVersion($name) {
