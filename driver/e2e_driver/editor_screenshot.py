@@ -48,6 +48,17 @@ def available() -> bool:
             and bool(os.environ.get("UAPP_E2E_PROJECT_PATH")))
 
 
+def _cli_global_args() -> list[str]:
+    """Unity CLI へ毎回渡すグローバル引数（サブコマンドより前に置く）。
+
+    PowerShell 側の `Get-UappUnityCliGlobalArgs` と対になる。**片方だけに付けると
+    「Play 制御は通るのにスクリーンショットだけ落ちる」**という切り分けにくい欠け方をする。
+    """
+    if os.environ.get("UAPP_E2E_UNITY_CLI_PROXY_DISABLE") == "1":
+        return ["--proxy-disable"]
+    return []
+
+
 def _run(argv: list[str]) -> dict | None:
     try:
         result = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8",
@@ -73,7 +84,12 @@ def capture(out_path: Path) -> bool:
     project = os.environ.get("UAPP_E2E_PROJECT_PATH")
     if not project:
         return False               # 宛先不明のまま撮ると別プロジェクトの画面を掴みうる
-    argv = [cli, "cmd", "--project-path", project]
+    # **PowerShell 側と同じグローバル引数を付ける**。プロキシ配下では Unity CLI が
+    # localhost 宛ての Pipeline 通信までプロキシへ流して 503 になるため、
+    # `--proxy-disable` が無いと**ジャーニー画像と失敗時画像だけが静かに欠落**する
+    # （Play 制御と pytest は PowerShell 側で通っているので気づきにくい）。
+    # 有効化は run-e2e.ps1 の -UnityCliProxyDisable / 環境変数（どちらでも同じ）
+    argv = [cli, *_cli_global_args(), "cmd", "--project-path", project]
     # C# の逐語的文字列に埋めるので " だけ二重化する（Windows のパス区切りはそのまま渡せる）
     literal = str(out_path.resolve()).replace('"', '""')
     argv += ["eval", "--code",

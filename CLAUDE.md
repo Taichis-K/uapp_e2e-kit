@@ -45,6 +45,22 @@ cd driver
 python -c "from e2e_driver import BridgeClient; import json; print(json.dumps(BridgeClient().connect().dump(), indent=1, ensure_ascii=False))"
 ```
 
+**エディタへ繋ぐときは `UAPP_E2E_EDITOR=1` を付け、使い終わったら必ず消す**:
+
+```powershell
+$env:UAPP_E2E_EDITOR = '1'
+try   { python -c "..." }
+finally { Remove-Item Env:\UAPP_E2E_EDITOR -ErrorAction SilentlyContinue }
+```
+
+この宣言があるときだけ、ドライバは**接続先が本当にエディタか**を ping の `platform` で確かめ、
+違えば `WrongBridgeTargetError` で止める（デバイス実行が残した `adb forward` が同じポートを
+握っていると、エディタのつもりで端末のアプリを検証してしまうため）。
+**宣言が無い接続は検査されない** — `adb` の使用ガードと同じ約束。
+**立てっぱなしにしない**: 残ったまま同じシェルでデバイス経路へ進むと、
+ドライバが adb の使用を明示エラーで拒否する（実機を誤って検証しないための仕様）。
+
+
 ジャーニー記録（画面把握・遷移・カバレッジの可視化 → 自己完結HTMLレポート）は
 **run-e2e.ps1 が既定で `Builds\journey\` に記録し、テスト後に `Builds\journey\report.html` を自動更新する**
 （journey フィクスチャを使うテストが対象。無効化は `-NoJourney`、出力先変更は `-JourneyDir`）。
@@ -113,6 +129,14 @@ python -m e2e_driver.journey ..\Builds\journey    # → report.html 生成（詳
 
 ## 制約
 
+- **macOS は Intel（x86_64）と Apple Silicon（arm64）の両方の実機で検証済み（2026-08-03）**（キット開発は Windows）。
+  スクリプトは同じ .ps1 を pwsh 7 で動かす。
+  OS で分かれる判断（実体の探し方・プロセスの見方）は `scripts/uapp-platform.ps1` に集約してあるので、
+  mac で動かないときは**まずそこの解決関数を見る**。ただし**直す場所がそこだけとは限らない**
+  （helper は正しいのに呼び出し側が使っていない、という不具合が実際に出ている）。
+  前提と既知の差分は [SETUP.md](SETUP.md) の「macOS で使う場合」。
+  **パス結合に `Join-Path $dir "A\B"` と書かない**（mac では `\` が区切りにならない）。
+  代わりに `Join-UappPath $dir "A\B"` を使う（両方の区切りを解釈する）
 - 計装は `UAPP_E2E_BRIDGE` define のあるビルドのみ。**本番ビルドに define を付けない**
 - `Assets/uapp_e2e/E2EBridge/` を変更したら `docs/02-protocol.md` と `driver/e2e_driver/` を同期
 - 計装入りビルドを社外配布しない

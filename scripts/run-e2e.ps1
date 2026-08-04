@@ -26,10 +26,19 @@ param(
     # -Editor: `unity status`（最初の CLI 呼び出し）を打ち切るまでの秒数。CLI の認証セッションが
     # stale になると無言で 10 分以上ハングするため、必ず時間を区切って原因を示して止める
     [int]$UnityCliProbeSeconds = 60,
+    # -Editor: Unity CLI の呼び出しに `--proxy-disable` を付ける（既定オフ）。
+    # プロキシ配下では CLI が localhost 宛ての Pipeline 通信までプロキシへ流し、503 で
+    # `unity status` が unreachable になる。NO_PROXY / UNITY_NOPROXY / config の bypass は
+    # いずれも効かず、このフラグだけが効く（詳細は uapp-platform.ps1 の Get-UappUnityCliGlobalArgs）。
+    # 環境変数 UAPP_E2E_UNITY_CLI_PROXY_DISABLE=1 でも同じ。**プロキシ経由が必要な認証・
+    # ダウンロードも直結になる**ので、既定では付けない
+    [switch]$UnityCliProxyDisable,
     [string]$PytestArgs = ""
 )
 
 $ErrorActionPreference = "Stop"
+
+. (Join-Path $PSScriptRoot "uapp-platform.ps1")   # OS 差分の吸収（Windows / macOS。mac は暫定・未検証）
 
 function Get-DeviceFreeBytes {
     <#
@@ -39,7 +48,7 @@ function Get-DeviceFreeBytes {
     param([string[]]$AdbTarget = @())
     try {
         # df の 1K ブロック表示から Available 列を取る（-h だと単位付きで解析が面倒）
-        $line = (adb @AdbTarget shell df /data 2>$null | Select-Object -Last 1)
+        $line = (& $script:adbExe @AdbTarget shell df /data 2>$null | Select-Object -Last 1)
         $columns = ($line -split '\s+') | Where-Object { $_ }
         # Filesystem 1K-blocks Used Available Use% Mounted → 4 列目が Available
         if ($columns.Count -ge 4 -and $columns[3] -match '^\d+$') { return [long]$columns[3] * 1024 }
@@ -131,20 +140,46 @@ function Test-UnityProjectLocked {
     param([Parameter(Mandatory)][string]$ProjectDir)
 
     try {
-        $target = (Resolve-Path -LiteralPath $ProjectDir).Path.TrimEnd('\')
-        foreach ($p in Get-CimInstance Win32_Process -Filter "Name='Unity.exe'" -ErrorAction Stop) {
+        $target = Get-UappNormalizedDir (Resolve-Path -LiteralPath $ProjectDir).Path
+        foreach ($p in (Get-UappUnityProcess)) {   # プロセス列挙の OS 差は uapp-platform.ps1 が吸収する
             $cmd = $p.CommandLine
+            # **コマンドラインが取れていない Unity プロセスは「無関係」と断定できない**。
+            # 安全側（掴んでいる扱い）に倒す（Windows で CIM が権限等で失敗したときに効く）
+            if (-not $p.CommandLineAvailable) {
+                Write-Warning "Unity プロセスのコマンドラインが取得できないため、占有されている前提で扱います"
+                return $true
+            }
             if (-not $cmd) { continue }
-            if ($cmd -match '(^|\s)-batchmode(\s|$)') { continue }
             if ($cmd -match '-projectPath\s+"?([^"]+?)"?(\s+-|\s*$)') {
                 $path = $Matches[1].Trim()
-                try { $path = (Resolve-Path -LiteralPath $path).Path.TrimEnd('\') } catch { }
+                try { $path = Get-UappNormalizedDir (Resolve-Path -LiteralPath $path).Path } catch { }
+                # **batchmode でも対象パスが一致すれば占有**（別ターミナルの batchmode は
+                # 実際にロックを握る。この判定は自分が Unity を起動する前に行うので、
+                # 自分自身を誤検出することはない）
                 if ($path -ieq $target) { return $true }
+                continue
+            }
+            # **ウィンドウタイトルは実行可否に使わない（が、黙って素通りもしない）**。
+            # これは**トレードオフで、どちらに倒しても壊れる**（外部レビューで両方向を指摘された）:
+            #   止める  … 別の場所にある同名プロジェクトを開いているだけで**実行不能**（回避策が無い）
+            #   止めない… `-projectPath` 無し＋EditorInstance.json 生成前の起動途中を見落とす
+            # 代償の小さい後者を選び、**警告だけ出して続行**する。この非対称は意図的（docs/04-ai-loop.md）
+            if ($p.MainWindowTitle -and $p.MainWindowTitle -match '^(.+?)\s+-\s' -and
+                $Matches[1] -ieq (Split-Path $target -Leaf)) {
+                Write-Warning ("同名のプロジェクトを開いている Unity があります（タイトル: $($p.MainWindowTitle)）。" +
+                               "**対象と同じものなら閉じてから再実行**してください" +
+                               "（-projectPath を持たない起動のため、同一かどうか確定できません）")
             }
         }
+    } catch [System.InvalidOperationException] {
+        # **列挙できない＝「掴んでいない」と断定できない**。安全側（掴んでいる扱い）に倒す。
+        # ここで false を返すと、起動途中のエディタを見落として二重に開きにいく
+        Write-Warning ("Unity プロセスを列挙できませんでした（$($_.Exception.Message)）。" +
+                       "占有されている前提で扱います")
+        return $true
     } catch { }
 
-    $instanceFile = Join-Path $ProjectDir "Library\EditorInstance.json"
+    $instanceFile = Join-UappPath $ProjectDir "Library\EditorInstance.json"
     if (Test-Path -LiteralPath $instanceFile) {
         try {
             $editorPid = [int]((Get-Content $instanceFile -Raw | ConvertFrom-Json).process_id)
@@ -153,7 +188,7 @@ function Test-UnityProjectLocked {
         } catch { }
     }
 
-    $lock = Join-Path $ProjectDir "Temp\UnityLockfile"
+    $lock = Join-UappPath $ProjectDir "Temp\UnityLockfile"
     if (-not (Test-Path -LiteralPath $lock)) { return $false }
     try {
         $stream = [System.IO.File]::Open($lock, "Open", "ReadWrite", "None")
@@ -163,17 +198,24 @@ function Test-UnityProjectLocked {
         return $true
     }
 }
-$root = (Resolve-Path "$PSScriptRoot\..").Path
+$root = (Resolve-Path (Join-UappPath $PSScriptRoot "..")).Path
+
+# Python の実体を先に決める（pytest / ジャーニー生成 / スクショで使う）。
+# **mac は `python` が無く `python3` だけ、という構成が普通**なので裸で呼ばない
+$script:pythonExe = Get-UappPython
+if (-not $script:pythonExe) {
+    throw "python が見つかりません（python / python3 のどちらも PATH にありません）"
+}
 
 # 対象プロジェクト解決: -ProjectPath 優先 → キット親がUnityプロジェクトならそれ → $root\$Project
 if ($ProjectPath) {
     $projectDir = (Resolve-Path $ProjectPath).Path
 }
-elseif ((Test-Path (Join-Path $root "..\Assets")) -and (Test-Path (Join-Path $root "..\ProjectSettings"))) {
-    $projectDir = (Resolve-Path (Join-Path $root "..")).Path
+elseif ((Test-Path (Join-UappPath $root "..\Assets")) -and (Test-Path (Join-UappPath $root "..\ProjectSettings"))) {
+    $projectDir = (Resolve-Path (Join-UappPath $root "..")).Path
 }
 else {
-    $projectDir = Join-Path $root $Project
+    $projectDir = Join-UappPath $root $Project
     $isRepoSample = $true   # 開発リポジトリのサンプル（Builds を3プロジェクトで共有する）
 }
 # **末尾の `\` を落とす**。タブ補完は `unity-nis\` の形を作り、`Resolve-Path` はそれを保つ。
@@ -182,7 +224,7 @@ else {
 # `unity status` / `unity open` が引数エラーで即失敗する）。
 # **ドライブ直下（`C:\`）だけは落とせない** — `C:` はドライブ相対を指す別物になるため。
 # この 1 ケースは引用側（Format-CliArg）で吸収するので、パスの引用は必ずそこを通すこと
-if ($projectDir -notmatch '^[A-Za-z]:\\$') { $projectDir = $projectDir.TrimEnd('\') }
+$projectDir = Get-UappNormalizedDir $projectDir
 $projectName = Split-Path $projectDir -Leaf
 
 # ジャーニー記録（docs/07-viewer.md）の出力先を固定する:
@@ -191,12 +233,12 @@ $projectName = Split-Path $projectDir -Leaf
 # PytestArgs で --journey を明示した場合はそちらが優先される（pytest オプション > 環境変数）
 if (-not $NoJourney) {
     if (-not $JourneyDir) {
-        $JourneyDir = if ($isRepoSample) { Join-Path $root "Builds\journey\$Project" }
-                      else { Join-Path $root "Builds\journey" }
+        $JourneyDir = if ($isRepoSample) { Join-UappPath $root "Builds\journey\$Project" }
+                      else { Join-UappPath $root "Builds\journey" }
     }
     # pytest は driver\ から実行するため、相対指定でも壊れないよう絶対パス化しておく
     if (-not [System.IO.Path]::IsPathRooted($JourneyDir)) {
-        $JourneyDir = Join-Path (Get-Location).Path $JourneyDir
+        $JourneyDir = Join-UappPath (Get-Location).Path $JourneyDir
     }
     $JourneyDir = [System.IO.Path]::GetFullPath($JourneyDir)
 } else {
@@ -206,7 +248,7 @@ if (-not $NoJourney) {
 # --- エージェント開発ダッシュボード連携（任意・別リポジトリ） ---
 # **導入されていない環境では何も変えない**: pytest の引数も増やさず、ファイルも作らない。
 # JUnit XML は件数の記録にしか使わないので、連携が有効なときだけ出力する
-$emitHelper = Join-Path $PSScriptRoot "emit-status.ps1"
+$emitHelper = Join-UappPath $PSScriptRoot "emit-status.ps1"
 $dashEnabled = $false
 # 連携の準備で失敗しても E2E 本体を巻き込まない（ErrorActionPreference="Stop" 下で throw させない）
 try {
@@ -228,7 +270,7 @@ function Enable-JunitOutput {
     if (-not $script:dashEnabled) { return @() }
     try {
         $safeTag = ($Tag -replace '[^A-Za-z0-9._-]', '_')
-        $script:junitPath = Join-Path $root "Builds\e2e-results-$projectName-$safeTag.xml"
+        $script:junitPath = Join-UappPath $root "Builds\e2e-results-$projectName-$safeTag.xml"
         New-Item -ItemType Directory -Force (Split-Path $script:junitPath -Parent) | Out-Null
         Remove-Item $script:junitPath -ErrorAction SilentlyContinue   # 前回結果を誤読しない
         return @("--junitxml=$script:junitPath")
@@ -260,17 +302,17 @@ function Send-E2eEvidence {
             # 件数が取れなくても exitCode だけで記録する
         }
     }
-    if ($JourneyDir -and (Test-Path (Join-Path $JourneyDir "report.html"))) {
-        $data.journeyReport = Join-Path $JourneyDir "report.html"
+    if ($JourneyDir -and (Test-Path (Join-UappPath $JourneyDir "report.html"))) {
+        $data.journeyReport = Join-UappPath $JourneyDir "report.html"
     }
     if ($FailureDir -and (Test-Path $FailureDir)) { $data.failureDir = $FailureDir }
     Send-DashEvent -Kind "evidence.e2e" -StartPath $root -Data $data
 }
 
 # 設定解決: キット内（導入配置: <project>\uapp_e2e\e2e-config.json）→ プロジェクト直下（本リポジトリのサンプル配置）
-$configPath = Join-Path $root "e2e-config.json"
+$configPath = Join-UappPath $root "e2e-config.json"
 if (-not (Test-Path $configPath)) {
-    $configPath = Join-Path $projectDir "e2e-config.json"
+    $configPath = Join-UappPath $projectDir "e2e-config.json"
 }
 if (-not (Test-Path $configPath)) { throw "e2e-config.json がありません（$root または $projectDir 直下）" }
 $config = Get-Content $configPath -Raw | ConvertFrom-Json
@@ -282,20 +324,27 @@ $devicePort = if ($config.devicePort) { [int]$config.devicePort } else { 13333 }
 
 # --- エディタ直結モード（-Editor。ここで完結して adb フローには進まない） ---
 if ($Editor) {
-    # Unity CLI の解決: PATH → 既定インストール先。無ければ手動手順を案内して失敗
-    $unityCli = (Get-Command unity -ErrorAction SilentlyContinue).Source
-    if (-not $unityCli) {
-        $candidate = Join-Path $env:LOCALAPPDATA "Unity\bin\unity.exe"
-        if (Test-Path $candidate) { $unityCli = $candidate }
-    }
+    # Unity CLI の解決: PATH → 既定インストール先（OS 差は uapp-platform.ps1）。
+    # 無ければ手動手順を案内して失敗
+    $unityCli = Get-UappUnityCli
     if (-not $unityCli) {
         throw ("-Editor には Unity CLI が必要です（https://docs.unity.com/en-us/unity-cli）。" +
                "CLI を使わない場合の手動手順: エディタで対象シーンを開いて Play →" +
                " `$env:UAPP_E2E_EDITOR='1' で pytest を実行")
     }
+    # **CLI のグローバル引数は 1 か所で決めて全呼び出しへ渡す**（一部の呼び出しにだけ付くと、
+    # 「status は通るのに pipeline install で落ちる」ような分かりにくい欠け方になる）。
+    # check-portability.ps1 が「$unityCli を @cliGlobalArgs 無しで呼んでいないか」を検査する
+    $cliProxyDisable = Resolve-UappUnityCliProxyDisable -Switch:$UnityCliProxyDisable
+    $cliGlobalArgs = Get-UappUnityCliGlobalArgs -ProxyDisable:$cliProxyDisable
+    # 子プロセスへの伝達は pytest 直前で行う（**確実に後始末できる位置でだけ環境変数を触る**。
+    # ここで立てると、pytest 到達前の例外で呼び出し元のシェルに残る）
+    if ($cliGlobalArgs.Count -gt 0) {
+        Write-Host "[$projectName] Unity CLI へ渡すグローバル引数: $($cliGlobalArgs -join ' ')"
+    }
 
     # com.unity.pipeline は Unity 6 以降のみ
-    $projVer = (Get-Content (Join-Path $projectDir "ProjectSettings\ProjectVersion.txt") -TotalCount 1) -replace "m_EditorVersion:\s*", ""
+    $projVer = (Get-Content (Join-UappPath $projectDir "ProjectSettings\ProjectVersion.txt") -TotalCount 1) -replace "m_EditorVersion:\s*", ""
     if ([int]($projVer -split "\.")[0] -lt 6000) {
         throw ("-Editor は Unity 6 以降のみ対応（com.unity.pipeline の要件。このプロジェクト: $projVer）。" +
                "手動手順: エディタで Play → `$env:UAPP_E2E_EDITOR='1' で pytest")
@@ -317,7 +366,7 @@ if ($Editor) {
         $errFile = [System.IO.Path]::GetTempFileName()
         try {
             $process = Start-Process -FilePath $unityCli -PassThru -NoNewWindow `
-                -ArgumentList @("status", "--project-path", (Format-CliArg $projectDir), "--format", "json", "--no-banner") `
+                -ArgumentList (@($cliGlobalArgs) + @("status", "--project-path", (Format-CliArg $projectDir), "--format", "json", "--no-banner")) `
                 -RedirectStandardOutput $outFile -RedirectStandardError $errFile
             $sw = [System.Diagnostics.Stopwatch]::StartNew()
             $announced = $false
@@ -395,7 +444,7 @@ if ($Editor) {
         $wait = [System.Diagnostics.Stopwatch]::StartNew()
         $notified = $false
         while ($true) {
-            $raw = & $unityCli @CliArgs --format json --no-banner 2>&1 | Out-String
+            $raw = & $unityCli @cliGlobalArgs @CliArgs --format json --no-banner 2>&1 | Out-String
             $parsed = $null
             try { $parsed = $raw | ConvertFrom-Json } catch {}
             if ($parsed -and $parsed.success) {
@@ -430,7 +479,10 @@ if ($Editor) {
 
     # 同一プロジェクトへの -Editor 同時実行を防ぐプロセス間ロック（TOCTOU対策:
     # 2プロセスが同時に playMode=stopped を見て両方進むと、片方の editor_stop が他方の Play を落とす）
-    $mutexName = "uapp_e2e-editor-" + (($projectDir.ToLowerInvariant() -replace "[^a-z0-9]", "-"))
+    # **名前はホスト全体スコープへ変換する**。素の名前だと Unix では
+    # `/tmp/.dotnet/shm/session<ID>/` に隔離され、**別ターミナルからの同時実行を素通しする**
+    # （＝このガードが黙って無効になる。mac で実測）。変換は Get-UappHostMutexName に集約。
+    $mutexName = Get-UappHostMutexName ("uapp_e2e-editor-" + (($projectDir.ToLowerInvariant() -replace "[^a-z0-9]", "-")))
     $editorMutex = New-Object System.Threading.Mutex($false, $mutexName)
     $mutexAcquired = $false
     try { $mutexAcquired = $editorMutex.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $mutexAcquired = $true }
@@ -482,7 +534,7 @@ if ($Editor) {
         # 注意: 未導入の場合 Packages\manifest.json に com.unity.pipeline が追加される（VCS差分になる）
         $null = Invoke-UnityCli @("pipeline", "install", "--project-path", $projectDir)
         # **パスは引用する**（-ArgumentList の配列は空白結合されるため、空白入りのパスが割れる）
-        Start-Process -FilePath $unityCli -ArgumentList @("open", (Format-CliArg $projectDir)) | Out-Null
+        Start-Process -FilePath $unityCli -ArgumentList (@($cliGlobalArgs) + @("open", (Format-CliArg $projectDir))) | Out-Null
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
         while ($true) {
             Start-Sleep -Seconds 5
@@ -566,9 +618,9 @@ if ($Editor) {
     # 置き場所は TEMP でなく Builds\ 配下（gitignore 済み）: サンドボックス環境では TEMP が
     # 8.3 短縮パス（C:\Users\XXXXXX~1.YYY\...）で渡り、その形のパスは Move-Item / Remove-Item が
     # -ErrorAction SilentlyContinue でも抑止されない失敗になる（導入先で実測）
-    $evalTmpDir = Join-Path $root "Builds\tmp"
+    $evalTmpDir = Join-UappPath $root "Builds\tmp"
     New-Item -ItemType Directory -Force $evalTmpDir | Out-Null
-    $evalTmp = Join-Path $evalTmpDir ("uapp_e2e-eval-" + [System.IO.Path]::GetRandomFileName() + ".cs")
+    $evalTmp = Join-UappPath $evalTmpDir ("uapp_e2e-eval-" + [System.IO.Path]::GetRandomFileName() + ".cs")
     try {
         [System.IO.File]::WriteAllText($evalTmp,
             "UnityEditor.PlayModeWindow.SetCustomRenderingResolution($($wh[0]), $($wh[1]), `"uapp_e2e E2E`");`nreturn `"ok`";`n")
@@ -581,45 +633,76 @@ if ($Editor) {
     $null = Invoke-UnityCli @("cmd", "editor_play")
     if ($JourneyDir) { Write-Host "[$projectName] ジャーニー記録: $JourneyDir（Game view を Unity CLI で撮影）" }
 
-    $env:UAPP_E2E_EDITOR = "1"
-    # ジャーニーのスクリーンショットは adb ではなく Unity CLI の screenshot で撮る
-    # （エディタ直結で adb を使うと実機を検証してしまうため、経路自体を分けている）。
-    # 複数エディタが起動していても宛先を誤らないよう、対象プロジェクトも渡す
-    $env:UAPP_E2E_UNITY_CLI = $unityCli
-    $env:UAPP_E2E_PROJECT_PATH = $projectDir
-    if ($JourneyDir) { $env:UAPP_E2E_JOURNEY_DIR = $JourneyDir }
-    Push-Location (Join-Path $root "driver")
+    # **子プロセス（pytest → Python ドライバ）も同じ Unity CLI を叩く**（ジャーニー/失敗時の
+    # スクリーンショットは `unity eval` で撮る）。ここで伝えないと**画像だけが静かに欠落する**。
+    # 元の値は下の finally で必ず戻す（戻さないと、同じシェルで次にスイッチ無しで実行した
+    # スクリプトにも --proxy-disable が付き、プロキシ経由が要る認証・ダウンロードが壊れる）
+    $savedCliProxyEnv = $env:UAPP_E2E_UNITY_CLI_PROXY_DISABLE
+    # **接続先ポートを明示的に渡す**。ドライバの `resolve_port` は pytest の CWD（driver\）から
+    # 上位へ e2e-config.json を探すが、**この開発リポジトリは設定をプロジェクト直下
+    # （unity-nis\e2e-config.json 等）に置く配置**なので driver\ からは見つからず、
+    # 既定 13333 に落ちる。導入先レイアウト（uapp_e2e\e2e-config.json）では見つかるため
+    # 差が出にくいが、**開発リポジトリでは editorBridgePort を変えても効かない**という
+    # 分かりにくい形で現れる（issue #25 の A を入れたときに実測して発覚）
+    # **呼び出し元が既に設定していれば尊重する**。ドライバの解決順は
+    # 明示引数 > 環境変数 > e2e-config.json なので、ここで無条件に上書きすると
+    # 「環境変数で別ポートを指したのに設定ファイルの値で接続しにいく」という
+    # 契約違反になる（docs/02 のポート設計）。元の値は finally で必ず戻す
+    $savedBridgePort = $env:UAPP_E2E_BRIDGE_PORT
+    # **例外を投げうる処理は環境変数を触る前に済ませる**。設定と try の間で throw すると
+    # 呼び出し元のシェルに残る（不正な editorBridgePort での [int] 変換、Push-Location の失敗。
+    # 4 周目のレビュー指摘）
+    $editorPortToPass = $null
+    if (-not $savedBridgePort -and $config.editorBridgePort) {
+        $editorPortToPass = [int]$config.editorBridgePort
+    }
+    Push-Location (Join-UappPath $root "driver")
     try {
+        # **環境変数は try の中でだけ触る**（下の finally が必ず戻す）
+        $env:UAPP_E2E_EDITOR = "1"
+        if ($cliProxyDisable) { $env:UAPP_E2E_UNITY_CLI_PROXY_DISABLE = "1" }
+        if ($editorPortToPass) { $env:UAPP_E2E_BRIDGE_PORT = $editorPortToPass }
+        # ジャーニーのスクリーンショットは adb ではなく Unity CLI の screenshot で撮る
+        # （エディタ直結で adb を使うと実機を検証してしまうため、経路自体を分けている）。
+        # 複数エディタが起動していても宛先を誤らないよう、対象プロジェクトも渡す
+        $env:UAPP_E2E_UNITY_CLI = $unityCli
+        $env:UAPP_E2E_PROJECT_PATH = $projectDir
+        if ($JourneyDir) { $env:UAPP_E2E_JOURNEY_DIR = $JourneyDir }
         # @(...) で必ず配列にする: 1要素の戻り値はスカラー文字列に化け、@splat が1文字ずつ展開される
         $junitArgs = @(Enable-JunitOutput -Tag "editor")
         if ($PytestArgs) {
-            python -m pytest $config.tests @($PytestArgs -split " ") @junitArgs -v
+            & $script:pythonExe -m pytest $config.tests @($PytestArgs -split " ") @junitArgs -v
         } else {
-            python -m pytest $config.tests @junitArgs -v
+            & $script:pythonExe -m pytest $config.tests @junitArgs -v
         }
         $exit = $LASTEXITCODE
         # 失敗証跡: エディタ直結でも「AI が読める画像」を残す（Play を止める前に撮る）。
         # これが無いと -Editor の失敗時に「Console と Editor.log を見ろ」しか言えず、
         # AI から見える証跡がゼロになる
         if ($exit -ne 0) {
-            $editorFailureDir = Join-Path $root "Builds\failure"
+            $editorFailureDir = Join-UappPath $root "Builds\failure"
             New-Item -ItemType Directory -Force $editorFailureDir | Out-Null
-            $shot = Join-Path $editorFailureDir "screen.png"
-            python -c "from e2e_driver import editor_screenshot as es; import sys; sys.exit(0 if es.capture(sys.argv[1]) else 1)" $shot
+            $shot = Join-UappPath $editorFailureDir "screen.png"
+            & $script:pythonExe -c "from e2e_driver import editor_screenshot as es; import sys; sys.exit(0 if es.capture(sys.argv[1]) else 1)" $shot
             if ($LASTEXITCODE -eq 0) { Write-Host "失敗時のスクリーンショット: $shot" }
         }
-        if ($JourneyDir -and (Test-Path (Join-Path $JourneyDir "journey.json"))) {
-            python -m e2e_driver.journey $JourneyDir
-            if ($LASTEXITCODE -eq 0) { Write-Host "ジャーニーレポート: $(Join-Path $JourneyDir 'report.html')" }
+        if ($JourneyDir -and (Test-Path (Join-UappPath $JourneyDir "journey.json"))) {
+            & $script:pythonExe -m e2e_driver.journey $JourneyDir
+            if ($LASTEXITCODE -eq 0) { Write-Host "ジャーニーレポート: $(Join-UappPath $JourneyDir 'report.html')" }
         }
     } finally {
         Pop-Location
         Remove-Item Env:\UAPP_E2E_EDITOR -ErrorAction SilentlyContinue
+        if ($savedCliProxyEnv) { $env:UAPP_E2E_UNITY_CLI_PROXY_DISABLE = $savedCliProxyEnv }
+        else { Remove-Item Env:\UAPP_E2E_UNITY_CLI_PROXY_DISABLE -ErrorAction SilentlyContinue }
         Remove-Item Env:\UAPP_E2E_JOURNEY_DIR -ErrorAction SilentlyContinue
         # 設定した分は全部消す（消し漏れると、次に手で pytest を回したときに
         # 古いプロジェクトのエディタへスクリーンショットを撮りに行く）
         Remove-Item Env:\UAPP_E2E_UNITY_CLI -ErrorAction SilentlyContinue
         Remove-Item Env:\UAPP_E2E_PROJECT_PATH -ErrorAction SilentlyContinue
+        # **消すのではなく元の値へ戻す**（呼び出し元が設定していた値を奪わない）
+        if ($savedBridgePort) { $env:UAPP_E2E_BRIDGE_PORT = $savedBridgePort }
+        else { Remove-Item Env:\UAPP_E2E_BRIDGE_PORT -ErrorAction SilentlyContinue }
         # Play は必ず終了させる（次のタスクのために排他資源を解放）
         $null = Invoke-UnityCli @("cmd", "editor_stop") -AllowFail
     }
@@ -632,16 +715,31 @@ if ($Editor) {
 
     Send-E2eEvidence -ExitCode $exit -Mode "editor"
     if ($exit -ne 0) {
-        $shot = Join-Path $root "Builds\failure\screen.png"
+        $shot = Join-UappPath $root "Builds\failure\screen.png"
+        $editorLog = Get-UappEditorLogPath   # 置き場は OS で違う（分岐は uapp-platform.ps1 側）
         Write-Host ("失敗解析: " + $(if (Test-Path $shot) { "$shot（画像として読む） → " } else { "" }) +
-                    "エディタの Console と Editor.log（%LOCALAPPDATA%\Unity\Editor\Editor.log）を確認")
+                    "エディタの Console と Editor.log（$editorLog）を確認")
         exit $exit
     }
     Write-Host "[$projectName] E2E テスト成功（エディタ直結）。"
     exit 0
 }
 
-if (-not $Apk) { $Apk = Join-Path $root "Builds\$projectName.apk" }
+if (-not $Apk) { $Apk = Join-UappPath $root "Builds\$projectName.apk" }
+
+# adb が PATH に無ければ SDK の platform-tools を PATH へ足す（子プロセスの pytest にも効く）。
+# **mac は SDK を入れても platform-tools が PATH に入らないことが多い**
+$adbPathAdded = Initialize-UappAndroidPath
+if ($adbPathAdded) { Write-Host "adb を PATH に追加しました: $adbPathAdded" }
+# **解決した実体を保持して、以降は `& $script:adbExe` で呼ぶ**。
+# PATH に足すだけでは足りない（`adb` という関数やエイリアスが定義されていると、
+# 存在判定は実行ファイルを見つけるのに、実際の呼び出しはそちらへ入って失敗する）。
+# PATH への追加は**子プロセスの Python ドライバ用**として引き続き必要
+$script:adbExe = Get-UappCommandPath "adb"
+if (-not $script:adbExe) {
+    throw ("adb が見つかりません。Android SDK Platform-Tools を導入して PATH に追加するか、" +
+           "ANDROID_HOME / ANDROID_SDK_ROOT を設定してください")
+}
 
 # 対象デバイス指定（複数AVD同時運用対応）。未指定なら adb 既定（1台接続時のみ有効）
 $adbTarget = @()
@@ -649,7 +747,7 @@ if ($DeviceSerial) { $adbTarget = @("-s", $DeviceSerial) }
 
 # adbデーモン再起動直後は device offline で各コマンドが黙って失敗するため、
 # 接続を待った上で全stepのexit codeを検証する
-adb @adbTarget wait-for-device
+& $script:adbExe @adbTarget wait-for-device
 if ($LASTEXITCODE -ne 0) { throw "デバイスが接続されていません (adb devices で確認)" }
 
 if (-not $SkipInstall) {
@@ -667,7 +765,7 @@ if (-not $SkipInstall) {
     }
 
     # install の出力は捨てない。失敗理由（ストレージ不足・署名不一致等）が全部ここに出る
-    $installOutput = (adb @adbTarget install -r -g $Apk 2>&1 | Out-String).Trim()
+    $installOutput = (& $script:adbExe @adbTarget install -r -g $Apk 2>&1 | Out-String).Trim()
     if ($LASTEXITCODE -ne 0) {
         throw (Format-InstallFailure -Output $installOutput -ExitCode $LASTEXITCODE -Apk $Apk `
                                      -Package $package -FreeBytes $freeBytes)
@@ -676,8 +774,8 @@ if (-not $SkipInstall) {
 
 # 縦横両対応アプリの初期向き指定（e2e-config.json の deviceRotation: 0=縦 1=横(左) 2=逆縦 3=横(右)）
 if ($null -ne $config.deviceRotation) {
-    adb @adbTarget shell settings put system accelerometer_rotation 0
-    adb @adbTarget shell settings put system user_rotation $config.deviceRotation
+    & $script:adbExe @adbTarget shell settings put system accelerometer_rotation 0
+    & $script:adbExe @adbTarget shell settings put system user_rotation $config.deviceRotation
     Write-Host "[$projectName] デバイス回転を固定: $($config.deviceRotation)"
 }
 
@@ -685,20 +783,31 @@ if ($null -ne $config.deviceRotation) {
 # 複数ターゲット同時運用時はターゲットごとに別ポートを指定すること
 if ($HostPort -eq 0) {
     $HostPort = 13333
-    $localConfigPath = Join-Path $root "config\local.json"
+    $localConfigPath = Join-UappPath $root "config\local.json"
     if (Test-Path $localConfigPath) {
         $local = Get-Content $localConfigPath -Raw | ConvertFrom-Json
         if ($local.bridgePort) { $HostPort = $local.bridgePort }
     }
 }
-adb @adbTarget forward "tcp:$HostPort" "tcp:$devicePort" | Out-Null
+# **ホスト側ポートが editorBridgePort と同じなら、この forward はエディタ直結の接続先を奪う**。
+# ここは `$HostPort` が確定した後なので誤検知が無い（installer 側は local.json が
+# 未作成のことがあり仮判定にしかならない）。**並行実行に限らない** — forward は実行後も
+# 残るので、このあとエディタ直結を回すだけで踏む。ドライバ側の WrongBridgeTargetError が
+# 最終的には止めるが、**踏む前にここで気づける**ようにしておく（issue #25）
+$editorBridgePort = if ($config.editorBridgePort) { [int]$config.editorBridgePort } else { 0 }
+if ($editorBridgePort -eq $HostPort) {
+    Write-Warning ("ホスト側の forward ポートと e2e-config.json の editorBridgePort が同じ値です（$HostPort）。" +
+                   "この forward は実行後も残り、次にエディタ直結（-Editor / UAPP_E2E_EDITOR=1）を回すと" +
+                   "接続先を奪います。editorBridgePort をずらすか、-HostPort で別の番号を使ってください")
+}
+& $script:adbExe @adbTarget forward "tcp:$HostPort" "tcp:$devicePort" | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "adb forward 失敗 (exit=$LASTEXITCODE)。ポート $HostPort が他ターゲットと重複していないか確認" }
-adb @adbTarget logcat -c
+& $script:adbExe @adbTarget logcat -c
 # -S: 起動前に対象プロセスを確実にkill（前回実行の状態残留を防ぐ） / -W: 起動完了まで待つ
 # -a MAIN -c LAUNCHER: ランチャー起動と同じ Intent にする（action 無しだと起動直後に
 #   自ら閉じるカスタムActivityがある。実プロジェクト導入試験で実証）
 # --ei uapp_e2e_port: ブリッジの待ち受けポートをアプリに伝える（BridgeHost が Intent extra から読む）
-adb @adbTarget shell am start -S -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER --ei uapp_e2e_port $devicePort -n "$package/$activity" | Out-Null
+& $script:adbExe @adbTarget shell am start -S -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER --ei uapp_e2e_port $devicePort -n "$package/$activity" | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "アプリ起動失敗 (exit=$LASTEXITCODE)" }
 Write-Host "[$projectName] アプリ起動（$(if ($DeviceSerial) { $DeviceSerial } else { '既定デバイス' }) / port $HostPort）。テストを実行します..."
 if ($JourneyDir) { Write-Host "[$projectName] ジャーニー記録: $JourneyDir" }
@@ -712,23 +821,23 @@ $env:UAPP_E2E_PACKAGE = $package
 $env:UAPP_E2E_DEVICE_PORT = $devicePort
 if ($DeviceSerial) { $env:UAPP_E2E_DEVICE_SERIAL = $DeviceSerial }
 if ($JourneyDir) { $env:UAPP_E2E_JOURNEY_DIR = $JourneyDir }
-Push-Location (Join-Path $root "driver")
+Push-Location (Join-UappPath $root "driver")
 try {
     # ターゲット（デバイス・ホスト側ポート）ごとに XML を分ける＝並行実行が互いを壊さない。
     # @(...) は必須（1要素の戻り値がスカラー化すると @splat が1文字ずつ展開される）
     $junitArgs = @(Enable-JunitOutput -Tag ("device-" + $(if ($DeviceSerial) { "$DeviceSerial-" } else { "" }) + $HostPort))
     if ($PytestArgs) {
-        python -m pytest $config.tests @($PytestArgs -split " ") @junitArgs -v
+        & $script:pythonExe -m pytest $config.tests @($PytestArgs -split " ") @junitArgs -v
     } else {
-        python -m pytest $config.tests @junitArgs -v
+        & $script:pythonExe -m pytest $config.tests @junitArgs -v
     }
     $exit = $LASTEXITCODE
     # ジャーニーが記録されていれば自己完結レポートを更新する（失敗時も解析に使うため生成する）。
     # journey フィクスチャを使うテストが無かった実行では journey.json が無いのでスキップ
-    if ($JourneyDir -and (Test-Path (Join-Path $JourneyDir "journey.json"))) {
-        python -m e2e_driver.journey $JourneyDir
+    if ($JourneyDir -and (Test-Path (Join-UappPath $JourneyDir "journey.json"))) {
+        & $script:pythonExe -m e2e_driver.journey $JourneyDir
         if ($LASTEXITCODE -eq 0) {
-            Write-Host "ジャーニーレポート: $(Join-Path $JourneyDir 'report.html')"
+            Write-Host "ジャーニーレポート: $(Join-UappPath $JourneyDir 'report.html')"
         } else {
             Write-Warning "ジャーニーレポート生成に失敗（テスト結果には影響しない）: $JourneyDir"
         }
@@ -744,11 +853,14 @@ try {
 
 if ($exit -ne 0) {
     # 失敗時はAIが読める証跡を残す
-    $evidence = Join-Path $root "Builds\failure"
+    $evidence = Join-UappPath $root "Builds\failure"
     New-Item -ItemType Directory -Force $evidence | Out-Null
-    adb @adbTarget exec-out screencap -p > (Join-Path $evidence "screen.png")
-    adb @adbTarget logcat -d -s "Unity:*" > (Join-Path $evidence "unity-logcat.txt")
-    adb @adbTarget logcat -d -b crash > (Join-Path $evidence "crash.txt")
+    # **PNG は `>` で保存しない**（版によってはテキスト変換されて壊れる）。
+    # 標準出力をバイト列のままファイルへ落とす
+    Save-UappNativeOutput -Exe $script:adbExe -Arguments (@($adbTarget) + @("exec-out", "screencap", "-p")) `
+                          -OutFile (Join-UappPath $evidence "screen.png") | Out-Null
+    & $script:adbExe @adbTarget logcat -d -s "Unity:*" > (Join-UappPath $evidence "unity-logcat.txt")
+    & $script:adbExe @adbTarget logcat -d -b crash > (Join-UappPath $evidence "crash.txt")
     Write-Host "失敗時の証跡を保存: $evidence （screen.png / unity-logcat.txt / crash.txt）"
     Send-E2eEvidence -ExitCode $exit -Mode "device" -FailureDir $evidence
     exit $exit

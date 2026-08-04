@@ -102,6 +102,7 @@ def resolve_port(explicit: int | None = None, start: Path | None = None) -> int:
     return DEFAULT_PORT
 
 
+
 class BridgeError(Exception):
     """ブリッジが返したプロトコルエラー。code で機械的に分岐できる。"""
 
@@ -109,6 +110,20 @@ class BridgeError(Exception):
         super().__init__(f"[{code}] {message}")
         self.code = code
         self.message = message
+
+
+class WrongBridgeTargetError(Exception):
+    """エディタ直結モードなのに、エディタ以外のブリッジへ繋がっている。
+
+    **偽の緑を防ぐためのガード**（`adb.py` の adb 使用ガードと同じ趣旨）。
+    典型は「デバイス実行が残した `adb forward` が `editorBridgePort` と同じ番号を握っており、
+    エディタへ繋いだつもりがエミュレーター/実機のアプリへ転送されている」ケース。
+    **別プロジェクトのアプリなら派手に落ちて気づけるが、同じアプリが端末にも入っていると
+    そのまま成功してしまう**（2026-08-03 に実際に踏んだ）。
+
+    **リトライしても直らない**ので `BridgeError` / `OSError` は継承しない
+    （`connect()` の再試行ループに拾わせない）。
+    """
 
 
 class BlockedError(Exception):
@@ -140,6 +155,49 @@ class BlockedError(Exception):
         return self.blocked_by in self.HOPELESS
 
 
+def _check_editor_target(info: dict[str, Any], host: str, port: int) -> None:
+    """`UAPP_E2E_EDITOR=1` なのにエディタ以外へ繋がっていたら明示的に失敗させる。
+
+    ping の `platform` は `Application.platform`（エディタなら `OSXEditor` /
+    `WindowsEditor` / `LinuxEditor`、実機なら `Android` 等）。**このフィールドは
+    E2EBridge の初版から返っている**ので、欠けていたら「相手が E2EBridge ではない」
+    か「壊れている」— どちらにせよ黙って先へ進めない（fail-closed）。
+
+    原因を列挙して当てにいくのではなく、**接続先そのものを確かめる**形にしてある
+    （`adb forward` の残骸以外にも、同じポートを別プロセスが握る経路はありうるため）。
+    """
+    # **判定条件は `UAPP_E2E_EDITOR=1` だけ**（`adb.py` の adb 使用ガードと同じ約束）。
+    #
+    # 「ポートの解決元からエディタ意図を推定する」形を試して**捨てた**（レビュー 2〜5 周目）。
+    # 解決元では手動デバイス接続と手動エディタ接続を分離できないため:
+    #   - 解決元が env 以外＝エディタ、とすると **`BridgeClient(port=<ホスト側ポート>)` の
+    #     手動デバイス接続**（同梱フィクスチャ・`journey serve --bridge-port`・文書の手順）が全滅する
+    #   - 逆に env を素通しにすると、`UAPP_E2E_BRIDGE_PORT` は**汎用のポート指定**なので、
+    #     それを使った手動エディタ接続で偽の緑が再発する
+    # **同じ情報源からは両立できない**。呼び手の意図は呼び手にしか分からないので、
+    # 明示的な宣言（この環境変数）だけを根拠にする。
+    #
+    # 宣言し忘れた手動接続は検査されないが、**それは「誤検知ゼロ」と引き換えの明示的な線引き**。
+    # 手順側で `UAPP_E2E_EDITOR=1` を付けることで担保する（docs / スキルに明記）。
+    if os.environ.get("UAPP_E2E_EDITOR") != "1":
+        return
+    platform = str(info.get("platform", ""))
+    if platform.endswith("Editor"):
+        return
+    detail = f"platform={platform!r}" if platform else "ping の応答に platform がありません"
+    raise WrongBridgeTargetError(
+        f"エディタ直結の接続（{host}:{port}）なのに、"
+        f"接続先がエディタではありません（{detail}）。"
+        "エディタのつもりで端末のアプリを検証してしまう（＝偽の緑になりうる）ため中断しました。\n"
+        "  典型原因: デバイス実行が残した adb forward が editorBridgePort と同じ番号を握っている。\n"
+        "  確認: adb forward --list / このポートの待受が adb かどうか"
+        "（mac・Linux: lsof -nP -iTCP:<port> -sTCP:LISTEN、Windows: Get-NetTCPConnection -LocalPort <port>）\n"
+        "  対処: adb forward --remove-all、恒久策は e2e-config.json の editorBridgePort を"
+        "**ホスト側の forward ポート**（config/local.json の bridgePort / run-e2e.ps1 -HostPort）と"
+        "別番号にする（devicePort と分けるだけでは足りない）"
+    )
+
+
 class BridgeClient:
     def __init__(self, host: str = "127.0.0.1", port: int | None = None, timeout: float = 30.0):
         self.host = host
@@ -158,7 +216,8 @@ class BridgeClient:
             try:
                 self._sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
                 self._file = self._sock.makefile("r", encoding="utf-8", newline="\n")
-                self.ping()  # 疎通確認
+                info = self.ping()  # 疎通確認（結果は接続先の検証にも使う。往復は増やさない）
+                _check_editor_target(info, self.host, self.port)
                 return self
             except (OSError, BridgeError) as e:
                 last_error = e

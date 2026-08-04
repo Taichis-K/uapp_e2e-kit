@@ -14,17 +14,19 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "uapp-platform.ps1")   # OS 差分の吸収（Windows / macOS。mac は暫定・未検証）
+
 # --- 対象の解決: 引数 > 自身の配置場所（<プロジェクト>\uapp_e2e\scripts\ に配布される前提） ---
 if ($ProjectPath) {
     $target = (Resolve-Path $ProjectPath).Path
 } else {
-    $target = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+    $target = (Resolve-Path (Join-UappPath $PSScriptRoot "..\..")).Path
 }
-if (-not ((Test-Path (Join-Path $target "Assets")) -and (Test-Path (Join-Path $target "ProjectSettings")))) {
+if (-not ((Test-Path (Join-UappPath $target "Assets")) -and (Test-Path (Join-UappPath $target "ProjectSettings")))) {
     throw "Unity プロジェクトではありません（Assets/ProjectSettings が見つからない）: $target"
 }
-$kit = Join-Path $target "uapp_e2e"
-if (-not ((Test-Path $kit) -or (Test-Path (Join-Path $target "Assets\uapp_e2e")))) {
+$kit = Join-UappPath $target "uapp_e2e"
+if (-not ((Test-Path $kit) -or (Test-Path (Join-UappPath $target "Assets\uapp_e2e")))) {
     throw "キットが導入されていません（uapp_e2e\ も Assets\uapp_e2e\ も無い）: $target"
 }
 
@@ -43,28 +45,28 @@ function Remove-IfEmpty($path) {
 }
 
 # --- 1. 計装SDK（キット所有は E2EBridge のみ。Assets\uapp_e2e\ 直下のユーザー独自アセットは消さない） ---
-Remove-Reported (Join-Path $target "Assets\uapp_e2e\E2EBridge") "Assets\uapp_e2e\E2EBridge\（計装SDK）"
-Remove-Reported (Join-Path $target "Assets\uapp_e2e\E2EBridge.meta") "Assets\uapp_e2e\E2EBridge.meta"
-Remove-IfEmpty (Join-Path $target "Assets\uapp_e2e")
-if (-not (Test-Path (Join-Path $target "Assets\uapp_e2e"))) {
-    Remove-Reported (Join-Path $target "Assets\uapp_e2e.meta") "Assets\uapp_e2e.meta"
+Remove-Reported (Join-UappPath $target "Assets\uapp_e2e\E2EBridge") "Assets\uapp_e2e\E2EBridge\（計装SDK）"
+Remove-Reported (Join-UappPath $target "Assets\uapp_e2e\E2EBridge.meta") "Assets\uapp_e2e\E2EBridge.meta"
+Remove-IfEmpty (Join-UappPath $target "Assets\uapp_e2e")
+if (-not (Test-Path (Join-UappPath $target "Assets\uapp_e2e"))) {
+    Remove-Reported (Join-UappPath $target "Assets\uapp_e2e.meta") "Assets\uapp_e2e.meta"
 }
 
 # --- 2. AIスキル・ルール（キットの e2e-* のみ。他のスキル・ルールには触らない） ---
 foreach ($skillsRoot in @(".claude\skills", ".agents\skills")) {
     foreach ($name in @("e2e-setup", "e2e-run", "e2e-write-test", "e2e-dump")) {
-        Remove-Reported (Join-Path $target "$skillsRoot\$name") "$skillsRoot\$name\"
+        Remove-Reported (Join-UappPath $target "$skillsRoot\$name") "$skillsRoot\$name\"
     }
-    Remove-IfEmpty (Join-Path $target $skillsRoot)
+    Remove-IfEmpty (Join-UappPath $target $skillsRoot)
 }
-Remove-Reported (Join-Path $target ".claude\rules\uapp-e2e.md") ".claude\rules\uapp-e2e.md"
-foreach ($d in @(".claude\rules", ".claude", ".agents")) { Remove-IfEmpty (Join-Path $target $d) }
+Remove-Reported (Join-UappPath $target ".claude\rules\uapp-e2e.md") ".claude\rules\uapp-e2e.md"
+foreach ($d in @(".claude\rules", ".claude", ".agents")) { Remove-IfEmpty (Join-UappPath $target $d) }
 
 # --- 3. uapp_e2e\ ---
 if ($Purge) {
     # ルート AGENTS.md を installer が作成した記録（kit-manifest.json のメタ記録）を、削除前に読んでおく
     $rootAgentsByInstaller = $false
-    $manifestPath = Join-Path $kit "kit-manifest.json"
+    $manifestPath = Join-UappPath $kit "kit-manifest.json"
     if (Test-Path $manifestPath) {
         try { $rootAgentsByInstaller = [bool]((Get-Content $manifestPath -Raw | ConvertFrom-Json)."__rootAgentsMdByInstaller") } catch {}
     }
@@ -78,12 +80,12 @@ if ($Purge) {
                        "driver\tests\test_journey_unit.py", "driver\tests\test_adb_ui.py",
                        "driver\tests\test_client_unit.py", "driver\tests\test_bridge_smoke.py",
                        "config\local.sample.json", "config\e2e-config.sample.json")) {
-        Remove-Reported (Join-Path $kit $rel) "uapp_e2e\$rel"
+        Remove-Reported (Join-UappPath $kit $rel) "uapp_e2e\$rel"
     }
     foreach ($rel in @("driver\tests\__pycache__", "driver\.pytest_cache")) {
-        if (Test-Path (Join-Path $kit $rel)) { Remove-Item (Join-Path $kit $rel) -Recurse -Force }
+        if (Test-Path (Join-UappPath $kit $rel)) { Remove-Item (Join-UappPath $kit $rel) -Recurse -Force }
     }
-    foreach ($d in @("driver\tests", "driver", "config")) { Remove-IfEmpty (Join-Path $kit $d) }
+    foreach ($d in @("driver\tests", "driver", "config")) { Remove-IfEmpty (Join-UappPath $kit $d) }
     Remove-IfEmpty $kit
     if (Test-Path $kit) {
         Write-Host "  [保持] uapp_e2e\（e2e-config.json・自作テスト・local.json・Builds\ 等のプロジェクト所有物。"
@@ -93,7 +95,7 @@ if ($Purge) {
 
 # --- 4. ルート AGENTS.md（-Purge 時のみ・「installer が作成した記録あり」かつ「生成時から未編集」の場合に限り削除） ---
 if ($Purge) {
-    $rootAgentsPath = Join-Path $target "AGENTS.md"
+    $rootAgentsPath = Join-UappPath $target "AGENTS.md"
     if ((Test-Path $rootAgentsPath) -and -not $rootAgentsByInstaller) {
         Write-Host "  [保持] AGENTS.md（installer が作成した記録が無いため触らない。不要なら手動で削除）"
     } elseif (Test-Path $rootAgentsPath) {
@@ -123,7 +125,7 @@ E2Eテストの作成・実行・デバッグ、計装SDK（``Assets/uapp_e2e/E2
 # --- 5. 自動では戻さない項目の案内 ---
 Write-Host ""
 Write-Host "=== 残りの手動手順（自動では変更しない） ==="
-$projSettings = Join-Path $target "ProjectSettings\ProjectSettings.asset"
+$projSettings = Join-UappPath $target "ProjectSettings\ProjectSettings.asset"
 $defineFound = (Test-Path $projSettings) -and
     (Select-String -Path $projSettings -Pattern '(^|[^A-Za-z0-9_])UAPP_E2E_BRIDGE($|[^A-Za-z0-9_])' -Quiet)
 if ($defineFound) {

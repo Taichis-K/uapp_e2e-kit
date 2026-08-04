@@ -27,10 +27,23 @@ param(
     # EditMode は既定で -nographics（グラフィックス初期化と USB スキャンを避ける。これが無いと
     # 2022.3 でライセンス初期化後にスキャンを繰り返したまま進まない事象を実測）。
     # 描画が要る PlayMode では既定 OFF。明示指定は -NoGraphics:$true / -NoGraphics:$false（bool のため値が必須）
-    [bool]$NoGraphics = ($Mode -eq "EditMode")
+    [bool]$NoGraphics = ($Mode -eq "EditMode"),
+    # Unity CLI の呼び出しに `--proxy-disable` を付ける（既定オフ）。プロキシ配下では CLI が
+    # localhost 宛ての Pipeline 通信までプロキシへ流し 503 になる。NO_PROXY / UNITY_NOPROXY /
+    # config の bypass はいずれも効かず、このフラグだけが効く
+    # （詳細は uapp-platform.ps1 の Get-UappUnityCliGlobalArgs）。
+    # 環境変数 UAPP_E2E_UNITY_CLI_PROXY_DISABLE=1 でも同じ
+    [switch]$UnityCliProxyDisable
 )
 
 $ErrorActionPreference = "Stop"
+
+. (Join-Path $PSScriptRoot "uapp-platform.ps1")   # OS 差分の吸収（Windows / macOS。mac は暫定・未検証）
+
+# **CLI のグローバル引数は 1 か所で決めて全呼び出しへ渡す**（一部の呼び出しにだけ付くと、
+# 「status は通るのに pipeline install で落ちる」ような分かりにくい欠け方になる）。
+# check-portability.ps1 が「$unityCli を @cliGlobalArgs 無しで呼んでいないか」を検査する
+$cliGlobalArgs = Get-UappUnityCliGlobalArgs -ProxyDisable:(Resolve-UappUnityCliProxyDisable -Switch:$UnityCliProxyDisable)
 
 function Test-UnityProjectLocked {
     <#
@@ -53,21 +66,49 @@ function Test-UnityProjectLocked {
 
     # 1. プロセスのコマンドラインで対象プロジェクトを掴んでいる GUI エディタを探す
     try {
-        $target = (Resolve-Path -LiteralPath $ProjectDir).Path.TrimEnd('\')
-        foreach ($p in Get-CimInstance Win32_Process -Filter "Name='Unity.exe'" -ErrorAction Stop) {
+        $target = Get-UappNormalizedDir (Resolve-Path -LiteralPath $ProjectDir).Path
+        foreach ($p in (Get-UappUnityProcess)) {   # プロセス列挙の OS 差は uapp-platform.ps1 が吸収する
             $cmd = $p.CommandLine
+            # **コマンドラインが取れていない Unity プロセスは「無関係」と断定できない**。
+            # 安全側（掴んでいる扱い）に倒す（Windows で CIM が権限等で失敗したときに効く）
+            if (-not $p.CommandLineAvailable) {
+                Write-Warning "Unity プロセスのコマンドラインが取得できないため、占有されている前提で扱います"
+                return $true
+            }
             if (-not $cmd) { continue }
-            if ($cmd -match '(^|\s)-batchmode(\s|$)') { continue }   # 自前で起動した batchmode は対象外
             if ($cmd -match '-projectPath\s+"?([^"]+?)"?(\s+-|\s*$)') {
                 $path = $Matches[1].Trim()
-                try { $path = (Resolve-Path -LiteralPath $path).Path.TrimEnd('\') } catch { }
+                try { $path = Get-UappNormalizedDir (Resolve-Path -LiteralPath $path).Path } catch { }
+                # **batchmode でも対象パスが一致すれば占有**（別ターミナルの batchmode は
+                # 実際にロックを握るので、除外すると防ぎたかった exit=6 にそのまま落ちる。
+                # この判定は自分が Unity を起動する前に行うので、自分自身は誤検出しない）
                 if ($path -ieq $target) { return $true }
+                continue
+            }
+            # **ウィンドウタイトルは実行可否に使わない（が、黙って素通りもしない）**。
+            # これは**トレードオフで、どちらに倒しても壊れる**（外部レビューで両方向を指摘された）:
+            #   止める  … 別の場所にある同名プロジェクトを開いているだけで**実行不能**（回避策が無い）
+            #   止めない… `-projectPath` 無し＋EditorInstance.json 生成前の起動途中を見落とし、exit=6
+            # 代償の小さい後者を選び、**警告だけ出して続行**する（踏んだときに理由が手元にある）。
+            # `unity-editor-status` は人に見せる側なので `evidence=windowTitle` として使う。
+            # この非対称は意図的（詳細は docs/04-ai-loop.md）
+            if ($p.MainWindowTitle -and $p.MainWindowTitle -match '^(.+?)\s+-\s' -and
+                $Matches[1] -ieq (Split-Path $target -Leaf)) {
+                Write-Warning ("同名のプロジェクトを開いている Unity があります（タイトル: $($p.MainWindowTitle)）。" +
+                               "**対象と同じものなら閉じてから再実行**してください" +
+                               "（-projectPath を持たない起動のため、同一かどうか確定できません）")
             }
         }
+    } catch [System.InvalidOperationException] {
+        # **列挙できない＝「掴んでいない」と断定できない**。安全側（掴んでいる扱い）に倒す
+        # （ここで false を返すと batchmode を起動して排他ロックで失敗する）
+        Write-Warning ("Unity プロセスを列挙できませんでした（$($_.Exception.Message)）。" +
+                       "占有されている前提で扱います")
+        return $true
     } catch { }
 
     # 2. Unity 自身が書く EditorInstance.json（pid の生存を必ず確かめる）
-    $instanceFile = Join-Path $ProjectDir "Library\EditorInstance.json"
+    $instanceFile = Join-UappPath $ProjectDir "Library\EditorInstance.json"
     if (Test-Path -LiteralPath $instanceFile) {
         try {
             $editorPid = [int]((Get-Content $instanceFile -Raw | ConvertFrom-Json).process_id)
@@ -77,7 +118,7 @@ function Test-UnityProjectLocked {
     }
 
     # 3. ロックファイルの排他オープン（掴まれていれば失敗する）
-    $lock = Join-Path $ProjectDir "Temp\UnityLockfile"
+    $lock = Join-UappPath $ProjectDir "Temp\UnityLockfile"
     if (-not (Test-Path -LiteralPath $lock)) { return $false }
     try {
         $stream = [System.IO.File]::Open($lock, "Open", "ReadWrite", "None")
@@ -87,17 +128,17 @@ function Test-UnityProjectLocked {
         return $true
     }
 }
-$root = (Resolve-Path "$PSScriptRoot\..").Path
+$root = (Resolve-Path (Join-UappPath $PSScriptRoot "..")).Path
 
 # 対象プロジェクト解決: -ProjectPath 優先 → キット親がUnityプロジェクトならそれ → $root\$Project
 if ($ProjectPath) {
     $projectDir = (Resolve-Path $ProjectPath).Path
 }
-elseif ((Test-Path (Join-Path $root "..\Assets")) -and (Test-Path (Join-Path $root "..\ProjectSettings"))) {
-    $projectDir = (Resolve-Path (Join-Path $root "..")).Path
+elseif ((Test-Path (Join-UappPath $root "..\Assets")) -and (Test-Path (Join-UappPath $root "..\ProjectSettings"))) {
+    $projectDir = (Resolve-Path (Join-UappPath $root "..")).Path
 }
 else {
-    $projectDir = Join-Path $root $Project
+    $projectDir = Join-UappPath $root $Project
 }
 if (-not (Test-Path $projectDir)) { throw "プロジェクトがありません: $projectDir" }
 # **末尾の `\` を落とす**。タブ補完は `unity-nis\` の形を作り、`Resolve-Path` はそれを保つ。
@@ -107,12 +148,12 @@ if (-not (Test-Path $projectDir)) { throw "プロジェクトがありません:
 # ここで 1 度だけ正規化して、以降の全ての受け渡し（Start-Process 経由を含む）を安全にする。
 # **ドライブ直下（`C:\`）だけは落とせない** — `C:` はドライブ相対を指す別物になるため。
 # この 1 ケースは引用側（Format-CliArg）で吸収するので、パスの引用は必ずそこを通すこと
-if ($projectDir -notmatch '^[A-Za-z]:\\$') { $projectDir = $projectDir.TrimEnd('\') }
+$projectDir = Get-UappNormalizedDir $projectDir
 $projectName = Split-Path $projectDir -Leaf
 
-$buildsDir = Join-Path $root "Builds"
+$buildsDir = Join-UappPath $root "Builds"
 New-Item -ItemType Directory -Force $buildsDir | Out-Null
-if (-not $Output) { $Output = Join-Path $buildsDir "test-results-$projectName-$Mode.xml" }
+if (-not $Output) { $Output = Join-UappPath $buildsDir "test-results-$projectName-$Mode.xml" }
 if (Test-Path $Output) { Remove-Item $Output -Force }   # 前回結果を誤読しない
 
 function Format-CliArg {
@@ -197,10 +238,11 @@ function Get-UnityCliStatus {
         [Parameter(Mandatory)][string]$Cli,
         [Parameter(Mandatory)][string]$ProjectDir,
         [int]$TimeoutSeconds = 60,
-        [string]$WaitMessage
+        [string]$WaitMessage,
+        [string[]]$GlobalArgs = @()
     )
     $probe = Invoke-WithTimeout -FilePath $Cli -TimeoutSeconds $TimeoutSeconds `
-        -Arguments @("status", "--project-path", (Format-CliArg $ProjectDir), "--format", "json", "--no-banner") `
+        -Arguments (@($GlobalArgs) + @("status", "--project-path", (Format-CliArg $ProjectDir), "--format", "json", "--no-banner")) `
         -WaitMessage $WaitMessage
     $json = $null
     if (-not $probe.TimedOut) {
@@ -223,11 +265,7 @@ $cliSkipReason = $null
 if ($NoUnityCli) {
     $cliSkipReason = "-NoUnityCli"
 } else {
-    $unityCli = (Get-Command unity -ErrorAction SilentlyContinue).Source
-    if (-not $unityCli) {
-        $candidate = Join-Path $env:LOCALAPPDATA "Unity\bin\unity.exe"
-        if (Test-Path $candidate) { $unityCli = $candidate }
-    }
+    $unityCli = Get-UappUnityCli   # PATH → 既定インストール先（OS 差は uapp-platform.ps1）
     if (-not $unityCli) { $cliSkipReason = "Unity CLI 未検出" }
 }
 if ($Editor -and -not $unityCli) {
@@ -241,7 +279,7 @@ if ($Editor -and -not $unityCli) {
 # 成立しないので明示エラーで止める（黙って待ち続けるより原因が伝わる）
 $cliStatus = $null
 if ($unityCli) {
-    $cliStatus = Get-UnityCliStatus -Cli $unityCli -ProjectDir $projectDir -TimeoutSeconds $UnityCliProbeSeconds `
+    $cliStatus = Get-UnityCliStatus -Cli $unityCli -ProjectDir $projectDir -TimeoutSeconds $UnityCliProbeSeconds -GlobalArgs $cliGlobalArgs `
         -WaitMessage "[$projectName] Unity CLI の応答を待っています（unity status）..."
     if ($cliStatus.TimedOut) {
         if ($Editor) {
@@ -272,10 +310,12 @@ if ($unityCli) {
 # （-Editor の E2E は逆に「開いている」必要がある。この 2 つが正反対なのが最も踏みやすい落とし穴）
 $editorHoldsProject = $false
 if (-not $Editor) {
-    if ($cliStatus -and $cliStatus.Json) {
-        $editorHoldsProject = Test-CliConnected -Status $cliStatus
+    # **CLI の「接続あり」は占有の根拠になるが、「接続なし」は閉じている証拠にならない**。
+    # 起動途中・モーダル待ちでは「pipeline 未接続だが対象プロジェクトのプロセスは居る」が
+    # 普通に起きるので、否定側は必ず 3 信号の合成判定（プロセス / EditorInstance / ロック）で確かめる
+    if ($cliStatus -and $cliStatus.Json -and (Test-CliConnected -Status $cliStatus)) {
+        $editorHoldsProject = $true
     } else {
-        # CLI が無い/読めない場合も、ロックファイルを掴めるかで同じ判定ができる（exit=6 を待たない）
         $editorHoldsProject = Test-UnityProjectLocked -ProjectDir $projectDir
     }
 }
@@ -285,11 +325,11 @@ if ($editorHoldsProject) {
            "エディタを開いたまま回したい場合は -Editor を使う（EditMode のみ）")
 }
 
-$logFile = Join-Path $buildsDir "test-$projectName-$Mode.log"
+$logFile = Join-UappPath $buildsDir "test-$projectName-$Mode.log"
 
 # エージェント開発ダッシュボード連携（任意）。**監視が要るのは失敗経路ほど強い**ので、
 # 結果が出なかった場合も「赤いエビデンス」を残してから throw する
-$emitHelper = Join-Path $PSScriptRoot "emit-status.ps1"
+$emitHelper = Join-UappPath $PSScriptRoot "emit-status.ps1"
 try {
     if (Test-Path -LiteralPath $emitHelper -PathType Leaf) { . $emitHelper }
 } catch {
@@ -329,9 +369,9 @@ if ($Editor) {
             $quoted = @("cmd", "--project-path", (Format-CliArg $projectDir)) +
                       @($CmdArgs | ForEach-Object { if ("$_" -match "\s") { Format-CliArg "$_" } else { "$_" } }) +
                       @("--format", "json", "--no-banner")
-            $raw = (Invoke-WithTimeout -FilePath $unityCli -Arguments $quoted -TimeoutSeconds $TimeoutSeconds).Output
+            $raw = (Invoke-WithTimeout -FilePath $unityCli -Arguments (@($cliGlobalArgs) + $quoted) -TimeoutSeconds $TimeoutSeconds).Output
         } else {
-            $raw = & $unityCli cmd --project-path $projectDir @CmdArgs --format json --no-banner 2>&1 | Out-String
+            $raw = & $unityCli @cliGlobalArgs cmd --project-path $projectDir @CmdArgs --format json --no-banner 2>&1 | Out-String
         }
         $parsed = $null
         try { $parsed = $raw | ConvertFrom-Json } catch {}
@@ -350,7 +390,7 @@ if ($Editor) {
     for ($attempt = 0; $attempt -lt 3; $attempt++) {
         if (Test-CliConnected -Status $st) { break }
         Start-Sleep -Seconds 2
-        $st = Get-UnityCliStatus -Cli $unityCli -ProjectDir $projectDir -TimeoutSeconds $UnityCliProbeSeconds
+        $st = Get-UnityCliStatus -Cli $unityCli -ProjectDir $projectDir -TimeoutSeconds $UnityCliProbeSeconds -GlobalArgs $cliGlobalArgs
     }
     if (-not (Test-CliConnected -Status $st)) {
         # **既に開いているプロジェクトを二重に開かない**。Unity は開いている間 Temp\UnityLockfile を作る。
@@ -364,7 +404,7 @@ if ($Editor) {
             $wait = [System.Diagnostics.Stopwatch]::StartNew()
             while ($wait.Elapsed.TotalSeconds -lt 300) {
                 Start-Sleep -Seconds 3
-                $st = Get-UnityCliStatus -Cli $unityCli -ProjectDir $projectDir -TimeoutSeconds $UnityCliProbeSeconds
+                $st = Get-UnityCliStatus -Cli $unityCli -ProjectDir $projectDir -TimeoutSeconds $UnityCliProbeSeconds -GlobalArgs $cliGlobalArgs
                 if (Test-CliConnected -Status $st) { break }
             }
             Write-Host "[$projectName] 待機 $([int]$wait.Elapsed.TotalSeconds) 秒"
@@ -383,13 +423,13 @@ if ($Editor) {
                    "`n  status の応答: $lastStatus")
         }
         Write-Host "[$projectName] エディタ未接続。Pipeline パッケージを確認してエディタを起動します..."
-        & $unityCli pipeline install --project-path $projectDir --format json --no-banner | Out-Null
+        & $unityCli @cliGlobalArgs pipeline install --project-path $projectDir --format json --no-banner | Out-Null
         # **パスは引用する**（-ArgumentList の配列は空白結合されるため、空白入りのパスが割れる）
-        Start-Process -FilePath $unityCli -ArgumentList @("open", (Format-CliArg $projectDir)) | Out-Null
+        Start-Process -FilePath $unityCli -ArgumentList (@($cliGlobalArgs) + @("open", (Format-CliArg $projectDir))) | Out-Null
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
         while ($true) {
             Start-Sleep -Seconds 5
-            $st = Get-UnityCliStatus -Cli $unityCli -ProjectDir $projectDir -TimeoutSeconds $UnityCliProbeSeconds
+            $st = Get-UnityCliStatus -Cli $unityCli -ProjectDir $projectDir -TimeoutSeconds $UnityCliProbeSeconds -GlobalArgs $cliGlobalArgs
             if ((Test-CliConnected -Status $st) -and $st.Json.data.instances[0].state -eq "ready") { break }
             if ($sw.Elapsed.TotalSeconds -gt 600) { throw "エディタの Pipeline 接続待ちがタイムアウト（600秒）。Editor.log を確認" }
         }
@@ -566,27 +606,26 @@ if ($unityCli) {
     # （既定の Editor.log は複数 Unity 同時実行で競合し、後発の実行がログを1行も残せないことがある）
     $cliArgs += @("--", "-logFile", $logFile)
     if ($NoGraphics) { $cliArgs += "-nographics" }
-    & $unityCli @cliArgs
+    & $unityCli @cliGlobalArgs @cliArgs
     $exit = $LASTEXITCODE
     $via = "Unity CLI"
     Write-Host "ログ: $logFile"
 } else {
     # フォールバック: Unity 本体を batchmode で起動する（CLI と同じ NUnit XML を出力させる）
     if (-not $UnityPath) {
-        $versionFile = Join-Path $projectDir "ProjectSettings\ProjectVersion.txt"
+        $versionFile = Join-UappPath $projectDir "ProjectSettings\ProjectVersion.txt"
         if (-not (Test-Path $versionFile)) { throw "ProjectVersion.txt がありません: $versionFile" }
         if ((Get-Content $versionFile -Raw) -notmatch "m_EditorVersion:\s*(\S+)") {
             throw "ProjectVersion.txt からバージョンを読めません: $versionFile"
         }
         $unityVersion = $Matches[1]
-        $localConfigPath = Join-Path $root "config\local.json"
+        $localConfigPath = Join-UappPath $root "config\local.json"
         $local = if (Test-Path $localConfigPath) { Get-Content $localConfigPath -Raw | ConvertFrom-Json } else { $null }
+        # エディタ実体の並び（Windows は <root>\<版>\Editor\Unity.exe、
+        # mac は <root>/<版>/Unity.app/Contents/MacOS/Unity）は uapp-platform.ps1 が吸収する
         $editorRoots = if ($local -and $local.editorRoots) { $local.editorRoots }
-                       else { @("C:\Program Files\Unity\Hub\Editor", "D:\Unity\Hub\Editor") }
-        foreach ($editorRoot in $editorRoots) {
-            $candidate = Join-Path $editorRoot "$unityVersion\Editor\Unity.exe"
-            if (Test-Path $candidate) { $UnityPath = $candidate; break }
-        }
+                       else { Get-UappDefaultEditorRoots }
+        $UnityPath = Resolve-UappEditor -Version $unityVersion -Roots $editorRoots
         if (-not $UnityPath) {
             throw ("Unity $unityVersion が見つかりません（config\local.json の editorRoots/editorOverrides を確認）。" +
                    "Unity CLI を導入すればエディタ解決も自動になる: https://docs.unity.com/en-us/unity-cli")

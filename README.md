@@ -8,6 +8,8 @@ Claude Code 等の AI エージェントによる自律テスト開発を前提�
 
 ## 特徴
 
+- **Windows / macOS 両対応**（v0.1.8）: 同じスクリプトを PowerShell 7 で実行する。
+  macOS は Intel / Apple Silicon の実機で検証済み（`SETUP.md` の「macOS で使う場合」参照）
 - **本番安全**: ランタイム計装は `UAPP_E2E_BRIDGE` スクリプティングdefine のあるビルドにのみ含まれる
   （asmdef defineConstraints。Editor 拡張はエディタ専用アセンブリで、プレイヤービルドには元々入らない）。
   リリースビルドには混入しない
@@ -70,7 +72,9 @@ cd uapp_e2e-kit
 ## 動作要件
 
 - 対象アプリ: Unity製 Android アプリ（エミュレーター/実機どちらも可）
-- Windows + PowerShell 7（スクリプト類）
+- **Windows または macOS** + PowerShell 7（スクリプト類は同じ `.ps1` を `pwsh` で実行。
+  macOS は Intel / Apple Silicon の実機で検証済み。導入手順と既知の差分は同梱 `SETUP.md` の
+  「macOS で使う場合」を参照）
 - Python 3.10 以降（3.12 で検証。ドライバの依存パッケージは pytest のみ）
 - Android SDK Platform-Tools（adb）。エミュレーター利用時は AVD も
   （**エディタ再生への直結だけで使う場合は adb 不要**）

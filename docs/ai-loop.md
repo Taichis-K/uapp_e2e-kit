@@ -41,9 +41,11 @@ Android ビルドは1回十数分かかるため、③を回す頻度が高い�
   **開いているかどうかは `uapp_e2e\scripts\unity-editor-status.ps1` で確認する**
   （`-Json` で機械可読）。`Get-Process Unity` では判定できない—プロセスが居ることと
   **このプロジェクトが**開いていることは別物で、他プロジェクトのエディタを自分のものと
-  誤認する（逆に自分のを見落とす）。`state` は 3 値:
+  誤認する（逆に自分のを見落とす）。`state` は 4 値:
   `closed`＝batchmode が使える / `open`＝`-Editor` 系が使える /
-  `starting-or-blocked`＝**起動途中かモーダルダイアログ待ちでどちらも失敗する**（画面を確認する）
+  `starting-or-blocked`＝**起動途中かモーダルダイアログ待ちでどちらも失敗する**（画面を確認する）/
+  `unknown`＝**プロセスを列挙できず判定できない**（理由は `warnings`。開いていない証拠が無いので
+  占有されている前提で扱う＝どちらも実行しない）
 - Unity CLI があればそれを、無ければ Unity 本体の `-batchmode -runTests` を自動で使う
   （エディタは `uapp_e2e/config/local.json` の editorRoots ＋ `ProjectVersion.txt` から解決）
 - **Unity CLI 側だけが壊れている場合は `-NoUnityCli`** で Unity 本体の経路に直接入る
@@ -77,7 +79,9 @@ cd uapp_e2e
 
 エディタ再生中のアプリに対しては adb 不要で直接接続できる
 （`BridgeClient()` が `e2e-config.json` の `editorBridgePort` を自動解決。
-pytest は `$env:UAPP_E2E_EDITOR = "1"; pytest tests` で adb を迂回して流せる。
+pytest は `$env:UAPP_E2E_EDITOR = "1"; pytest tests; Remove-Item Env:\UAPP_E2E_EDITOR` で
+adb を迂回して流せる。**最後の `Remove-Item` を省かない** — 立てっぱなしのまま同じシェルで
+デバイス経路へ進むと、adb の使用が明示エラーで拒否され、接続先の検査にも引っかかる。
 adb を直接使うテスト—logcat アサート・adb タップ—は対象外で明示エラーになるため `-k` で除外する。
 ビルド不要なので外側ループの高速な代替になる。
 ただし実機との差異があるため、最終確認はエミュレーター/実機で行う）。

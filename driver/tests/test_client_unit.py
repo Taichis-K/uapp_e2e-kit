@@ -6,7 +6,8 @@ import threading
 
 import pytest
 
-from e2e_driver.client import CONFIG_SEARCH_PARENTS, DEFAULT_PORT, BridgeClient, resolve_port
+from e2e_driver.client import (CONFIG_SEARCH_PARENTS, DEFAULT_PORT, BridgeClient,
+                               WrongBridgeTargetError, resolve_port)
 
 
 @pytest.fixture(autouse=True)
@@ -113,7 +114,8 @@ def test_resolve_port_start_overrides_cwd(monkeypatch, work):
 class _FakeBridge:
     """行区切りJSONで ping に応答する最小サーバー（エディタ再生ブリッジの代役）。"""
 
-    def __init__(self):
+    def __init__(self, platform="FakeEditor"):
+        self.platform = platform
         self.sock = socket.socket()
         self.sock.bind(("127.0.0.1", 0))
         self.sock.listen(1)
@@ -125,8 +127,10 @@ class _FakeBridge:
         reader = conn.makefile("r", encoding="utf-8", newline="\n")
         for line in reader:
             request = json.loads(line)
-            response = {"id": request["id"], "ok": True,
-                        "result": {"bridge": "1.0", "platform": "FakeEditor"}}
+            result = {"bridge": "1.0"}
+            if self.platform is not None:
+                result["platform"] = self.platform
+            response = {"id": request["id"], "ok": True, "result": result}
             conn.sendall((json.dumps(response) + "\n").encode("utf-8"))
 
 
@@ -138,3 +142,86 @@ def test_editor_direct_connect_via_config(monkeypatch, work):
     assert client.port == bridge.port
     assert client.connect(retries=1).ping()["platform"] == "FakeEditor"
     client.close()
+
+
+# --- エディタ直結モードで接続先がエディタであることの検証 -------------------
+# デバイス実行が残した adb forward が editorBridgePort と同じ番号を握っていると、
+# エディタへ繋いだつもりで端末のアプリを検証してしまう（＝偽の緑）。2026-08-03 に実際に踏んだ。
+
+def test_editor_mode_rejects_non_editor_target(monkeypatch, work):
+    """UAPP_E2E_EDITOR=1 で端末側（platform=Android）に繋がったら明示的に失敗する。"""
+    monkeypatch.setenv("UAPP_E2E_EDITOR", "1")
+    bridge = _FakeBridge(platform="Android")
+    _write_config(work, bridge.port)
+    with pytest.raises(WrongBridgeTargetError) as e:
+        BridgeClient(timeout=5.0).connect(retries=1)
+    # 原因と対処が読み取れること（メッセージが痩せる退行を防ぐ）
+    assert "adb forward" in str(e.value)
+    assert "Android" in str(e.value)
+
+
+def test_editor_mode_rejects_missing_platform(monkeypatch, work):
+    """platform が無い応答も通さない（相手が E2EBridge でない/壊れている。fail-closed）。"""
+    monkeypatch.setenv("UAPP_E2E_EDITOR", "1")
+    bridge = _FakeBridge(platform=None)
+    _write_config(work, bridge.port)
+    with pytest.raises(WrongBridgeTargetError):
+        BridgeClient(timeout=5.0).connect(retries=1)
+
+
+def test_editor_mode_accepts_editor_target(monkeypatch, work):
+    """エディタ（platform が Editor で終わる）なら素通しする。"""
+    monkeypatch.setenv("UAPP_E2E_EDITOR", "1")
+    bridge = _FakeBridge(platform="OSXEditor")
+    _write_config(work, bridge.port)
+    client = BridgeClient(timeout=5.0).connect(retries=1)
+    assert client.ping()["platform"] == "OSXEditor"
+    client.close()
+
+
+def test_device_mode_does_not_check_target(monkeypatch, work):
+    """デバイス経路（ポートは環境変数で渡る）では判定しない。
+
+    **`run-e2e.ps1` のデバイス経路は UAPP_E2E_BRIDGE_PORT で forward 先を渡す**ので、
+    ポートの解決元は env になる。ここを判定対象にすると端末への正当な接続が全部止まる。
+    """
+    monkeypatch.delenv("UAPP_E2E_EDITOR", raising=False)
+    bridge = _FakeBridge(platform="Android")
+    _write_config(work, 19999)                       # 設定はあるが env が優先される
+    monkeypatch.setenv("UAPP_E2E_BRIDGE_PORT", str(bridge.port))
+    client = BridgeClient(timeout=5.0).connect(retries=1)
+    assert client.ping()["platform"] == "Android"
+    client.close()
+
+
+def test_manual_connection_without_declaration_is_not_checked(monkeypatch, work):
+    """**宣言が無い接続は検査しない**（誤検知ゼロを優先した明示的な線引き）。
+
+    「ポートの解決元からエディタ意図を推定する」形はレビューで捨てた — 解決元では
+    手動デバイス接続（`BridgeClient(port=<ホスト側ポート>)`）と手動エディタ接続を
+    分離できず、どちらかが必ず壊れるため。呼び手の意図は `UAPP_E2E_EDITOR=1` でだけ表明する。
+    """
+    monkeypatch.delenv("UAPP_E2E_EDITOR", raising=False)
+    monkeypatch.delenv("UAPP_E2E_BRIDGE_PORT", raising=False)
+    bridge = _FakeBridge(platform="Android")
+    _write_config(work, bridge.port)
+    # 明示ポート・設定由来・既定のいずれでも素通し（デバイスへの正当な手動接続を壊さない）
+    for client in (BridgeClient(port=bridge.port, timeout=5.0),):
+        c = client.connect(retries=1)
+        assert c.ping()["platform"] == "Android"
+        c.close()
+
+
+def test_declared_editor_mode_is_checked_regardless_of_port_source(monkeypatch, work):
+    """宣言があれば、ポートの解決元（明示/環境変数/設定）に関わらず検査する。"""
+    monkeypatch.setenv("UAPP_E2E_EDITOR", "1")
+    for use_env in (False, True):
+        bridge = _FakeBridge(platform="Android")
+        if use_env:
+            monkeypatch.setenv("UAPP_E2E_BRIDGE_PORT", str(bridge.port))
+            with pytest.raises(WrongBridgeTargetError):
+                BridgeClient(timeout=5.0).connect(retries=1)
+            monkeypatch.delenv("UAPP_E2E_BRIDGE_PORT")
+        else:
+            with pytest.raises(WrongBridgeTargetError):
+                BridgeClient(port=bridge.port, timeout=5.0).connect(retries=1)

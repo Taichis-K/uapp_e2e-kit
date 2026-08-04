@@ -22,21 +22,31 @@ param(
     [string]$Project = "unity-nis",   # このリポジトリ内のサンプル名（uapp_e2e開発用）
     [string]$ProjectPath,             # 任意の場所のUnityプロジェクト（導入先ではこちら）
     [int]$CliTimeoutSeconds = 30,     # unity status の打ち切り（CLI は認証切れで無言ハングする）
-    [switch]$Json                     # 機械可読出力（AI やラッパーから使う）
+    [switch]$Json,                    # 機械可読出力（AI やラッパーから使う）
+    # Unity CLI の呼び出しに `--proxy-disable` を付ける（既定オフ）。プロキシ配下では CLI が
+    # localhost 宛ての Pipeline 通信までプロキシへ流し 503 になり、Pipeline 接続が
+    # 「なし」と誤判定される（詳細は uapp-platform.ps1 の Get-UappUnityCliGlobalArgs）。
+    # 環境変数 UAPP_E2E_UNITY_CLI_PROXY_DISABLE=1 でも同じ
+    [switch]$UnityCliProxyDisable
 )
 
 $ErrorActionPreference = "Stop"
-$root = (Resolve-Path "$PSScriptRoot\..").Path
+
+. (Join-Path $PSScriptRoot "uapp-platform.ps1")   # OS 差分の吸収（Windows / macOS。mac は暫定・未検証）
+
+# CLI のグローバル引数は 1 か所で決めて全呼び出しへ渡す（check-portability.ps1 が検査する）
+$cliGlobalArgs = Get-UappUnityCliGlobalArgs -ProxyDisable:(Resolve-UappUnityCliProxyDisable -Switch:$UnityCliProxyDisable)
+$root = (Resolve-Path (Join-UappPath $PSScriptRoot "..")).Path
 
 # プロジェクト解決は他スクリプトと同じ規則: -ProjectPath 優先 → キット親がUnityプロジェクト → $root\$Project
 if ($ProjectPath) {
     $projectDir = (Resolve-Path $ProjectPath).Path
 }
-elseif ((Test-Path (Join-Path $root "..\Assets")) -and (Test-Path (Join-Path $root "..\ProjectSettings"))) {
-    $projectDir = (Resolve-Path (Join-Path $root "..")).Path
+elseif ((Test-Path (Join-UappPath $root "..\Assets")) -and (Test-Path (Join-UappPath $root "..\ProjectSettings"))) {
+    $projectDir = (Resolve-Path (Join-UappPath $root "..")).Path
 }
 else {
-    $projectDir = Join-Path $root $Project
+    $projectDir = Join-UappPath $root $Project
 }
 if (-not (Test-Path $projectDir)) { throw "プロジェクトがありません: $projectDir" }
 # **末尾の `\` を落とす**（run-e2e.ps1 / run-unity-tests.ps1 と同じ正規化）。
@@ -44,7 +54,7 @@ if (-not (Test-Path $projectDir)) { throw "プロジェクトがありません:
 # 閉じ引用符が `\"` と解釈され、**後続の引数までパスに飲み込まれる**。
 # **ドライブ直下（`C:\`）だけは落とせない** — `C:` はドライブ相対を指す別物になるため。
 # この 1 ケースは引用側（Format-CliArg）で吸収するので、パスの引用は必ずそこを通すこと
-if ($projectDir -notmatch '^[A-Za-z]:\\$') { $projectDir = $projectDir.TrimEnd('\') }
+$projectDir = Get-UappNormalizedDir $projectDir
 $projectName = Split-Path $projectDir -Leaf
 
 function Format-CliArg {
@@ -73,8 +83,12 @@ function Format-CliArg {
 }
 
 function Test-UnityProjectLocked {
+    # **mac ではこの信号は当てにならない**（暫定対応・未検証）: Unix のファイルロックは
+    # 助言的で、.NET の FileShare.None は他プロセスの排他を再現しない。つまり Unity が
+    # 掴んでいても排他オープンに成功しうる＝常に「保持されていない」に倒れる。
+    # 判定は残る 2 信号（-projectPath 一致プロセス / EditorInstance.json）で行う想定
     param([Parameter(Mandatory)][string]$Dir)
-    $lock = Join-Path $Dir "Temp\UnityLockfile"
+    $lock = Join-UappPath $Dir "Temp\UnityLockfile"
     if (-not (Test-Path -LiteralPath $lock)) { return $false }
     try {
         $stream = [System.IO.File]::Open($lock, "Open", "ReadWrite", "None")
@@ -90,16 +104,11 @@ function Test-UnityProjectLocked {
 # タイトルの先頭（"<プロジェクト名> - <シーン> - <プラットフォーム> - Unity 6.x"）
 function Get-UnityProcesses {
     $result = @()
-    $procs = @(Get-Process Unity -ErrorAction SilentlyContinue)
-    if (-not $procs) { return $result }
-    $cim = @{}
-    try {
-        foreach ($p in Get-CimInstance Win32_Process -Filter "Name='Unity.exe'" -ErrorAction Stop) {
-            $cim[[int]$p.ProcessId] = $p.CommandLine
-        }
-    } catch { }
-    foreach ($p in $procs) {
-        $cmd = $cim[[int]$p.Id]
+    # プロセス列挙とコマンドライン取得は OS で手段が違う（uapp-platform.ps1 に集約）。
+    # **mac ではウィンドウタイトルが取れない**ので、タイトル由来の推定は効かない
+    # （代わりに ps から全プロセスの引数が読めるため -projectPath 側で判定できる）
+    foreach ($p in (Get-UappUnityProcess)) {
+        $cmd = $p.CommandLine
         $path = $null
         if ($cmd -and $cmd -match '-projectPath\s+"?([^"]+?)"?(\s+-|\s*$)') { $path = $Matches[1].Trim() }
         $title = $p.MainWindowTitle
@@ -108,7 +117,7 @@ function Get-UnityProcesses {
                 else { $null }
         $isTarget = $false
         if ($path) {
-            try { $isTarget = ((Resolve-Path -LiteralPath $path).Path.TrimEnd('\') -ieq $projectDir.TrimEnd('\')) } catch { }
+            try { $isTarget = ((Get-UappNormalizedDir (Resolve-Path -LiteralPath $path).Path) -ieq (Get-UappNormalizedDir $projectDir)) } catch { }
         } elseif ($name) {
             $isTarget = ($name -ieq $projectName)   # パスが取れないときは名前一致（弱い根拠）
         }
@@ -120,6 +129,9 @@ function Get-UnityProcesses {
             hasWindow    = [bool]$title
             isTarget     = $isTarget
             evidence     = if ($path) { "commandLine" } elseif ($name) { "windowTitle" } else { "unknown" }
+            # **引き継ぎ忘れると常に「取得失敗」になる**（欠落プロパティは $null で、
+            # `-not $null` が真になるため。実際にこれで全件が unknown に倒れた）
+            commandLineAvailable = [bool]$p.CommandLineAvailable
         }
     }
     return $result
@@ -134,7 +146,7 @@ function Get-CliStatus {
     $errFile = [System.IO.Path]::GetTempFileName()
     try {
         $p = Start-Process -FilePath $Cli -PassThru -NoNewWindow `
-            -ArgumentList @("status", "--project-path", (Format-CliArg $projectDir), "--format", "json", "--no-banner") `
+            -ArgumentList (@($cliGlobalArgs) + @("status", "--project-path", (Format-CliArg $projectDir), "--format", "json", "--no-banner")) `
             -RedirectStandardOutput $outFile -RedirectStandardError $errFile
         if (-not $p.WaitForExit($CliTimeoutSeconds * 1000)) {
             try { $p.Kill() } catch { }
@@ -156,15 +168,11 @@ function Get-CliStatus {
     }
 }
 
-$cli = (Get-Command unity -ErrorAction SilentlyContinue).Source
-if (-not $cli) {
-    $candidate = Join-Path $env:LOCALAPPDATA "Unity\bin\unity.exe"
-    if (Test-Path $candidate) { $cli = $candidate }
-}
+$cli = Get-UappUnityCli
 
 function Get-EditorInstance {
     param([Parameter(Mandatory)][string]$Dir)
-    $file = Join-Path $Dir "Library\EditorInstance.json"
+    $file = Join-UappPath $Dir "Library\EditorInstance.json"
     if (-not (Test-Path -LiteralPath $file)) { return $null }
     try { $json = Get-Content $file -Raw | ConvertFrom-Json } catch { return $null }
     # $pid は PowerShell の読み取り専用変数（自プロセスの PID）なので使えない
@@ -178,18 +186,49 @@ function Get-EditorInstance {
 }
 
 $locked = Test-UnityProjectLocked -Dir $projectDir
-$procs = Get-UnityProcesses
+# **警告は拾って持つ**（捨てない・混ぜない）。プロセス列挙が失敗すると helper が警告を出すが、
+# それをそのまま流すと **`-Json` の出力に混ざって機械可読の契約が壊れる**（読み手の
+# ConvertFrom-Json / json.loads が落ちる）。ここで分離し、JSON では `warnings` に入れる
+$warnings = @()
+# **列挙できなかったことを「0 件」と混同しない**（混同すると開いているエディタを
+# closed と報告し、読んだ側が batchmode を起動して失敗する）
+$procEnumFailed = $false
+try {
+    $procs = @(Get-UnityProcesses 3>&1 | ForEach-Object {
+        if ($_ -is [System.Management.Automation.WarningRecord]) { $warnings += $_.Message } else { $_ }
+    })
+} catch [System.InvalidOperationException] {
+    $procEnumFailed = $true
+    $procs = @()
+    $warnings += $_.Exception.Message
+}
+# コマンドラインが取れていない（Windows で CIM が失敗した）場合も「判定できない」扱いにする。
+# ウィンドウタイトルで当たりが付いたならそれは活きるので、当たらなかったときだけ安全側へ倒す
+if (@($procs | Where-Object { -not $_.commandLineAvailable }).Count -gt 0) {
+    $procEnumFailed = $true
+    $warnings += "Unity プロセスのコマンドラインを取得できないため、どのプロジェクトのものか判定できません"
+}
 $instance = Get-EditorInstance -Dir $projectDir
 $cliStatus = Get-CliStatus -Cli $cli
 
 $targetProcs = @($procs | Where-Object { $_.isTarget -and -not $_.batchmode })
+# **同じプロジェクトの batchmode も占有**（別ターミナルの batchmode は実際にロックを握る。
+# 除外すると「非占有」と答えてしまい、読んだ側が batchmode を起動して exit=6 に落ちる）
+$targetBatchProcs = @($procs | Where-Object { $_.isTarget -and $_.batchmode })
 $instanceAlive = [bool]($instance -and $instance.alive)
 $pipelineOk = [bool]($cliStatus -and $cliStatus.connected)
 # **使える状態か**（-Editor 系が成立するか）と、**占有しているか**（batchmode が失敗するか）は別。
 # 起動途中・ダイアログ待ちは「占有しているが使えない」＝どちらの経路もダメで人の操作が要る
-$occupied = [bool]($targetProcs.Count -gt 0 -or $instanceAlive -or $locked)
+$occupied = [bool]($targetProcs.Count -gt 0 -or $targetBatchProcs.Count -gt 0 -or $instanceAlive -or $locked)
 $usable = [bool]($pipelineOk -or $instanceAlive)
-$state = if (-not $occupied) { "closed" }
+# **プロセス列挙に失敗したら判定しない**。3 信号のうち最重要のものが欠けている状態で
+# closed と言うと、読んだ側が batchmode を起動して排他ロックで失敗する（安全側へ倒す）
+if ($procEnumFailed -and -not $usable) {
+    $occupied = $true
+    $usable = $false
+}
+$state = if ($procEnumFailed -and -not $usable) { "unknown" }
+         elseif (-not $occupied) { "closed" }
          elseif ($usable) { "open" }
          else { "starting-or-blocked" }
 
@@ -209,6 +248,8 @@ $report = [pscustomobject]@{
     othersOnly       = [bool](-not $occupied -and $procs.Count -gt 0)
     processes        = $procs
     pipeline         = $cliStatus
+    # 空でなければ「信号のどれかが取得できていない」＝判定を鵜呑みにしない材料
+    warnings         = $warnings
 }
 
 if ($Json) {
@@ -216,10 +257,15 @@ if ($Json) {
     exit 0
 }
 
+foreach ($w in $warnings) { Write-Warning $w }   # 人向け表示では警告をそのまま出す
 Write-Host "プロジェクト: $projectName（$projectDir）"
 switch ($state) {
     "closed" { Write-Host "  このプロジェクトのエディタ: **開いていない**" }
     "open"   { Write-Host "  このプロジェクトのエディタ: **開いている**（使える状態）" }
+    "unknown" {
+        Write-Host "  このプロジェクトのエディタ: **判定できない**（プロセスを列挙できなかった）"
+        Write-Host "    → 開いていない証拠が無いので、占有されている前提で扱う。上の警告を見て原因を直すこと"
+    }
     default  {
         Write-Host "  このプロジェクトのエディタ: **起動途中か、ダイアログ待ちで止まっている**"
         Write-Host "    → batchmode も -Editor も失敗する。エディタの画面を見て（ダイアログを閉じて）から再実行する"
@@ -259,4 +305,5 @@ Write-Host "使い分け:"
 Write-Host "  open                → run-e2e.ps1 -Editor / run-unity-tests.ps1 -Editor（batchmode は排他ロックで失敗する）"
 Write-Host "  closed              → run-unity-tests.ps1（batchmode）/ build-android.ps1"
 Write-Host "  starting-or-blocked → どちらも実行しない（エディタの画面を確認する）"
+Write-Host "  unknown             → 判定できない（列挙に失敗）。占有されている前提で扱い、warnings の原因を直す"
 exit 0

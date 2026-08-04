@@ -22,7 +22,20 @@
 | 入力 | New Input System または Both（レガシーInputのみのアプリは Both へ変更が必要。既存挙動は変わらない） |
 | 追加パッケージ | `com.unity.inputsystem`、`com.unity.nuget.newtonsoft-json`（ともに無料の公式パッケージ） |
 | PowerShell | **PowerShell 7（pwsh）以降**。Windows 標準の Windows PowerShell 5.1 は非対応（キットのスクリプトは BOM なし UTF-8 のため 5.1 では日本語が誤解釈され動作しない） |
+| OS | **Windows で開発・検証している。macOS は Intel（x86_64）と Apple Silicon（arm64）の両方の実機で検証済み**（下記） |
 | AIエージェント | Claude Code、または OpenAI Codex CLI v0.94.0 以降（任意。人手運用も可） |
+
+### macOS について（**Intel / Apple Silicon の両方で実機検証済み**）
+
+スクリプトは Windows と同じ `.ps1` を PowerShell 7 で動かす（macOS には標準で入っていないので
+`brew install powershell` か Microsoft 配布の .pkg で導入する。**旧 `powershell/tap` は
+2026-06 に廃止されており動かない**）。OS で分かれる判断（実体の探し方・プロセスの見方）は
+**`uapp_e2e/scripts/uapp-platform.ps1` に集約**してあり、mac で動かないときはまずそこの
+解決関数を見る（**ただし直す場所がそこだけとは限らない**）。前提・既知の差分・立ち上げ順は、キット同梱の `SETUP.md`
+「macOS で使う場合」にまとめてある。**Intel Mac（x86_64）と Apple Silicon（arm64）の両方で、導入からデバイス経路の E2E まで
+実機で検証済み（2026-08-03）**。arm64 で追加の準備が要るのは AVD のシステムイメージ（arm64 版）と
+Homebrew python の `pip install --user --break-system-packages` だけで、スクリプトの分岐は不要だった。
+**ここに書いていない失敗に当たったら、直したうえで報告してほしい。**
 
 ## 導入後の配置（標準レイアウト）
 
@@ -127,7 +140,10 @@ Codex ユーザーでルートに `AGENTS.md` が無い場合は `-RootAgentsMd`
   "orientation": "landscape",                // portrait | landscape | auto（横画面アプリはlandscape）
   "deviceRotation": null,                    // 縦横両対応で起動向きを固定したい場合 0-3
   "devicePort": 13333,                       // デバイス内でブリッジが待ち受けるポート（計装アプリを複数入れる場合はアプリごとに分ける）
-  "editorBridgePort": 13333,                 // エディタ再生時の待ち受けポート（複数プロジェクト並行開発時は重複させない）
+  "editorBridgePort": 13343,                 // エディタ再生時の待ち受けポート。**ホスト側の forward ポート
+                                             // （config/local.json の bridgePort。既定 13333）と別番号にする** —
+                                             // デバイス実行が張った adb forward は実行後も残るため、同じ番号だと
+                                             // 次にエディタ直結を回したときに接続先を奪われる。複数プロジェクト並行時も重複させない
   "uiType": "ugui-nis"                       // ugui-nis | ugui-legacy | ngui-nis | ngui-legacy（操作APIの選択に使う）
 }
 ```
@@ -204,6 +220,18 @@ python -c "from e2e_driver import BridgeClient; print(BridgeClient(port=<ホス�
 
 `ping` の応答に `'ngui': True/False` が含まれ、NGUI検出が確認できる。
 以降のテストの書き方は [docs/ai-loop.md](ai-loop.md) の規約に従う（まず dump を見る）。
+
+**作りたての AVD ＋ `UnityPlayerGameActivity`（GameActivity。Unity 6 の既定）のアプリは、
+ここで一度こける**。logcat に `[E2EBridge] listening` が 1 行も出ず、`bind failed` も無く、
+例外もクラッシュも無いのに接続だけできない場合は、Android の**没入モード確認オーバーレイ**が
+フォーカスを奪って **Unity プレイヤーが一時停止し、シーン読み込みが終わっていない**
+（ブリッジは `AfterSceneLoad` で起動するので走らない）。
+**従来の `UnityPlayerActivity` のアプリは同じオーバーレイが出ても起動する**（実測）。
+
+```powershell
+adb shell dumpsys window | Select-String mCurrentFocus   # ImmersiveModeConfirmation なら該当
+adb shell settings put secure immersive_mode_confirmations confirmed   # AVD に一度やれば残る
+```
 
 ## UIフレームワーク別の注意
 

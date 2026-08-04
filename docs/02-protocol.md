@@ -29,6 +29,15 @@ Python ドライバ側の解決と挙動を揃え、片側だけフォールバ�
   （`run-e2e.ps1` が設定。ドライバの `adb.forward()` はこの2つで再forwardする）
 - **エディタ再生**: ホスト上で直接待ち受けるため adb 不要。複数エディタ（＝複数プロジェクト）
   同時運用は各プロジェクトの `editorBridgePort` で自然に分離される
+- **`editorBridgePort` は「ホスト側の forward ポート」と別番号にする**
+  （`config/local.json` の `bridgePort` / `run-e2e.ps1 -HostPort`）。**`devicePort` と分けるだけでは足りない** —
+  ホスト側ポートは `devicePort` とは独立に決まり、**デバイス実行が張った forward は実行後も残って
+  ホスト側ポートを adb が LISTEN し続ける**。同じ番号だと、次にエディタ直結を回したときに
+  **エディタのつもりで端末のアプリへ転送される**（同じアプリが端末にも入っていれば「成功」してしまう）。
+  ドライバは**`UAPP_E2E_EDITOR=1` を宣言した接続に限り**、接続直後に ping の `platform` を見て
+  `WrongBridgeTargetError` で止める（**宣言の無い接続は検査されない**）。
+  **踏まないのは番号を分けること**。`install-to-project.ps1`（導入時・local.json が無ければ既定で仮判定）と
+  `run-e2e.ps1`（forward の直前・`-HostPort` 確定後なので誤検知なし）の両方が検査する
 - **Python ドライバ側の接続先解決**（`BridgeClient` / `resolve_port`）: 明示引数 >
   環境変数 `UAPP_E2E_BRIDGE_PORT` > カレントディレクトリから親方向に探索した
   `e2e-config.json` の `editorBridgePort` > 既定 13333。
@@ -77,8 +86,14 @@ Android ネイティブ座標（左上原点・物理ピクセル）へ変換が
 ```json
 → {"cmd": "ping"}
 ← {"bridge": "1.0", "app": "com.uapp.e2esample", "unity": "6000.3.6f1",
-   "screen": {"w": 1080, "h": 2400}, "activePointers": 0, ...}
+   "platform": "Android", "screen": {"w": 1080, "h": 2400}, "activePointers": 0, ...}
 ```
+`platform` は `Application.platform`（エディタなら `OSXEditor` / `WindowsEditor` / `LinuxEditor`）。
+**`UAPP_E2E_EDITOR=1` が宣言されているときに限り**、ドライバは接続直後にこれを見て、
+エディタ以外へ繋がっていたら `WrongBridgeTargetError` で止める
+（`connect()` が疎通確認で叩く ping の結果を流用するので往復は増えない）。デバイス実行が残した `adb forward` が `editorBridgePort` と同じ番号を握ると、
+エディタのつもりで端末のアプリを検証してしまうため。**宣言の無い接続は検査されない** —
+手動でエディタへ繋ぐときも `UAPP_E2E_EDITOR=1` を付ける（`adb` の使用ガードと同じ約束）。
 
 ### dump
 UI 階層をツリー JSON で返す。AI がテストを書くための「地図」。

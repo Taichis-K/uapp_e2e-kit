@@ -95,12 +95,21 @@ def uninstall(package: str = PACKAGE) -> None:
 
 
 def is_installed(package: str = PACKAGE) -> bool:
-    return package in _run("shell", "pm", "list", "packages", package, check=False)
+    # **adb 自体の失敗を「未インストール」に化けさせない**（`pm list packages` は
+    # 未インストールでも終了コード 0 で空を返すので、check を切る理由がない）。
+    # **部分一致で判定しない**: `pm list packages <filter>` は filter を名前に含む package を
+    # 列挙する仕様なので、`com.example.game` が未導入でも `com.example.game.beta` があれば
+    # 一致してしまう（dev/staging/prod で applicationId に suffix を付ける構成で現実に踏む）
+    out = _run("shell", "pm", "list", "packages", package)
+    return any(line.strip() == f"package:{package}" for line in out.splitlines())
 
 
 def current_focus() -> str:
-    """現在フォアグラウンドのウィンドウ/アクティビティ（アプリ遷移の判定用）。"""
-    return _run("shell", "dumpsys", "window", check=False)
+    """現在フォアグラウンドのウィンドウ/アクティビティ（アプリ遷移の判定用）。
+
+    **adb の失敗を空文字に化けさせない**（空を「該当なし」と読む呼び出し側が誤判定する）。
+    """
+    return _run("shell", "dumpsys", "window")
 
 
 # --------------------------------------------------------------- ネイティブUI操作
@@ -235,11 +244,19 @@ def wm_size() -> tuple[int, int]:
 
 
 def display_rotation() -> int:
-    """現在の画面回転（0=縦, 1=横(左), 2=逆縦, 3=横(右)）。取得できなければ0。"""
-    out = _run("shell", "dumpsys", "window", check=False)
+    """現在の画面回転（0=縦, 1=横(左), 2=逆縦, 3=横(右)）。
+
+    **取得できないときは例外にする**（以前は 0＝縦を返していた）。この値はタップ座標の
+    変換に使われるので、失敗を「縦」に倒すと**横画面で別の場所を叩き、アプリの不具合に
+    見える失敗**になる。テスト基盤としては、黙って違う場所を叩くより落ちるほうが安全。
+    """
+    out = _run("shell", "dumpsys", "window")
     match = re.search(r"(?:mRotation|rotation)[=\s]+(?:ROTATION_)?(\d+)", out)
     if not match:
-        return 0
+        raise RuntimeError(
+            "画面の回転を判定できません（dumpsys window に mRotation/rotation がありません）。"
+            "この値はタップ座標の変換に使うため、推測せず停止します"
+        )
     value = int(match.group(1))
     return {0: 0, 90: 1, 180: 2, 270: 3}.get(value, value if value in (0, 1, 2, 3) else 0)
 
