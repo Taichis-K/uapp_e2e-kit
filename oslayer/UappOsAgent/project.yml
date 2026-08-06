@@ -1,0 +1,64 @@
+# 最小の XCUITest ランナー（uapp_e2e の OS レイヤーエージェント）。
+# **このファイルは開発側の生成元**で、導入先へは生成済みの .xcodeproj を配る
+# （導入先に xcodegen を要求しないため）。再生成: xcodegen generate --spec project.yml
+name: UappOsAgent
+options:
+  bundleIdPrefix: com.uapp.e2e
+  deploymentTarget:
+    iOS: "15.0"
+targets:
+  UappOsAgentRunner:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      # **Swift ファイルだけを明示する**。`path: .` の走査に任せると、テスト実行後に
+      # できる DerivedData をソースとして取り込み、次のビルドが
+      # 「入力ファイルが見つからない」で落ちる（実測）
+      - path: UappOsAgent.swift
+      - path: HttpServer.swift
+    settings:
+      base:
+        # **導入先では変える前提の既定値**。bundle id は Apple の App ID として一意なので、
+        # 他チームが登録済みの識別子は自動署名で取れない（実機で署名するときに効いてくる。
+        # このリポジトリのチームでは実測済みだが、他チームでの失敗自体は未確認）。
+        # 上書きは `run-ios-e2e.ps1 -OsAgentBundleId`（xcodebuild へ
+        # PRODUCT_BUNDLE_IDENTIFIER として渡す。**このプロジェクトはターゲットが 1 つだけ**なので
+        # 全ターゲットへ波及しない）か、config/local.json の `iosOsAgentBundleId`
+        PRODUCT_BUNDLE_IDENTIFIER: com.uapp.e2e.osagent.runner
+        # **署名に Info.plist が要る**。シミュレータは署名しないので不足が露見せず、
+        # 実機で初めて「target does not have an Info.plist file」で落ちる（実測）
+        GENERATE_INFOPLIST_FILE: "YES"
+        # **ローカルネットワークの用途説明**。待ち受けはループバック限定なので本来は不要だが、
+        # Network.framework 経由の listener が実機で privacy 判定にかかる可能性への予防として置く。
+        # **効果は未確認** — 実機で起動直後に接続が切れる現象の切り分け中に入れたもので、
+        # 真因は端末側の「UI オートメーションを有効」未設定だった。単独の A/B は取っていない
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: "uapp_e2e の自動テストが、USB トンネル経由でホストからの操作要求を受け取るために使用します。"
+        # **対象アプリを固定しない**（アプリを起動し直さずに OS を操作するため。
+        # 対象は実行時に bundleId で activate する）。
+        # `TEST_TARGET_NAME: ""` と**空文字を明示してはいけない** — 実機で
+        # 「Logic Testing on iOS devices is not supported」になる（キーの不在と空文字は別物）
+        # **シミュレータだけ署名不要**。実機は署名しないとインストールできないので、
+        # 一律 NO にすると実機経路が起動前に死ぬ（レビュー指摘）
+        "CODE_SIGNING_ALLOWED[sdk=iphonesimulator*]": "NO"
+# **共有スキームを必ず生成する**。無いと xcodebuild が暗黙のスキームを自動生成するが、
+# その中身は実機の宛先を解決できず（`IDERunDestination: Supported platforms for the
+# buildables in the current scheme is empty`）、UI テストバンドルなのに
+# 「Logic Testing on iOS devices is not supported」で落ちる。
+# **シミュレータでは自動生成スキームでも通ってしまう**ので、実機で初めて露見する（実測）。
+schemes:
+  UappOsAgentRunner:
+    build:
+      targets:
+        UappOsAgentRunner: [test]
+    test:
+      config: Debug
+      # **デバッガを噛ませない**（xcodebuild からの実機テストで LLDB を付けると不安定になる。
+      # CI/ヘッドレスでは外すのが定石）。
+      # **効果は未確認** — 実機で起動直後に接続が切れる現象の切り分け中に入れたが、
+      # 真因は端末側の「UI オートメーションを有効」未設定だったので、単独の A/B は取っていない。
+      # なお `disablePerformanceAntipatternChecker` も一度は書いたが、**XcodeGen ではこれは
+      # run アクションのプロパティで、`test:` に置くと黙って無視される**（生成された .xcscheme に
+      # 該当属性が入らないことを確認）ため撤去した
+      debugEnabled: false
+      targets:
+        - UappOsAgentRunner

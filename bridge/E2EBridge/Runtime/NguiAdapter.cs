@@ -174,24 +174,25 @@ namespace E2EBridge
         /// NGUI はコライダー（イベント受け手）とウィジェット（見た目）が親子に分かれる構成が
         /// 多いため、ヒット結果と対象の祖先・子孫関係を双方向で許容する。
         /// </summary>
-        public static (bool hittable, string blockedBy) Probe(GameObject target, Vector2 screenPos)
+        // blocker の意味は RaycastProbe.Probe と同じ（blockedBy がパスのときだけ非 null）
+        public static (bool hittable, string blockedBy, GameObject blocker) Probe(GameObject target, Vector2 screenPos)
         {
-            if (!Available) return (false, "NGUI_NOT_PRESENT");
+            if (!Available) return (false, "NGUI_NOT_PRESENT", null);
 
             var hit = (bool)_raycast.Invoke(null, new object[] { new Vector3(screenPos.x, screenPos.y, 0f) });
-            if (!hit) return (false, "NOTHING_HIT");
+            if (!hit) return (false, "NOTHING_HIT", null);
 
             var hitGo = _rayHitField?.GetValue(null) as GameObject;
             if (hitGo == null && _hoveredProp != null)
                 hitGo = _hoveredProp.GetValue(null) as GameObject;
-            if (hitGo == null) return (false, "NGUI_HIT_UNKNOWN");
+            if (hitGo == null) return (false, "NGUI_HIT_UNKNOWN", null);
 
             if (hitGo.transform == target.transform ||
                 hitGo.transform.IsChildOf(target.transform) ||
                 target.transform.IsChildOf(hitGo.transform))
-                return (true, null);
+                return (true, null, null);
 
-            return (false, HierarchyDumper.GetPath(hitGo.transform));
+            return (false, HierarchyDumper.GetPath(hitGo.transform), hitGo);
         }
 
         // ------------------------------------------------------------- event

@@ -5,6 +5,7 @@ import socket
 import threading
 
 import pytest
+from pathlib import Path
 
 from e2e_driver.client import (CONFIG_SEARCH_PARENTS, DEFAULT_PORT, BridgeClient,
                                WrongBridgeTargetError, resolve_port)
@@ -22,6 +23,8 @@ def work(monkeypatch, tmp_path):
     """
     monkeypatch.delenv("UAPP_E2E_BRIDGE_PORT", raising=False)
     monkeypatch.delenv("UAPP_E2E_EDITOR", raising=False)
+    monkeypatch.delenv("UAPP_E2E_IOS", raising=False)
+    monkeypatch.delenv("UAPP_E2E_IOS_BUNDLE_ID", raising=False)
     root = tmp_path.joinpath(*[f"w{i}" for i in range(CONFIG_SEARCH_PARENTS + 1)])
     root.mkdir(parents=True)
     monkeypatch.chdir(root)
@@ -114,8 +117,10 @@ def test_resolve_port_start_overrides_cwd(monkeypatch, work):
 class _FakeBridge:
     """行区切りJSONで ping に応答する最小サーバー（エディタ再生ブリッジの代役）。"""
 
-    def __init__(self, platform="FakeEditor"):
+    def __init__(self, platform="FakeEditor", app=None, project=None):
         self.platform = platform
+        self.app = app
+        self.project = project
         self.sock = socket.socket()
         self.sock.bind(("127.0.0.1", 0))
         self.sock.listen(1)
@@ -130,6 +135,10 @@ class _FakeBridge:
             result = {"bridge": "1.0"}
             if self.platform is not None:
                 result["platform"] = self.platform
+            if self.project is not None:
+                result["project"] = self.project
+            if self.app is not None:
+                result["app"] = self.app
             response = {"id": request["id"], "ok": True, "result": result}
             conn.sendall((json.dumps(response) + "\n").encode("utf-8"))
 
@@ -170,13 +179,201 @@ def test_editor_mode_rejects_missing_platform(monkeypatch, work):
 
 
 def test_editor_mode_accepts_editor_target(monkeypatch, work):
-    """エディタ（platform が Editor で終わる）なら素通しする。"""
+    """エディタ（platform が Editor で終わる）＋プロジェクト一致なら素通しする。"""
     monkeypatch.setenv("UAPP_E2E_EDITOR", "1")
-    bridge = _FakeBridge(platform="OSXEditor")
+    monkeypatch.setenv("UAPP_E2E_PROJECT_PATH", str(work))
+    bridge = _FakeBridge(platform="OSXEditor", project=str(work))
     _write_config(work, bridge.port)
     client = BridgeClient(timeout=5.0).connect(retries=1)
     assert client.ping()["platform"] == "OSXEditor"
     client.close()
+
+
+# --- 接続先が「別プロジェクトのエディタ」でないことの検証（issue #26）---------
+# platform だけでは、同じ editorBridgePort を先に握った別プロジェクトのエディタを
+# 見分けられない。UI が似ていればテストが通ってしまう＝偽の緑。
+
+def test_editor_mode_rejects_other_project_editor(monkeypatch, work, tmp_path):
+    """別プロジェクトのエディタ（project が違う）は明示的に失敗する。"""
+    monkeypatch.setenv("UAPP_E2E_EDITOR", "1")
+    monkeypatch.setenv("UAPP_E2E_PROJECT_PATH", str(work))
+    other = tmp_path / "other-project"
+    other.mkdir()
+    bridge = _FakeBridge(platform="OSXEditor", project=str(other))
+    _write_config(work, bridge.port)
+    with pytest.raises(WrongBridgeTargetError) as e:
+        BridgeClient(timeout=5.0).connect(retries=1)
+    # 期待と実際の両方が読み取れること（原因の特定に要る）
+    assert str(work) in str(e.value)
+    assert str(other) in str(e.value)
+    assert "editorBridgePort" in str(e.value)
+
+
+def test_editor_mode_rejects_missing_project(monkeypatch, work):
+    """project を返さない古い計装は通さない（fail-closed。再ビルドを促す）。"""
+    monkeypatch.setenv("UAPP_E2E_EDITOR", "1")
+    monkeypatch.setenv("UAPP_E2E_PROJECT_PATH", str(work))
+    bridge = _FakeBridge(platform="OSXEditor", project=None)
+    _write_config(work, bridge.port)
+    with pytest.raises(WrongBridgeTargetError) as e:
+        BridgeClient(timeout=5.0).connect(retries=1)
+    assert "再ビルド" in str(e.value)
+
+
+def test_editor_mode_rejects_unknown_expected_project(monkeypatch, work):
+    """期待するプロジェクトを特定できないときも止める（確認できないまま進めない）。"""
+    monkeypatch.setenv("UAPP_E2E_EDITOR", "1")
+    monkeypatch.delenv("UAPP_E2E_PROJECT_PATH", raising=False)
+    bridge = _FakeBridge(platform="OSXEditor", project=str(work))
+    _write_config(work, bridge.port)   # Assets/ProjectSettings は作らない＝特定できない
+    with pytest.raises(WrongBridgeTargetError) as e:
+        BridgeClient(timeout=5.0).connect(retries=1)
+    assert "UAPP_E2E_PROJECT_PATH" in str(e.value)
+
+
+def test_editor_mode_accepts_case_differing_path(monkeypatch, work):
+    """大小文字だけ違う表記でも同じプロジェクトなら通す。
+
+    大小文字を区別しないボリューム（macOS 既定 / Windows）で表記が揺れると、
+    文字列比較では**正当な実行が止まる**（安全側ではなく、ただの誤検知）。
+    """
+    monkeypatch.setenv("UAPP_E2E_EDITOR", "1")
+    monkeypatch.setenv("UAPP_E2E_PROJECT_PATH", str(work))
+    swapped = str(work).upper()
+    if not Path(swapped).exists():          # 大小文字を区別するボリュームでは検証不能
+        pytest.skip("大小文字を区別するファイルシステムのため対象外")
+    bridge = _FakeBridge(platform="OSXEditor", project=swapped)
+    _write_config(work, bridge.port)
+    BridgeClient(timeout=5.0).connect(retries=1).close()
+
+
+def test_editor_mode_accepts_path_outside_this_namespace(monkeypatch, work):
+    """こちらに実在しないパスでも、報告値と一致するなら通す。
+
+    ドライバとエディタが別の名前空間にいる構成（WSL / Docker / リモートマウント）では、
+    エディタが報告するパスはこちらに存在しない。**実在を必須にすると正しいエディタを
+    永久に拒否する**（レビュー 3 周目の指摘）。文字列の一致は「エディタ自身がそのパスだと
+    答えた」という正当な一致証拠。
+    """
+    monkeypatch.setenv("UAPP_E2E_EDITOR", "1")
+    remote = str(work / "no-such-project")     # 実在しない＝別名前空間の見え方を模す
+    monkeypatch.setenv("UAPP_E2E_PROJECT_PATH", remote)
+    bridge = _FakeBridge(platform="OSXEditor", project=remote)
+    _write_config(work, bridge.port)
+    BridgeClient(timeout=5.0).connect(retries=1).close()
+
+
+def test_editor_mode_rejects_different_nonexistent_paths(monkeypatch, work):
+    """実在しないパス同士でも、違うものは通さない。"""
+    monkeypatch.setenv("UAPP_E2E_EDITOR", "1")
+    monkeypatch.setenv("UAPP_E2E_PROJECT_PATH", str(work / "project-a"))
+    bridge = _FakeBridge(platform="OSXEditor", project=str(work / "project-b"))
+    _write_config(work, bridge.port)
+    with pytest.raises(WrongBridgeTargetError):
+        BridgeClient(timeout=5.0).connect(retries=1)
+
+
+def test_editor_mode_finds_project_from_adopter_layout(monkeypatch, tmp_path):
+    """導入先レイアウト（<project>/uapp_e2e/e2e-config.json）でも特定できる。"""
+    monkeypatch.setenv("UAPP_E2E_EDITOR", "1")
+    monkeypatch.delenv("UAPP_E2E_PROJECT_PATH", raising=False)
+    project = tmp_path / "MyGame"
+    (project / "Assets").mkdir(parents=True)
+    (project / "ProjectSettings").mkdir()
+    kit = project / "uapp_e2e"
+    (kit / "driver").mkdir(parents=True)
+    bridge = _FakeBridge(platform="OSXEditor", project=str(project))
+    _write_config(kit, bridge.port)
+    monkeypatch.chdir(kit / "driver")
+    BridgeClient(timeout=5.0).connect(retries=1).close()
+
+
+def test_editor_mode_finds_project_from_config_layout(monkeypatch, work):
+    """宣言が無くても、e2e-config.json のあるツリーから Unity プロジェクトを特定できる。"""
+    monkeypatch.setenv("UAPP_E2E_EDITOR", "1")
+    monkeypatch.delenv("UAPP_E2E_PROJECT_PATH", raising=False)
+    (work / "Assets").mkdir()
+    (work / "ProjectSettings").mkdir()
+    bridge = _FakeBridge(platform="OSXEditor", project=str(work))
+    _write_config(work, bridge.port)
+    client = BridgeClient(timeout=5.0).connect(retries=1)
+    client.close()
+
+
+# --- iOS シミュレータモードの接続先検証（エディタ直結ガードと同じ約束） ---------
+# シミュレータのアプリはホストのポート名前空間で直接 LISTEN するため、
+# adb forward（デバイス）やエディタと同じ番号を選ぶと接続を取り違える。
+
+
+def test_ios_mode_rejects_non_ios_target(monkeypatch, work):
+    """UAPP_E2E_IOS=1 なのに接続先が iOS プレイヤーでなければ止める（偽の緑防止）。"""
+    monkeypatch.setenv("UAPP_E2E_IOS", "1")
+    bridge = _FakeBridge(platform="Android")
+    _write_config(work, bridge.port)
+    with pytest.raises(WrongBridgeTargetError) as e:
+        BridgeClient(timeout=5.0).connect(retries=1)
+    # 原因と対処が読み取れること
+    assert "iosSimulatorPort" in str(e.value)
+    assert "Android" in str(e.value)
+
+
+def test_ios_mode_rejects_missing_platform(monkeypatch, work):
+    """platform が無い応答も通さない（相手が E2EBridge でない/壊れている。fail-closed）。"""
+    monkeypatch.setenv("UAPP_E2E_IOS", "1")
+    bridge = _FakeBridge(platform=None)
+    _write_config(work, bridge.port)
+    with pytest.raises(WrongBridgeTargetError):
+        BridgeClient(timeout=5.0).connect(retries=1)
+
+
+def test_ios_mode_accepts_iphone_player(monkeypatch, work):
+    """iOS プレイヤー（IPhonePlayer）なら素通しする。"""
+    monkeypatch.setenv("UAPP_E2E_IOS", "1")
+    bridge = _FakeBridge(platform="IPhonePlayer")
+    _write_config(work, bridge.port)
+    client = BridgeClient(timeout=5.0).connect(retries=1)
+    assert client.ping()["platform"] == "IPhonePlayer"
+    client.close()
+
+
+def test_ios_mode_rejects_wrong_bundle_id(monkeypatch, work):
+    """platform が正しくても bundle id が違えば止める（同ポートを握る別 iOS アプリの排除）。"""
+    monkeypatch.setenv("UAPP_E2E_IOS", "1")
+    monkeypatch.setenv("UAPP_E2E_IOS_BUNDLE_ID", "com.example.expected")
+    bridge = _FakeBridge(platform="IPhonePlayer", app="com.example.other")
+    _write_config(work, bridge.port)
+    with pytest.raises(WrongBridgeTargetError) as e:
+        BridgeClient(timeout=5.0).connect(retries=1)
+    assert "com.example.other" in str(e.value)
+
+
+def test_ios_mode_accepts_matching_bundle_id(monkeypatch, work):
+    """bundle id まで一致すれば素通しする。"""
+    monkeypatch.setenv("UAPP_E2E_IOS", "1")
+    monkeypatch.setenv("UAPP_E2E_IOS_BUNDLE_ID", "com.example.expected")
+    bridge = _FakeBridge(platform="IPhonePlayer", app="com.example.expected")
+    _write_config(work, bridge.port)
+    client = BridgeClient(timeout=5.0).connect(retries=1)
+    assert client.ping()["app"] == "com.example.expected"
+    client.close()
+
+
+def test_conflicting_declarations_fail_before_connect(monkeypatch, work):
+    """UAPP_E2E_EDITOR と UAPP_E2E_IOS の同時宣言は接続前に止める（意図が判定できない）。"""
+    monkeypatch.setenv("UAPP_E2E_EDITOR", "1")
+    monkeypatch.setenv("UAPP_E2E_IOS", "1")
+    with pytest.raises(WrongBridgeTargetError):
+        BridgeClient(port=1, timeout=1.0).connect(retries=1)
+
+
+def test_ios_mode_blocks_adb(monkeypatch, work):
+    """UAPP_E2E_IOS=1 では adb の使用が明示エラーになる（Android 端末の誤検証防止）。"""
+    monkeypatch.setenv("UAPP_E2E_IOS", "1")
+    from e2e_driver import adb
+
+    with pytest.raises(adb.AdbNotFoundError) as e:
+        adb._run("shell", "echo", "x")
+    assert "UAPP_E2E_IOS" in str(e.value)
 
 
 def test_device_mode_does_not_check_target(monkeypatch, work):
@@ -225,3 +422,112 @@ def test_declared_editor_mode_is_checked_regardless_of_port_source(monkeypatch, 
         else:
             with pytest.raises(WrongBridgeTargetError):
                 BridgeClient(port=bridge.port, timeout=5.0).connect(retries=1)
+
+
+# ---------------------------------------------------------------- §25/§27 導入先要望の回帰
+
+def test_blocked_error_carries_blocker_components():
+    """遮蔽者のコンポーネント型名を属性とメッセージの両方で持つ（導入先要望:
+    「押して退けるものか・待つべきものか」をパスの命名に依存せず機械判定したい）。"""
+    from e2e_driver.client import BlockedError
+    e = BlockedError("Canvas/Start", "Canvas/Shield", ["Image", "DialogShield"])
+    assert e.blocked_by_components == ["Image", "DialogShield"]
+    assert "DialogShield" in str(e)
+
+
+def test_blocked_error_without_components_is_unchanged():
+    """従来どおりの 2 引数呼び出しは挙動が変わらない（後方互換）。"""
+    from e2e_driver.client import BlockedError
+    e = BlockedError("Canvas/Start", "NOT_RAYCASTABLE")
+    assert e.blocked_by_components == []
+    assert "コンポーネント" not in str(e)
+    assert e.hopeless
+
+
+def test_wait_for_bridge_gives_up_after_timeout(monkeypatch, work):
+    """接続できないままタイムアウトしたら ConnectionError（無限に待たない）。"""
+    import time as _time
+    from e2e_driver.client import wait_for_bridge
+    monkeypatch.delenv("UAPP_E2E_EDITOR", raising=False)
+    monkeypatch.delenv("UAPP_E2E_BRIDGE_PORT", raising=False)
+    # 確実に閉じているポートを使う（bind して即 close した番号は直後は未使用）
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    closed_port = probe.getsockname()[1]
+    probe.close()
+    start = _time.monotonic()
+    with pytest.raises(ConnectionError):
+        wait_for_bridge(timeout=2.0, port=closed_port, interval=0.5)
+    assert _time.monotonic() - start < 30  # 既定 connect(30 回 ×1 秒) に落ちていないこと
+
+
+def test_wait_for_bridge_deadline_covers_unresponsive_listener(monkeypatch, work):
+    """接続だけ受理して ping に応答しないリスナーでも実時間で諦める（外部レビュー指摘:
+    回数換算だと 1 試行ごとにソケット timeout 30 秒が積み上がり、timeout=2 が分単位になる）。"""
+    import threading
+    import time as _time
+    from e2e_driver.client import wait_for_bridge
+    monkeypatch.delenv("UAPP_E2E_EDITOR", raising=False)
+    monkeypatch.delenv("UAPP_E2E_BRIDGE_PORT", raising=False)
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(5)
+    port = server.getsockname()[1]
+    accepted: list = []
+    stop = threading.Event()
+
+    def sink():
+        server.settimeout(0.2)
+        while not stop.is_set():
+            try:
+                conn, _ = server.accept()
+                accepted.append(conn)  # 受理するだけで何も返さない
+            except OSError:
+                continue
+
+    thread = threading.Thread(target=sink, daemon=True)
+    thread.start()
+    try:
+        start = _time.monotonic()
+        with pytest.raises(ConnectionError):
+            wait_for_bridge(timeout=2.0, port=port, interval=0.2)
+        assert _time.monotonic() - start < 10  # 30 秒 × 試行回数に膨らんでいないこと
+        # 短い timeout も守る（ソケット timeout を下限で丸めると 0.3 秒指定が
+        # 0.5 秒級に化ける — 再レビュー指摘。ここは膨張の検出なので余裕は 1 秒とる）
+        start = _time.monotonic()
+        with pytest.raises(ConnectionError):
+            wait_for_bridge(timeout=0.3, port=port, interval=0.1)
+        assert _time.monotonic() - start < 1.3
+    finally:
+        stop.set()
+        thread.join(timeout=2)
+        for conn in accepted:
+            conn.close()
+        server.close()
+
+
+def test_wait_for_bridge_timeout_zero_probes_once(monkeypatch, work):
+    """timeout=0 は「即時プローブ 1 回」（再レビュー指摘: deadline 判定をループ先頭に
+    置くと 0 や負値が一度も接続せずに失敗する退行になる）。"""
+    from e2e_driver.client import wait_for_bridge
+    monkeypatch.delenv("UAPP_E2E_EDITOR", raising=False)
+    monkeypatch.delenv("UAPP_E2E_BRIDGE_PORT", raising=False)
+    bridge = _FakeBridge(platform="Android")
+    client = wait_for_bridge(timeout=0, port=bridge.port)
+    try:
+        assert client.ping()["platform"] == "Android"
+    finally:
+        client.close()
+
+
+def test_wait_for_bridge_returns_connected_client(monkeypatch, work):
+    """ブリッジが応答すれば接続済みクライアントが返る（Play またぎの再接続部品）。"""
+    from e2e_driver.client import wait_for_bridge
+    monkeypatch.delenv("UAPP_E2E_EDITOR", raising=False)
+    monkeypatch.delenv("UAPP_E2E_BRIDGE_PORT", raising=False)
+    bridge = _FakeBridge(platform="Android")
+    client = wait_for_bridge(timeout=5.0, port=bridge.port)
+    try:
+        assert client.ping()["platform"] == "Android"
+    finally:
+        client.close()

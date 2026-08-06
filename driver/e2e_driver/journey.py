@@ -18,13 +18,14 @@ import os
 import re
 import shutil
 import time
+import warnings
 import webbrowser
 from datetime import datetime
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 from typing import Any
 
-from . import adb, editor_screenshot
+from . import adb, editor_screenshot, ios_device_screenshot, ios_screenshot, os_agent
 from .client import BridgeClient, resolve_port
 from .gestures import Gestures
 
@@ -35,11 +36,22 @@ _DATA_SLOT = '<script id="journey-data" type="application/json">null</script>'
 
 # dump ノードからボタン情報として転記するキー
 _BUTTON_KEYS = ("path", "name", "text", "ui", "rect", "center",
-                "interactable", "hittable", "blockedBy")
+                "interactable", "hittable", "blockedBy", "blockedByComponents")
 
 
 def _now() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def _parse_positive_int(raw: str | None) -> int | None:
+    """環境変数の正整数を読む（不正値は None＝等倍。ここで落として撮影全体を失わない）。"""
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if value > 0 else None
 
 
 def _safe_name(screen_id: str) -> str:
@@ -81,6 +93,7 @@ class JourneyRecorder:
         self._current_screen: str | None = None
         self._current_screen_test: str | None = None
         self._pending_via: str | None = None
+        self._last_screenshot_source: str | None = None
         if self.enabled:
             self._load()
 
@@ -104,6 +117,9 @@ class JourneyRecorder:
             "scene": dump.get("scene"),
             "screen": dump.get("screen"),
             "screenshot": self._screencap(screen_id),
+            # **どの手段で撮ったかを残す**（画像があっても経路が違えば写る内容が違う。
+            # 「エージェント経由のつもりが計装側だった」を後から判別できるようにする）
+            "screenshotSource": self._last_screenshot_source,
             "capturedAt": _now(),
             "buttons": _extract_buttons(dump.get("nodes", [])),
         }
@@ -211,17 +227,62 @@ class JourneyRecorder:
 
     def _screencap(self, screen_id: str) -> str | None:
         rel = f"screens/{_safe_name(screen_id)}.png"
+        # **毎回クリアする**。残したままだと、全経路が失敗した回に前回の値が引き継がれ、
+        # `screenshot: null` なのに `screenshotSource: "os-agent"` という嘘の記録になる
+        self._last_screenshot_source = None
+        if os_agent.available():
+            # **OS レイヤーエージェントが最優先**。XCUITest 経由で「OS が合成した画面」を撮るので、
+            # WebView・ネイティブダイアログ・ソフトキーボードも写る。
+            # **明示的に有効化されている以上、失敗は黙って落とさない**（別の手段で撮れてしまうと、
+            # 「エージェント経由で撮れた」と誤解したまま記録が残る）
+            try:
+                os_agent.screenshot(self.out_dir / rel)
+                self._last_screenshot_source = "os-agent"
+                return rel
+            except Exception as e:
+                warnings.warn(f"OS エージェントでの撮影に失敗しました（別の手段へ切り替えます）: {e}")
         if editor_screenshot.available():
             # エディタ直結では adb が無いが、Unity CLI の screenshot で Game view を撮れる。
             # 画像が無いとレポートが「画面の分からない一覧」になり、デバイス実行と価値が違いすぎる
             if editor_screenshot.capture(self.out_dir / rel):
+                self._last_screenshot_source = "editor-cli"
                 return rel
-            return None
+            # 失敗しても下の手段へ落とす（撮れないまま諦めない。レビュー指摘）
+        if ios_screenshot.available():
+            # iOS シミュレータでは simctl で実際の画面を撮る（adb は明示エラーになるため通らない）
+            if ios_screenshot.capture(self.out_dir / rel):
+                self._last_screenshot_source = "simctl"
+                return rel
+        if ios_device_screenshot.available():
+            # iOS 実機は OS 層（idevicescreenshot）を優先する。**合成後の画面**が撮れるので
+            # WebView・ネイティブダイアログ・キーボードも写る（ブリッジ側は Unity の描画のみ）。
+            # iOS 17 以降はこの経路が使えないので、失敗したら下のブリッジ側へ落とす
+            if ios_device_screenshot.capture(self.out_dir / rel):
+                self._last_screenshot_source = "idevicescreenshot"
+                return rel
         try:
             adb.screencap(self.out_dir / rel)
+            self._last_screenshot_source = "adb"
             return rel
         except Exception:
-            return None  # adb もエディタ経路も使えない環境ではスクショなしで記録する
+            pass  # adb が使えない経路（iOS 実機など）はブリッジ側の撮影へ回す
+        # **ブリッジ自身に撮らせる経路は既定で使わない**（`UAPP_E2E_BRIDGE_SCREENSHOT=1` で有効化）。
+        # アプリ内キャプチャは外部ツールが要らない代わりに、**撮る瞬間だけアプリ側の
+        # フレームにコストがかかる**（読み戻しは非同期化してあるが、PNG エンコードは残る）。
+        # **その影響の大きさは実プロジェクトの描画負荷と解像度に依存し、サンプルでの計測では
+        # 判断できない**ので、標準では有効にせず、必要な人が選ぶ形にしてある。
+        # iOS 実機で OS 層の手段が両方とも使えないとき（16 以前で idevicescreenshot が無い、
+        # 17 以降で OS レイヤーエージェントを起動していない・端末側の UI オートメーションを
+        # 有効にできない）だけ、これが最後の手段になる。要るなら明示的に有効化する
+        if os.environ.get("UAPP_E2E_BRIDGE_SCREENSHOT") != "1":
+            return None
+        try:
+            max_width = _parse_positive_int(os.environ.get("UAPP_E2E_BRIDGE_SCREENSHOT_MAX_WIDTH"))
+            self.client.screenshot(self.out_dir / rel, max_width=max_width)
+            self._last_screenshot_source = "bridge"
+            return rel
+        except Exception:
+            return None  # 古い計装（screenshot 未対応）や撮影失敗では画像なしで記録する
 
     def _load(self) -> None:
         path = self.out_dir / "journey.json"
@@ -525,7 +586,16 @@ def main(argv: list[str] | None = None) -> None:
                             help="ngui-legacy を指定すると ngui_tap を使う（既定: e2e-config.json から自動判定）")
         parser.add_argument("--no-open", action="store_true",
                             help="起動時にブラウザを自動で開かない（AI・CI用）")
+        parser.add_argument("--editor", action="store_true",
+                            help="エディタ再生へ繋ぐ（UAPP_E2E_EDITOR=1 を立てて接続先を検査する。"
+                                 "**探索モードは実際にタップするので、宛先の取り違えは実害になる**）")
         args = parser.parse_args(argv[1:])
+        # **エディタ宛だと分かっているなら宣言する**。宣言があるときだけドライバが
+        # 「本当にこのプロジェクトのエディタか」を確かめる（platform ＋ project 照合）。
+        # 探索モードは画面を実際に操作するため、別プロジェクトのエディタや
+        # デバイス実行が残した forward へ繋いだままでは実害が出る
+        if args.editor:
+            os.environ["UAPP_E2E_EDITOR"] = "1"
         serve(args.journey, http_port=args.http_port, bridge_host=args.bridge_host,
               bridge_port=args.bridge_port, ui_type=args.ui_type,
               open_browser=not args.no_open)

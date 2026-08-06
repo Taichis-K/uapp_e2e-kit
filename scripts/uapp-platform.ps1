@@ -61,6 +61,33 @@ function Get-UappHostMutexName {
     return "Global\$Name"
 }
 
+function Test-UappIosSupported {
+    <#
+      .SYNOPSIS
+      iOS 経路（build-ios.ps1 / run-ios-e2e.ps1）が使える OS か。
+
+      .NOTES
+      判断基準は「xcodebuild / simctl が存在しうる OS か」＝ macOS。
+      呼び出し側に OS 分岐を書かせないための意味ベースの解決関数
+      （check-portability の「OS 分岐は uapp-platform.ps1 に集約」規則と整合させる）。
+    #>
+    return -not (Test-UappWindows)
+}
+
+function Get-UappEditorPlayMutexName {
+    <#
+      .SYNOPSIS
+      「このプロジェクトのエディタ Play を操作する」排他 Mutex の名前を返す。
+
+      .NOTES
+      run-e2e.ps1 の -Editor と restart-editor-play.ps1 が**同じ名前を共有する**ためのヘルパ。
+      名前の組み立てが片方にだけあると、もう片方が別名の Mutex を取って排他が素通りする
+      （restart-editor-play が別ターミナルの E2E 実行中に editor_stop してしまう）。
+    #>
+    param([Parameter(Mandatory)][string]$ProjectDir)
+    return Get-UappHostMutexName ("uapp_e2e-editor-" + (($ProjectDir.ToLowerInvariant() -replace "[^a-z0-9]", "-")))
+}
+
 function Join-UappPath {
     <#
       .SYNOPSIS
@@ -501,6 +528,60 @@ function Save-UappNativeOutput {
     return $proc.ExitCode
 }
 
+function Stop-UappProcessTree {
+    <#
+      .SYNOPSIS
+      プロセスを**子孫ごと**強制終了する（ウォッチドッグの回収用）。
+
+      .NOTES
+      `Stop-Process` は子孫へ再帰しない。ラッパー（pwsh）だけ殺すと、その下で動く実処理
+      （xcodebuild / pytest / Unity 等）が孤児化してポートやビルド出力を握り続ける（レビュー指摘）。
+        Windows … taskkill /T /F（プロセスツリー終了の標準手段）
+        Unix    … ps の親子表（pid,ppid）を辿って子孫を列挙し、子孫から順に SIGKILL
+      列挙とキルの間に生まれた孫は取り逃す可能性があるが、ウォッチドッグの回収では
+      「実処理の大半を確実に止める」ことが目的で、残骸は次回実行のガードが検出する。
+    #>
+    param([Parameter(Mandatory)][int]$ProcessId)
+    if (Test-UappWindows) {
+        # **実体を解決して呼ぶ**（裸で呼ぶと同名の関数・エイリアスへ入りうる。ps で踏んだ型と同じ）。
+        # 失敗を黙って正常終了にしない — ツリーが残ると、直したい孤児化がそのまま再発する
+        $taskkill = Get-UappCommandPath "taskkill"
+        if ($taskkill) {
+            & $taskkill /PID $ProcessId /T /F 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) { return }
+            Write-Warning "taskkill /T が失敗しました（exit=$LASTEXITCODE）。単体 kill にフォールバックします（子孫が残る可能性）"
+        } else {
+            Write-Warning "taskkill が見つかりません。単体 kill にフォールバックします（子孫が残る可能性）"
+        }
+        Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
+        return
+    }
+    $psExe = Get-UappCommandPath "ps"
+    if (-not $psExe) {
+        Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
+        return
+    }
+    $childrenOf = @{}
+    foreach ($line in @(& $psExe -axo "pid=,ppid=" 2>$null)) {
+        if ($line -match '^\s*(\d+)\s+(\d+)') {
+            $parent = [int]$Matches[2]
+            # `@($childrenOf[$parent]) + ...` は初回に `@($null)` を作って null 要素が混入する
+            if (-not $childrenOf.ContainsKey($parent)) { $childrenOf[$parent] = @() }
+            $childrenOf[$parent] += [int]$Matches[1]
+        }
+    }
+    $all = @()
+    $queue = @([int]$ProcessId)
+    while ($queue.Count -gt 0) {
+        $current = $queue[0]
+        $queue = @($queue | Select-Object -Skip 1)
+        $all += $current
+        if ($childrenOf.ContainsKey($current)) { $queue += $childrenOf[$current] }
+    }
+    [array]::Reverse($all)   # 子孫から先に止める
+    foreach ($procId in $all) { Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue }
+}
+
 function Test-UappPathEqual {
     <#
       .SYNOPSIS
@@ -522,6 +603,34 @@ function Test-UappPathEqual {
         [Parameter(Mandatory)][string]$B
     )
     return [string]::Equals($A, $B, [System.StringComparison]::Ordinal)
+}
+
+function Get-UappDevOnlyScript {
+    <#
+      .SYNOPSIS
+      導入先へ配らない「開発専用スクリプト」の一覧を返す。
+
+      .NOTES
+      **配布経路が 2 つあるので、この一覧は 1 か所に置く**:
+        package-kit.ps1 …… zip を作るとき
+        install-to-project.ps1 … 開発リポジトリから直接導入するとき
+      片方だけに書くと、**もう片方の経路でだけ未配布のはずのものが導入先へ届く**。
+      実際に build-ios.ps1 / run-ios-e2e.ps1 が installer 側の列挙から漏れており、
+      「iOS はキットに含まれていない」という文書の断定が開発リポジトリ経由では嘘になっていた
+      （2026-08-06 のレビューで発覚）。**しかも docs/06 のリリース前検証は展開した zip から
+      実行すると定めているため、この向きの漏れは検証では原理的に捕まらない**。
+
+      **配るスクリプトの側は列挙しない**（v0.1.6 で unity-editor-status.ps1 が
+      配布リストから漏れ、キットの文書が案内するコマンドが導入先に存在しない状態になった）。
+      除外だけを列挙すれば、配布対象が増えたときは何もしなくても届く。
+    #>
+    return @(
+        # iOS 経路（build-ios.ps1 / run-ios-e2e.ps1）は kit 0.1.9 で統合済み＝配布する
+        # （SETUP の iOS 節・スキルの導線・E2EBridge.Editor.BuildEntry の iOS エントリ・
+        # oslayer/ の同梱と揃えて解除した。issue #27）
+        "install-to-project.ps1", "package-kit.ps1", "publish-kit.ps1", "verify-all.ps1",
+        "check-portability.ps1"
+    )
 }
 
 function Start-UappBackgroundProcess {

@@ -69,6 +69,94 @@ namespace E2EBridge.Editor
                 EditorApplication.Exit(1);
         }
 
+        /// <summary>
+        /// iOS シミュレータ向けビルド（Xcode プロジェクトを出力。macOS のみ）。
+        /// 使い方は build-ios.ps1 参照（サンプル以外の既定エントリ）。
+        /// </summary>
+        public static void BuildIosSimulator()
+        {
+            BuildIos(deviceSdk: false, defaultOutput: "uapp_e2e/Builds/ios-sim");
+        }
+
+        /// <summary>
+        /// iOS 実機向けビルド（Xcode プロジェクトを出力。署名は xcodebuild 側の automatic signing）。
+        /// bundle id をチーム配下の値にする必要があれば -appId で上書きする（一時変更・復元される）。
+        /// </summary>
+        public static void BuildIosDevice()
+        {
+            BuildIos(deviceSdk: true, defaultOutput: "uapp_e2e/Builds/ios-device");
+        }
+
+        private static void BuildIos(bool deviceSdk, string defaultOutput)
+        {
+            var output = GetArg("-buildOutput") ?? defaultOutput;
+            var release = HasArg("-release");
+            var appId = GetArg("-appId");   // 未指定ならプロジェクトの設定を変えない
+            var target = NamedBuildTarget.iOS;
+
+            var scenes = EditorBuildSettings.scenes.Where(s => s.enabled).Select(s => s.path).ToArray();
+            if (scenes.Length == 0)
+            {
+                Debug.LogError("[E2EBridge.BuildEntry] EditorBuildSettings に有効なシーンがありません");
+                EditorApplication.Exit(1);
+                return;
+            }
+
+            // **一時変更する項目（appId・SDK・シミュレータのアーキ・define）は必ず元へ戻す**
+            // （SimulatorSDK が残ると以後の実機ビルドが壊れ、計装 define が残ると実機成果物へ
+            // 計装が混入して本番分離を破る。iOS は「常用しないターゲット」のプロジェクトが多く、
+            // 残留がすぐには発覚しない）。Android 側（BuildAndroid）が定常設定を永続化するのとは
+            // 方針が違うことに注意
+            var prevAppId = PlayerSettings.GetApplicationIdentifier(target);
+            var prevSdk = PlayerSettings.iOS.sdkVersion;
+            var prevSimArch = PlayerSettings.iOS.simulatorSdkArchitecture;
+            var prevDefines = PlayerSettings.GetScriptingDefineSymbols(target);
+            var failed = false;
+            try
+            {
+                if (!string.IsNullOrEmpty(appId))
+                    PlayerSettings.SetApplicationIdentifier(target, appId);
+                PlayerSettings.iOS.sdkVersion = deviceSdk ? iOSSdkVersion.DeviceSDK : iOSSdkVersion.SimulatorSDK;
+                if (!deviceSdk)
+                {
+                    // 既定の X86_64 のままだと Apple Silicon では Rosetta 実行になる（隠れ依存）。
+                    // Universal なら xcodebuild 側の ARCHS 指定だけで x86_64 / arm64 どちらも作れる
+                    PlayerSettings.iOS.simulatorSdkArchitecture = AppleMobileArchitectureSimulator.Universal;
+                }
+                SetDefine(target, BridgeDefine, enabled: !release);
+
+                Directory.CreateDirectory(Path.GetFullPath(output));
+
+                var options = new BuildPlayerOptions
+                {
+                    scenes = scenes,
+                    target = BuildTarget.iOS,
+                    locationPathName = output,
+                    options = release ? BuildOptions.None : BuildOptions.Development
+                };
+
+                var report = BuildPipeline.BuildPlayer(options);
+                var summary = report.summary;
+                Debug.Log($"[E2EBridge.BuildEntry] result={summary.result} errors={summary.totalErrors} " +
+                          $"output={output} bridge={(release ? "OFF" : "ON")} sdk={(deviceSdk ? "Device" : "Simulator")}");
+
+                // **ここで EditorApplication.Exit を呼ばない**。Exit は即時終了で finally の実行を
+                // 保証しない（Unity 公式仕様）ため、失敗をフラグに留めて復元後に終了する
+                failed = summary.result != BuildResult.Succeeded;
+            }
+            finally
+            {
+                PlayerSettings.SetApplicationIdentifier(target, prevAppId);
+                PlayerSettings.iOS.sdkVersion = prevSdk;
+                PlayerSettings.iOS.simulatorSdkArchitecture = prevSimArch;
+                PlayerSettings.SetScriptingDefineSymbols(target, prevDefines);
+                // Exit(1) は通常のシャットダウン（保存）を行わないため明示保存が必須
+                AssetDatabase.SaveAssets();
+            }
+            if (failed)
+                EditorApplication.Exit(1);
+        }
+
         /// <summary>-buildArch の解釈。未指定は実機(ARM64)・エミュレーター(X86_64)両対応の同梱。</summary>
         private static AndroidArchitecture ParseArch(string value)
         {

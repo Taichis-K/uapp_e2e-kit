@@ -74,6 +74,30 @@ if ($Purge) {
 } else {
     # キット所有のみ削除。プロジェクト所有（e2e-config.json / driver\tests\ の自作テストと conftest.py /
     # config\local.json / Builds\）は残す。列挙は install-to-project.ps1 の Get-KitOwnedFiles と同期
+    # oslayer はキット所有（0.1.9 で同梱）だが、中の DerivedData は導入先でビルドした
+    # 生成物＝プロジェクト所有（installer の manifest も除外している）。既定ではキット所有分だけ
+    # 消し、DerivedData が無ければディレクトリごと消える（-Purge は uapp_e2e\ 全体を消すので対象外）
+    $oslayerDir = Join-UappPath $kit "oslayer"
+    if (Test-Path $oslayerDir) {
+        $hasDerived = @(Get-ChildItem $oslayerDir -Recurse -Directory -Filter "DerivedData").Count -gt 0
+        if ($hasDerived) {
+            # 判定は oslayer からの**相対パスのセグメント一致**で行う（フルパスへの部分一致だと、
+            # 祖先ディレクトリ名に DerivedData を含む環境で全ファイルが除外され、削除が空振りする）
+            $inDerived = {
+                param($fullName)
+                (($fullName.Substring($oslayerDir.Length).TrimStart('\', '/')) -split '[\\/]') -contains 'DerivedData'
+            }
+            Get-ChildItem $oslayerDir -Recurse -File |
+                Where-Object { -not (& $inDerived $_.FullName) } |
+                ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force }
+            Get-ChildItem $oslayerDir -Recurse -Directory | Sort-Object FullName -Descending |
+                Where-Object { -not (& $inDerived $_.FullName) -and $_.Name -ne 'DerivedData' } |
+                ForEach-Object { Remove-IfEmpty $_.FullName }
+            Write-Host "  [削除] uapp_e2e\oslayer（キット所有分。DerivedData=ビルドキャッシュは保持）"
+        } else {
+            Remove-Reported $oslayerDir "uapp_e2e\oslayer"
+        }
+    }
     foreach ($rel in @("scripts", "driver\e2e_driver", "docs",
                        "CLAUDE.md", "AGENTS.md", "SETUP.md", "VERSION", "kit-manifest.json",
                        "driver\pytest.ini", "driver\requirements.txt",

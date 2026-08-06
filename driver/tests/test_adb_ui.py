@@ -34,8 +34,15 @@ def test_find_returns_none_when_absent():
 
 
 def test_missing_adb_binary_message(monkeypatch, tmp_path):
-    """adb バイナリが無いときは生の FileNotFoundError でなく、導入案内付き RuntimeError にする。"""
+    """adb バイナリが無いときは生の FileNotFoundError でなく、導入案内付き RuntimeError にする。
+
+    **接続先の宣言はすべて外してから確かめる**。`UAPP_E2E_IOS` を残したままだと
+    iOS 用のガードが先に働き、このテストの期待と食い違う — 導入先が
+    `run-ios-e2e.ps1`（`UAPP_E2E_IOS=1` を立てる）から既定の `tests` を回すと
+    **必ず 1 件赤くなる**（開発リポは tests を絞っているので露見しなかった）。
+    """
     monkeypatch.delenv("UAPP_E2E_EDITOR", raising=False)
+    monkeypatch.delenv("UAPP_E2E_IOS", raising=False)
     def _no_adb(*args, **kwargs):
         raise FileNotFoundError("adb")
     monkeypatch.setattr(adb.subprocess, "run", _no_adb)
@@ -60,6 +67,23 @@ def test_module_ports_survive_invalid_env():
         # 環境変数が実行開始時の値へ戻った状態（context 脱出後）で再ロードし、
         # モジュール定数を元どおりに再構築する（run-e2e 経由等で非既定ポートの場合も正しく復元）
         importlib.reload(adb)
+
+
+def test_ios_mode_blocks_adb(monkeypatch, tmp_path):
+    """UAPP_E2E_IOS=1 中の adb 使用も明示エラー（Android 端末を誤検証しないため）。
+
+    エディタ直結側だけ検査していて iOS 側が無かったため、
+    「iOS ガードが先に働く」ことに気づけなかった（0.1.9 のリリース前検証で発覚）。
+    """
+    monkeypatch.delenv("UAPP_E2E_EDITOR", raising=False)
+    monkeypatch.setenv("UAPP_E2E_IOS", "1")
+    called = []
+    monkeypatch.setattr(adb.subprocess, "run", lambda *a, **k: called.append(a))
+    with pytest.raises(adb.AdbNotFoundError, match="iOS"):
+        adb.forward()
+    with pytest.raises(adb.AdbNotFoundError, match="iOS"):
+        adb.screencap(tmp_path / "screen.png")
+    assert not called, "ガードは subprocess 実行前に効くこと"
 
 
 def test_editor_mode_blocks_adb(monkeypatch, tmp_path):

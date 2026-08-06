@@ -13,6 +13,38 @@ namespace E2EBridge
     /// </summary>
     public static class CommandProcessor
     {
+        /// <summary>
+        /// リクエストを解析してコマンド名を取り出す（**非同期コマンドの振り分け用**）。
+        /// 解析できないリクエストは false を返し、通常経路（Process）でエラー応答させる。
+        /// </summary>
+        public static bool TryPeek(string requestJson, out JObject req, out string cmd)
+        {
+            req = null; cmd = null;
+            try
+            {
+                req = JObject.Parse(requestJson);
+                cmd = (string)req["cmd"];
+                return cmd != null;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>非同期コマンド（フレーム終端を待つ等）の結果を成功応答へ包む。</summary>
+        public static string Success(JToken id, JToken result)
+        {
+            return new JObject { ["id"] = id, ["ok"] = true, ["result"] = result }.ToString(Formatting.None);
+        }
+
+        /// <summary>非同期コマンドの失敗を通常のエラー応答形式へ包む。</summary>
+        public static string Failure(JToken id, string code, string message)
+        {
+            return new JObject
+            {
+                ["id"] = id, ["ok"] = false,
+                ["error"] = new JObject { ["code"] = code, ["message"] = message }
+            }.ToString(Formatting.None);
+        }
+
         public static string Process(string requestJson)
         {
             JToken id = null;
@@ -90,6 +122,18 @@ namespace E2EBridge
                 ["appVersion"] = Application.version,
                 ["unity"] = Application.unityVersion,
                 ["platform"] = Application.platform.ToString(),
+                // **どのプロジェクトのエディタか**を識別するために返す（issue #26）。
+                // platform だけでは、同じ editorBridgePort を先に握った**別プロジェクトの
+                // エディタ**を見分けられず、UI が似ていれば偽の緑になる。
+                // 意味を持つのは Editor のときだけ（dataPath の親＝プロジェクトルート）なので、
+                // プレイヤーでは返さない（端末上のパスを送っても照合に使えないため）
+                ["project"] = Application.isEditor
+                    ? System.IO.Path.GetDirectoryName(Application.dataPath)
+                    : null,
+                // シーン名は「遷移を待つ」ポーリングの定番情報。dump の全ツリーを取らずに済むよう
+                // ping に含める（取得コストはほぼゼロ。導入先要望: ping().get("scene") が None で
+                // リセット待ちループが空回りした）
+                ["scene"] = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name,
                 ["screen"] = new JObject { ["w"] = Screen.width, ["h"] = Screen.height },
                 ["activePointers"] = TouchInjector.ActiveCount,
                 ["ngui"] = NguiAdapter.Available

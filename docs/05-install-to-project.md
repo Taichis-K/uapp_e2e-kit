@@ -138,12 +138,19 @@ Codex ユーザーでルートに `AGENTS.md` が無い場合は `-RootAgentsMd`
   "activity": "com.unity3d.player.UnityPlayerActivity",  // カスタムActivityならそれ
   "tests": "tests",                          // テストのパス（uapp_e2e/driver/からの相対。既定はディレクトリごと＝同梱の単体テスト＋疎通スモーク＋自作テスト）
   "orientation": "landscape",                // portrait | landscape | auto（横画面アプリはlandscape）
+  "editorResolution": "900x1600",            // 任意。-Editor の Game view 解像度。**UI の設計解像度が
+                                             // 既定（orientation 由来の 1080x2340 / 2340x1080）と違う
+                                             // プロジェクトは設定する** — 違う解像度で流すと座標決め打ちの
+                                             // テストだけが静かに壊れる。未指定なら orientation から導出
   "deviceRotation": null,                    // 縦横両対応で起動向きを固定したい場合 0-3
   "devicePort": 13333,                       // デバイス内でブリッジが待ち受けるポート（計装アプリを複数入れる場合はアプリごとに分ける）
   "editorBridgePort": 13343,                 // エディタ再生時の待ち受けポート。**ホスト側の forward ポート
                                              // （config/local.json の bridgePort。既定 13333）と別番号にする** —
                                              // デバイス実行が張った adb forward は実行後も残るため、同じ番号だと
                                              // 次にエディタ直結を回したときに接続先を奪われる。複数プロジェクト並行時も重複させない
+  "iosSimulatorPort": 13353,                 // iOS で使う場合は必須（macOS のみ。シミュレータのアプリはホストの
+                                             // ポートを直接 LISTEN するため、devicePort・editorBridgePort・
+                                             // ホスト側 forward のどれとも別番号にする。docs/02 参照）
   "uiType": "ugui-nis"                       // ugui-nis | ugui-legacy | ngui-nis | ngui-legacy（操作APIの選択に使う）
 }
 ```
@@ -172,6 +179,7 @@ Build Settings の Platform と突き合わせて判断する。判定は運用�
 |---|---|
 | `both`（既定）/ `device` | **Android に付いていること**（APK に計装を入れるため） |
 | `editor` | **どれか 1 つのターゲットに付いていること**（プラットフォームは問わない） |
+| `ios` | **ビルドのための恒久付与は不要**（`build-ios.ps1` の BuildEntry がビルド時に一時付与・復元する）。**例外はエディタ直結**: iOS プラットフォームのまま Play で使うなら iOS ターゲットへの付与が要る（エディタはアクティブターゲットの define でコンパイルするため。Windows でも可）。付与されている場合は注意が表示される — **BuildEntry を通さない本番 iOS ビルドには計装が混入する**ので、本番前に外す運用を明確に |
 
 ### 4.1 エディタ専用運用（Android を使わない）
 
@@ -185,6 +193,24 @@ Build Settings の Platform と突き合わせて判断する。判定は運用�
 - `e2e-config.json` の `package` / `activity` は**使わないので空でよい**（判定対象から外れる）
 - `config\local.json` の `avd` は不要
 - 実行は `run-e2e.ps1 -Editor` と `run-unity-tests.ps1 -Mode EditMode -Editor`
+
+### 4.2 iOS 専用運用（Android を使わない・実行は macOS のみ）
+
+iOS（シミュレータ/実機）だけで回す構成は `-Mode ios` で導入する（kit 0.1.9 で追加）。
+
+```powershell
+.\install-to-project.ps1 -ProjectPath <対象> -Mode ios
+```
+
+- Android の define・AVD・`activity` を要求しない。**ビルドのための恒久 define も不要**
+  （上の表のとおり BuildEntry が一時付与・復元。**エディタ直結を iOS プラットフォームのまま
+  使う場合だけ** iOS ターゲットへの付与が要る — その場合は本番混入への注意が表示される）
+- `e2e-config.json` の **`package` は bundle id として必須**、**`iosSimulatorPort` も必須**
+  （欠落・不正はポート検査の行で名指しされる）
+- `config\local.json` の `avd` は空のままでよい。実機を使うなら `iosTeamId` /
+  `iosDeviceAppId` / `iosOsAgentBundleId` を記入
+- 実行は `build-ios.ps1` → `run-ios-e2e.ps1`（**macOS のみ**。Windows から導入だけ行い、
+  チームの mac で実行する構成は可）。制約は SETUP.md の「iOS で使う場合」
 
 ### 5. 実行環境設定（各自）
 

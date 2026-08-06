@@ -59,7 +59,7 @@ Homebrew は Microsoft のサポート対象外（公式は「Alternate ways」�
 | `Temp/UnityLockfile` の排他判定 | **mac では機能しない** | Unix のファイルロックは助言的で、掴まれていても開けてしまう。判定は残り 2 信号で行う |
 | `-Editor` の同時実行ガード（TOCTOU 層） | 名前付き Mutex を**ホスト全体スコープ**（`Global\`）で取る。**OS で分岐しない** | **これは mac 固有の差ではない**（Windows も同じ扱い。issue #24 で合意）。排他は 3 層あり、①`playMode ≠ stopped` で中断 / ②`Test-UnityProjectLocked` / ③名前付き Mutex。**③は①の TOCTOU（2 本が同時に `stopped` を読む窓）を塞ぐ補助層**で、実運用の二重実行は①が止める（①はエディタ自身に問い合わせるので OS のセッション概念と無関係）。**接頭辞なしの名前付き Mutex は `Local\`＝セッション単位**という .NET の仕様のため、素の名前だと Unix では `/tmp/.dotnet/shm/session<セッションID>/`（ID は `getsid()` 由来）に置かれ、**別ターミナルの 2 本が別々のロックを取って③が黙って無効になる**（2026-08-03 に mac で実測して修正）。Windows も RDP・簡易ユーザー切り替え・**セッション 0（タスクスケジューラ）**をまたぐと同型。`Global\` の作成に特権は不要で、Windows 11・非昇格での動作も実測済み。変換は `uapp-platform.ps1` の `Get-UappHostMutexName` |
 | HTTP プロキシ配下の Unity CLI | `-UnityCliProxyDisable`（環境変数 `UAPP_E2E_UNITY_CLI_PROXY_DISABLE=1` でも可） | **プロキシがあると `-Editor` 系が一切動かないことがある**。CLI が localhost 宛ての Pipeline 通信までプロキシへ流し、プロキシが 503 を返して `unity status` が `unreachable` になる（ブリッジ側は健全）。`NO_PROXY` / `no_proxy` / `UNITY_NOPROXY` / `unity config proxy --bypass` は**いずれも効かない**（CLI の優先順位は コマンドライン引数 > 環境変数 > 保存設定 > OS 設定）。効くのは CLI 公式の `--proxy-disable` だけなので、`run-e2e.ps1` / `run-unity-tests.ps1` / `unity-editor-status.ps1` にオプトインのスイッチを用意してある。**既定はオフ**（プロキシを黙って無効化しない）。有効にすると認証も直結になるので、セッションが切れているときは先に `unity auth login` を通す |
-| `publish-kit.ps1` / `verify-all.ps1` | **Windows 専用** | 配布と全構成一括検証の開発用スクリプト。導入先では使わない |
+| `publish-kit.ps1` | **Windows 専用** | 配布用の開発スクリプト。導入先では使わない（`verify-all.ps1` は 2026-08-04 に mac 対応済み。こちらも開発用で導入先では使わない） |
 | 表示メッセージのパス区切り | Windows 表記（`\`）が残っている箇所がある | 実行には影響しない（実際のパス解決は `/` `\` どちらでも通る） |
 
 **mac での立ち上げ順**（失敗したら次へ進まず、その場で直す）:
@@ -84,6 +84,56 @@ Homebrew は Microsoft のサポート対象外（公式は「Alternate ways」�
      （adb 迂回。adb を直接使うテストは `-k` で除外する）。
      **最後の `Remove-Item` を省かない** — 立てっぱなしのまま同じシェルでデバイス経路へ進むと、
      ドライバが adb の使用を明示エラーで拒否する（実機を誤って検証しないための仕様）
+
+## iOS で使う場合（macOS のみ）
+
+**iOS の実行経路は 0.1.9 からこのキットに含まれている**（シミュレータ・実機とも）。
+前提: macOS ＋ Xcode ＋ Unity の iOS Support モジュール。**Windows では動かない**。
+**iOS だけで回す構成なら installer に `-Mode ios` を渡す**（Android の define・AVD・activity を
+要求せず、`iosSimulatorPort` と package＝bundle id を必須として検査する。恒久 define は不要）。
+
+```powershell
+# シミュレータ（署名不要）
+uapp_e2e\scripts\build-ios.ps1                       # Unity 書き出し → xcodebuild → .app
+uapp_e2e\scripts\run-ios-e2e.ps1                     # install → launch → pytest 一括
+# 実機（Apple Development 署名が要る。チーム ID は必須 — 付けないと明示エラーで止まる）
+uapp_e2e\scripts\build-ios.ps1 -Target device -Team <チームID> -AppId <チーム配下のbundle id>
+uapp_e2e\scripts\run-ios-e2e.ps1 -Target device
+```
+
+実機の `-Team` / `-AppId` は `uapp_e2e\config\local.json` の `iosTeamId` / `iosDeviceAppId` に
+書いておけば省略できる（チーム ID は `security find-identity -v -p codesigning` の `OU=`。
+`-AppId` 未指定時は `e2e-config.json` の `package` を使うので、それがチームで登録できる
+bundle id ならそのままでよい）。
+
+- ビルドの既定エントリは `E2EBridge.Editor.BuildEntry.BuildIosSimulator` / `BuildIosDevice`
+  （自前パイプラインを使うなら `-ExecuteMethod` で明示。**一時変更した設定は finally で復元される**）
+- **`e2e-config.json` の `iosSimulatorPort` を必ず設定する**（installer のテンプレには入っている）。
+  シミュレータのアプリは**ホストのポート名前空間で直接 LISTEN する**ため、
+  `devicePort`・`editorBridgePort`・ホスト側 forward ポートの**どれとも別番号**にする（docs/02）
+- adb を使うテストは iOS では明示エラーになる（`run-ios-e2e.ps1` が既知の adb テストを
+  自動 deselect する。`-PytestArgs` は空白区切りで分割されるため、除外の追加は `--deselect` で）
+- **アプリ外（システムダイアログ等）の操作とOS 層スクショが要るときは
+  `run-ios-e2e.ps1 -OsAgent`**: 同梱の `oslayer\`（XCUITest ベースの OS レイヤーエージェント）を
+  導入先でビルドして起動する。**実機は「設定 → デベロッパ → UI オートメーションを有効」が必須**
+  （下の制約表参照）。**実機ではランナーの bundle id もチーム配下の値が要る** —
+  既定の `com.uapp.e2e.osagent.runner` は他チームでは自動署名の App ID を取得できないので、
+  `-OsAgentBundleId <値>` か `config\local.json` の `iosOsAgentBundleId` で上書きする。
+  疎通・スクショ・タップは実機で実測済み、
+  **文字入力（/type）・アラート（/alert）・スワイプ（/swipe）は実装のみ・実利用未検証**
+
+**設計段階で次の制約を織り込んでおく**:
+
+| 制約 | 内容 |
+|---|---|
+| **アプリの外は、計装だけでは操作できない** | 計装（E2EBridge）は Unity アプリの中で動くので、**外部ブラウザ・システムダイアログ・他アプリは `dump` にも `tap` にも現れない**。**Android にはこのキットの中に逃げ道がある**（`adb` の uiautomator 経由で `ui_tap` / `ui_type`。外部ブラウザでの認証も自動化できる）。**iOS 側の同梱手段は `-OsAgent`（XCUITest ベースの OS レイヤーエージェント）**で、座標タップ・スクショは実機で実測済み。ただし**文字入力・アラート・スワイプは実装のみ・実利用未検証**（`simctl` 自体にはタップ注入の公開 API が無い） |
+| **→ 設計への影響** | **iOS の E2E は「アプリ内で完結する導線」を基本に組む**。アプリ外は `-OsAgent` で広げられるが、検証済みなのは座標タップとスクショまでで、**外部ブラウザでの認証フローの自動化は Android の `ui_type` 相当まで検証されていない**。テスト用にアプリ内 WebView やモック認証へ切り替えられるビルド構成を用意しておくと、後で困らない |
+| **画面の記録** | Android は `adb screencap` で**画面に出ているものをそのまま**残せる。iOS シミュレータは `simctl` で同じことができる。**iOS 実機は経路が端末で分かれ、2 つの条件は別物**: `-OsAgent`（XCUITest ベース）が使えるかは**次の行の `pairingState`** で決まる（使えれば OS 合成後の画面を撮れる。実機で実測済み。端末側の UI オートメーション有効化が前提）。一方 **`idevicescreenshot` の自動試行は同梱実装では iOS の主版 ≤16 のときだけ**（実測は iOS 16 の 1 台。iOS 17 以降は Apple が経路を変えたため試行しない）。下の行の計装スクショは Unity の描画のみで代替にならない |
+| **端末によって使える手段が入れ替わる** | **`-OsAgent`（XCUITest）の可否は `pairingState` で判定する**（`xcrun devicectl list devices` の `pairingState` が `paired` でない端末は XCUITest の宛先にならない。`run-ios-e2e.ps1 -OsAgent` の事前ガードもこれを見る）。`idevicescreenshot` の自動試行条件は前の行のとおり iOS の主版 ≤16（実測では CoreDevice 非対応の iOS 16 端末で使え、対応端末では使えなかった — 各 1 台の実測で、一般化の裏は取れていない）。いずれにせよ**手段が端末で切り替わる前提で組む** |
+| **実機で XCUITest を使うなら端末側の設定が要る** | 「設定 → プライバシーとセキュリティ → デベロッパモード」を有効にしたうえで、**「設定 → デベロッパ → UI オートメーションを有効」も ON にする**。**これが無いときの症状が原因を全く示さない** — アプリの install も起動も通り、ランナーも起動して「Automation Running」まで表示されるのに、約 8 秒で `The connection was invalidated` になり、クラッシュレポートすら残らない（2026-08-06 に実測。**即終了する対照テストでも同じように落ちるので、そこで切り分けられる**） |
+| **ブリッジのスクショの限界** | 計装自身に撮らせる `screenshot` コマンドは全プラットフォームで使えるが、**Unity の描画しか写らない** — WebView・ネイティブダイアログ・ソフトキーボード・広告 SDK のビューは欠ける。**撮る瞬間だけアプリのフレームにコストがかかる**ため既定は無効（`UAPP_E2E_BRIDGE_SCREENSHOT=1` で有効化）。**OS 層のキャプチャが使えないときの代替**であって上位互換ではない |
+| **実機は署名が要る** | シミュレータは署名不要だが、**実機は Apple Development 証明書とチーム配下の bundle id が要る**。加えて **iOS のバージョンで配備ツールが変わる**（iOS 17 以降は Xcode の `devicectl`、16 以前は `ideviceinstaller` 等） |
+| **実行環境** | iOS のビルド・実行は **macOS でしかできない**（Xcode が要る） |
 
 ## 手順
 
@@ -135,7 +185,8 @@ Codex ユーザーでルート `AGENTS.md` が無いプロジェクトは `-Root
 
 検出結果を反映して作成・編集する:
 
-- `uapp_e2e/e2e-config.json` — package / activity / orientation / tests / devicePort / editorBridgePort / **uiType（手順2.5の判定結果）**
+- `uapp_e2e/e2e-config.json` — package / activity / orientation / tests / devicePort / editorBridgePort / **iosSimulatorPort（iOS を使う場合は必須）** / **uiType（手順2.5の判定結果）** / `editorResolution` / `deviceRotation`
+  （**`editorResolution` は UI の設計解像度が既定と違うプロジェクトでは必ず設定する** — 違う解像度で流すと座標決め打ちのテストだけが静かに壊れる）
   （同一デバイスに他の計装アプリが入る可能性があれば devicePort を、複数プロジェクト並行開発の
   可能性があれば editorBridgePort を、それぞれ他と重複しない値に）。
   **editorBridgePort は「ホスト側の forward ポート」（`config/local.json` の `bridgePort`）とも別番号にする** —
@@ -155,6 +206,11 @@ Codex ユーザーでルート `AGENTS.md` が無いプロジェクトは `-Root
 3. テスト用ビルドへの `UAPP_E2E_BRIDGE` define 付与:
    - 自前ビルドスクリプトがある → そこに define 追加処理を組み込む（docs/05 のスニペット）
    - 無い → Player Settings の Scripting Define Symbols へ追加（本番ビルド前に外す運用をユーザーに確認）
+   - **iOS だけで使う場合（installer に `-Mode ios`）はビルドのための付与は不要** —
+     `build-ios.ps1` の既定エントリ（BuildEntry）がビルド時に一時付与し、終了時に復元する。
+     **例外はエディタ直結**: iOS プラットフォームのまま Play で使うなら iOS ターゲットへの
+     付与が要る（エディタはアクティブターゲットの define でコンパイルするため。Windows でも可）。
+     その場合、**BuildEntry を通さない本番 iOS ビルドには計装が混入する**ので本番前に外す運用を明確に
 4. `.gitignore` に `uapp_e2e/config/local.json` と `uapp_e2e/Builds/` を追加
 5. `.claude/rules/uapp-e2e.md` と `uapp_e2e/AGENTS.md` が配置されていることを確認（installer が配置する。
    これらが `uapp_e2e/CLAUDE.md` への参照導線となるため、**プロジェクト本体の CLAUDE.md は書き換えない**。

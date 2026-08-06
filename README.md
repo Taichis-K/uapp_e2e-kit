@@ -1,6 +1,7 @@
 # uapp_e2e-kit
 
-Unity製モバイルアプリの **E2Eテスト導入キット**（対応プラットフォーム: **Android**）。
+Unity製モバイルアプリの **E2Eテスト導入キット**（対応プラットフォーム: **Android / iOS**。
+iOS の実行は macOS のみ）。
 自作計装 **E2EBridge**（アプリ内TCPサーバー）＋ **Pythonドライバ**（pytest）で、
 エミュレーター/実機上のアプリを UI 階層ベースで操作・検証する。
 キット本体は **MIT ライセンス**で、**有料ツール・有料ライセンスに依存しない**。
@@ -10,6 +11,11 @@ Claude Code 等の AI エージェントによる自律テスト開発を前提�
 
 - **Windows / macOS 両対応**（v0.1.8）: 同じスクリプトを PowerShell 7 で実行する。
   macOS は Intel / Apple Silicon の実機で検証済み（`SETUP.md` の「macOS で使う場合」参照）
+- **iOS 対応**（v0.1.9・macOS のみ）: シミュレータ・実機の両経路を同梱
+  （`build-ios.ps1` → `run-ios-e2e.ps1`。シミュレータは署名不要、実機は Apple Development 署名）。
+  アプリ外の操作・OS 合成後のスクリーンショット用に **XCUITest ベースの OS レイヤーエージェント**も
+  同梱（`-OsAgent`）。iOS だけで使う構成は `install-to-project.ps1 -Mode ios` で導入する。
+  **制約が Android と同等ではない**ため、設計前に `SETUP.md` の「iOS で使う場合」を読むこと
 - **本番安全**: ランタイム計装は `UAPP_E2E_BRIDGE` スクリプティングdefine のあるビルドにのみ含まれる
   （asmdef defineConstraints。Editor 拡張はエディタ専用アセンブリで、プレイヤービルドには元々入らない）。
   リリースビルドには混入しない
@@ -71,7 +77,8 @@ cd uapp_e2e-kit
 
 ## 動作要件
 
-- 対象アプリ: Unity製 Android アプリ（エミュレーター/実機どちらも可）
+- 対象アプリ: Unity製 Android / iOS アプリ（エミュレーター・シミュレータ/実機どちらも可。
+  **iOS のビルド・実行は macOS ＋ Xcode ＋ Unity iOS Support モジュールが必要**）
 - **Windows または macOS** + PowerShell 7（スクリプト類は同じ `.ps1` を `pwsh` で実行。
   macOS は Intel / Apple Silicon の実機で検証済み。導入手順と既知の差分は同梱 `SETUP.md` の
   「macOS で使う場合」を参照）

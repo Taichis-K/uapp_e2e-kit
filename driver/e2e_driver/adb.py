@@ -44,6 +44,10 @@ _EDITOR_MODE = ("UAPP_E2E_EDITOR=1（エディタ直結モード）のため adb
                 "この操作は デバイス前提です — エディタ実行から対象テストを除外（-k / marker）するか、"
                 "UAPP_E2E_EDITOR を外してデバイスで実行してください")
 
+_IOS_MODE = ("UAPP_E2E_IOS=1（iOS シミュレータモード）のため adb は使いません。"
+             "この操作は Android デバイス前提です — iOS 実行から対象テストを除外（-k / marker）するか、"
+             "UAPP_E2E_IOS を外して Android で実行してください")
+
 
 def _adb_base() -> list[str]:
     return ["adb", "-s", DEVICE_SERIAL] if DEVICE_SERIAL else ["adb"]
@@ -58,6 +62,8 @@ def _check_adb_available() -> None:
     """
     if os.environ.get("UAPP_E2E_EDITOR") == "1":
         raise AdbNotFoundError(_EDITOR_MODE)
+    if os.environ.get("UAPP_E2E_IOS") == "1":
+        raise AdbNotFoundError(_IOS_MODE)
 
 
 def _run(*args: str, check: bool = True) -> str:

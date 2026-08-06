@@ -142,7 +142,7 @@ class Gestures:
             reason = resolved.get("blockedBy")
             if reason in BlockedError.HOPELESS and reason != "INACTIVE":
                 # INACTIVE は表示待ちで解ける。それ以外の対象自身の問題は待っても無駄
-                raise BlockedError(path, reason)
+                raise BlockedError(path, reason, resolved.get("blockedByComponents"))
             return False
 
         self._wait(hittable_or_hopeless, timeout, interval, f"'{path}' が hittable になりません")
@@ -165,7 +165,8 @@ class Gestures:
     def _require_hittable(self, path: str) -> tuple[float, float]:
         resolved = self.client.resolve(path)
         if resolved.get("hittable") is not True:
-            raise BlockedError(path, resolved.get("blockedBy", "UNKNOWN"))
+            raise BlockedError(path, resolved.get("blockedBy", "UNKNOWN"),
+                               resolved.get("blockedByComponents"))
         return resolved["center"]["x"], resolved["center"]["y"]
 
     def _resolve_quiet(self, path: str) -> dict:

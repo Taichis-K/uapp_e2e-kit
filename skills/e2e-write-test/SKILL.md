@@ -17,9 +17,14 @@ description: UnityアプリのE2Eテストを規約に沿って新規作成す�
 2. **実物のUI階層を見る**: アプリを起動した状態で dump を取得（推測で書かない）:
    ```powershell
    cd uapp_e2e\driver
+   # エディタ再生へ繋ぐときは **必ず** $env:UAPP_E2E_EDITOR = '1' を先に立てる
+   # （宣言があるときだけ「本当にこのプロジェクトのエディタか」が検査される。
+   #  デバイス経路では立てない — adb の使用が明示エラーになる）
    python -c "from e2e_driver import BridgeClient; import json; print(json.dumps(BridgeClient().connect().dump(), indent=1, ensure_ascii=False))"
    ```
-   ノードの `path` / `hittable` / `text` / `ui`（"ngui"ならNGUI要素）を確認
+   ノードの `path` / `hittable` / `text` / `ui`（"ngui"ならNGUI要素)を確認。
+   **`Selectable`（Button 等）を使わない UI 実装では `dump(probe="all")` にする** —
+   既定の `probe="selectable"` では押せる対象が 1 件も出ず「操作待ちではない」と誤読する
 3. **テストを書く**。規約:
    - 使用する操作APIは `uapp_e2e/e2e-config.json` の `uiType` に従う
      （`ngui-legacy`→`ngui_tap`系 / それ以外→`tap`系。詳細は SETUP.md の判定表）

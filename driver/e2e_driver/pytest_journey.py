@@ -48,6 +48,20 @@ def client():
         yield c
         c.close()
         return
+    if os.environ.get("UAPP_E2E_IOS") == "1":
+        # iOS シミュレータのアプリはホストのポートで直接待ち受ける（adb forward 相当は不要）。
+        # ポートは run-ios-e2e.ps1 が UAPP_E2E_BRIDGE_PORT で渡す（接続先の検証は
+        # client 側の UAPP_E2E_IOS ガードが行う: platform=IPhonePlayer 以外は明示エラー）
+        c = BridgeClient()
+        try:
+            c.connect(retries=int(os.environ.get("UAPP_E2E_CONNECT_RETRIES", "30")), interval=1.0)
+        except ConnectionError:
+            pytest.fail(f"iOS シミュレータの E2EBridge（port={c.port}）に接続できません。"
+                        f"アプリが起動しているか、ポート設定"
+                        f"（UAPP_E2E_BRIDGE_PORT / e2e-config.json の iosSimulatorPort）を確認してください")
+        yield c
+        c.close()
+        return
     # デバイス向けは forward したホスト側ポートに固定する（e2e-config.json の
     # editorBridgePort への自動フォールバックでエディタへ誤接続しないように）
     c = BridgeClient(port=adb.BRIDGE_PORT)

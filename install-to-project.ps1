@@ -14,8 +14,11 @@ param(
     [ValidateSet("claude", "codex", "both")][string]$Agents = "both",
     # 運用モード。editor はエディタ直結E2Eだけで回す構成（Android を使わない）:
     # define の検出対象を Standalone にし、package / activity / avd を必須扱いから外す。
-    # デスクトップ向けや「まずエディタだけで回す」立ち上げ期はこちら
-    [ValidateSet("editor", "device", "both")][string]$Mode = "both",
+    # デスクトップ向けや「まずエディタだけで回す」立ち上げ期はこちら。
+    # ios は iOS（シミュレータ/実機）だけで回す構成（0.1.9 で追加。実行は macOS のみ）:
+    # Android の define・AVD・activity を要求せず、iosSimulatorPort と package（bundle id）を
+    # 必須扱いにする。恒久 define は不要（BuildEntry が一時付与・復元する）
+    [ValidateSet("editor", "device", "both", "ios")][string]$Mode = "both",
     [switch]$IncludeSampleTests,
     [switch]$RootAgentsMd
 )
@@ -83,9 +86,19 @@ function Get-KitOwnedFiles($target) {
     foreach ($dir in (@((Join-UappPath $target "Assets\uapp_e2e\E2EBridge"),
                         (Join-UappPath $kit "scripts"),
                         (Join-UappPath $kit "driver\e2e_driver"),
-                        (Join-UappPath $kit "docs")) + $skillDirs)) {
+                        (Join-UappPath $kit "docs"),
+                        # iOS の OS レイヤーエージェント（0.1.9 で同梱）
+                        (Join-UappPath $kit "oslayer")) + $skillDirs)) {
         if (Test-Path $dir) {
-            $paths += Get-ChildItem $dir -Recurse -File | Where-Object { $_.FullName -notmatch "__pycache__" } | ForEach-Object { $_.FullName }
+            # DerivedData は oslayer を導入先でビルドしたキャッシュ＝プロジェクト側の生成物なので
+            # 所有に含めない（含めると毎回「ローカル改変」警告になる）。
+            # **判定は列挙起点からの相対パスのセグメント一致**で行う（フルパスへの部分一致だと、
+            # 導入先の祖先ディレクトリ名に DerivedData を含むだけで全ファイルが所有から脱落し、
+            # 改変検知が丸ごと無効になる ― 外部レビュー指摘）
+            $paths += Get-ChildItem $dir -Recurse -File | Where-Object {
+                $segments = ($_.FullName.Substring($dir.Length).TrimStart('\', '/')) -split '[\\/]'
+                -not (($segments -contains '__pycache__') -or ($segments -contains 'DerivedData'))
+            } | ForEach-Object { $_.FullName }
         }
     }
     foreach ($f in @((Join-UappPath $target "Assets\uapp_e2e\E2EBridge.meta"),
@@ -128,6 +141,7 @@ if (Test-Path (Join-UappPath $PSScriptRoot "bridge\E2EBridge")) {
         SetupMd     = Join-UappPath $root "SETUP.md"
         Skills      = Join-UappPath $root "skills"
         Rules       = Join-UappPath $root "rules"
+        OsLayer     = Join-UappPath $root "oslayer"
         Version     = Join-UappPath $root "VERSION"
     }
     Write-Host "実行元: 配布キット ($root)"
@@ -150,6 +164,7 @@ elseif (Test-Path (Join-UappPath $PSScriptRoot "..\unity-nis\Assets\uapp_e2e\E2E
         SetupMd     = Join-UappPath $root "kit\SETUP.md"
         Skills      = Join-UappPath $root "kit\skills"
         Rules       = Join-UappPath $root "kit\rules"
+        OsLayer     = Join-UappPath $root "oslayer"
         Version     = Join-UappPath $root "kit\VERSION"
     }
     Write-Host "実行元: 開発リポジトリ ($root)"
@@ -195,7 +210,16 @@ if (Test-Path $kit) {
             foreach ($p in $backupPaths) {
                 $dest = Join-UappPath $backupStage $p.Substring($target.Length + 1)
                 New-Item -ItemType Directory -Force (Split-Path $dest) | Out-Null
-                Copy-Item $p $dest -Recurse
+                if ((Get-Item $p) -is [System.IO.DirectoryInfo]) {
+                    # oslayer\DerivedData（Xcode のビルドキャッシュ。数百 MB 級・再生成可能）を
+                    # バックアップへ入れない — 毎回の更新で複製・圧縮すると極端に遅くなる。
+                    # Copy-UappTree の -ExcludeDirectory は名前単位なので、他の場所の
+                    # DerivedData という名の利用者ディレクトリまで除外しうるが、
+                    # ビルドキャッシュの慣用名であり実害より安全側と判断
+                    Copy-UappTree -Source $p -Destination $dest -ExcludeDirectory @("DerivedData")
+                } else {
+                    Copy-Item $p $dest
+                }
             }
             [System.IO.Compression.ZipFile]::CreateFromDirectory($backupStage, $backupZip)
         } finally {
@@ -216,6 +240,9 @@ if (Test-Path $kit) {
         # Windows で導入したツリーを mac で更新する（逆も同様）と、そのままでは全件が
         # 「所有記録なし」に見えて自作ファイルの上書き警告が誤発火する
         $prevOwned = @($manifest.PSObject.Properties.Name | ForEach-Object { ConvertTo-UappPathKey $_ })
+        # **配布対象から外れたスクリプトの掃除に使う**（下の「除外対象の掃除」）。
+        # 前回こちらが置いたものだけを消すため、記録そのものを保持しておく
+        $script:prevManifest = $manifest
         $modified = @()
         foreach ($entry in $manifest.PSObject.Properties) {
             if ($entry.Name -like "__*") { continue }  # ファイルでないメタ記録（__rootAgentsMdByInstaller 等）
@@ -261,11 +288,39 @@ New-Item -ItemType Directory -Force (Join-UappPath $kit "Builds") | Out-Null
 # 配布キットから実行する場合、scripts\ の中身はそれ自体が配布対象。開発リポジトリから
 # 実行する場合だけ、**導入先では使わない開発専用スクリプト**を除く（除外は増えにくく、
 # 配布対象が増えたときは何もしなくても届く＝同じ漏れ方をしない）
-$devOnlyScripts = @("install-to-project.ps1", "package-kit.ps1", "publish-kit.ps1", "verify-all.ps1",
-                    "check-portability.ps1")
+# **package-kit と同じ一覧を使う**（Get-UappDevOnlyScript）。ここに手書きで持つと、
+# zip 経路では除外されているものが開発リポジトリ経路でだけ導入先へ届く（実際に起きた）
+$devOnlyScripts = Get-UappDevOnlyScript
 foreach ($script in (Get-ChildItem (Join-UappPath $src.Scripts "*.ps1") |
                      Where-Object { $devOnlyScripts -notcontains $_.Name })) {
     Copy-Item $script.FullName (Join-UappPath $kit "scripts\$($script.Name)") -Force
+}
+# **除外対象の掃除**。コピーしないだけでは、以前配ってしまったものが導入先に残り続ける
+# （しかも下の Get-KitOwnedFiles が scripts\ を丸ごと列挙するので、新しい manifest へ
+# 「キット所有」として再登録され、永続する）。**前回こちらが置いた記録があるものだけ**消す —
+# 導入先が自分で置いた同名ファイルを消さないため。改変されていたら消さずに警告する
+foreach ($name in $devOnlyScripts) {
+    $stale = Join-UappPath $kit "scripts\$name"
+    if (-not (Test-Path $stale)) { continue }
+    $key = ConvertTo-UappPathKey ($stale.Substring($target.Length + 1))
+    $recorded = $null
+    if ($script:prevManifest) {
+        foreach ($e in $script:prevManifest.PSObject.Properties) {
+            if ((ConvertTo-UappPathKey $e.Name) -eq $key) { $recorded = $e.Value; break }
+        }
+    }
+    if (-not $recorded) {
+        Write-Host "  [情報] 配布対象外のスクリプトが導入先にありますが、キットが置いた記録が無いので残します: scripts\$name"
+        continue
+    }
+    $unchanged = ((Get-KitFileHash $stale) -eq $recorded) -or
+                 ((Get-FileHash -LiteralPath $stale -Algorithm SHA256).Hash -eq $recorded)
+    if ($unchanged) {
+        Remove-Item -LiteralPath $stale -Force
+        Write-Host "  [情報] 配布対象外になったスクリプトを削除しました: scripts\$name"
+    } else {
+        Write-Host "  [警告] 配布対象外になったスクリプトがローカル改変されているため残します: scripts\$name"
+    }
 }
 Copy-UappTree -Source (Join-UappPath $src.Driver "e2e_driver") -Destination (Join-UappPath $kit "driver\e2e_driver") -ExcludeDirectory @("__pycache__")
 Copy-Item (Join-UappPath $src.Driver "pytest.ini") (Join-UappPath $kit "driver\pytest.ini") -Force
@@ -313,7 +368,24 @@ if ($IncludeSampleTests) {
     }
 }
 Copy-Item (Join-UappPath $src.Config "local.sample.json") (Join-UappPath $kit "config\local.sample.json") -Force
-Write-Host "  [OK] uapp_e2e\（scripts / driver / config テンプレ）"
+# iOS の OS レイヤーエージェント（run-ios-e2e.ps1 -OsAgent が導入先でビルドする。macOS 専用だが
+# 配布はどの OS からでも行う — 導入先リポジトリを mac で開いたときに使えるように）。
+# **今回からキット所有になった領域**なので、前回の所有記録が無いのに実在する場合は
+# 「利用者が自分で置いたものかもしれない」＝上書きしたことを警告する（テスト移行ガードと同型。
+# 上書き前の内容は 0. の更新バックアップに入っている）
+$oslayerDest = Join-UappPath $kit "oslayer"
+$oslayerConflict = (Test-Path $oslayerDest) -and
+                   (($null -eq $prevOwned) -or
+                    -not ($prevOwned | Where-Object { $_ -like "uapp_e2e/oslayer/*" }))
+Copy-UappTree -Source $src.OsLayer -Destination $oslayerDest -ExcludeDirectory @("DerivedData")
+if ($oslayerConflict) {
+    Write-Host ""
+    Write-Host "  [警告] キット所有と記録されていない uapp_e2e\oslayer\ を上書きしました（このまま更新を続けます）:"
+    Write-Host "    キットが新しく所有し始めた領域か、前回の所有記録（kit-manifest.json）が無い導入です。"
+    Write-Host "    自作の Xcode/Swift ファイルだった場合は上のバックアップzipから取り出し、別の場所へ戻すこと"
+    Write-Host ""
+}
+Write-Host "  [OK] uapp_e2e\（scripts / driver / config テンプレ / oslayer）"
 
 # --- 2.5 ドキュメントと AI 向け運用ガイド ---
 New-Item -ItemType Directory -Force (Join-UappPath $kit "docs") | Out-Null
@@ -501,8 +573,12 @@ if (Test-Path $projSettings) {
 $legacyTargetNames = @{ "1" = "Standalone"; "7" = "Android"; "4" = "iOS"; "13" = "WebGL" }
 $defineTargets = @($defineTargets | ForEach-Object { if ($legacyTargetNames.ContainsKey($_)) { $legacyTargetNames[$_] } else { $_ } } | Select-Object -Unique)
 $androidDefine = @($defineTargets | Where-Object { $_ -eq "Android" }).Count -gt 0
-# device を含む運用は Android 必須。editor 専用ならどこかに付いていればよい
+# device を含む運用は Android 必須。editor 専用ならどこかに付いていればよい。
+# ios は恒久 define 不要（BuildEntry がビルド時に一時付与・復元する）ため判定しない
 $defineFound = if ($Mode -eq "editor") { $defineTargets.Count -gt 0 } else { $androidDefine }
+# iOS ターゲット（新形式 iPhone / 旧形式 4→iOS）への**恒久付与は逆に警告対象**:
+# BuildEntry の一時付与と重複するだけでなく、**本番の iOS ビルドに計装が混入する**
+$iosDefineLeak = @($defineTargets | Where-Object { $_ -in @("iPhone", "iOS") }).Count -gt 0
 $localJsonDone = Test-Path (Join-UappPath $kit "config\local.json")
 # 行単位で照合（コメント行や uapp_e2e/Builds-old のような別パスに誤反応しない。
 # 区切りは / のみ受理: gitignore のバックスラッシュはパス区切りでなくエスケープなので無効な記述。
@@ -546,6 +622,7 @@ $configEdited = $false
 # run-e2e が pytest の「ファイルなし」で落ちる。既存導入の更新経路ではここでしか気付けないので、
 # 「実在しない tests を指している」ことを名指しで出す
 $testsStale = $null
+$iosBundleMismatch = $null
 if ($configExisted) {
     try {
         $cfg = Get-Content $configDest -Raw | ConvertFrom-Json
@@ -553,6 +630,28 @@ if ($configExisted) {
         $packageOk = ($Mode -eq "editor") -or ($cfg.package -and ($cfg.package -ne "com.yourcompany.yourapp"))
         $configEdited = $packageOk -and $testsPath -and (Test-Path $testsPath)
         if ($testsPath -and -not (Test-Path $testsPath)) { $testsStale = $cfg.tests }
+        # -Mode ios では package を bundle id として使う。ProjectSettings の iOS 側
+        # applicationIdentifier と食い違っていると、build-ios（-AppId 未指定）は
+        # プロジェクト設定のままビルドし、run-ios-e2e が .app との不一致で停止する
+        # （外部レビュー指摘: Android の package を書き写した既存導入が [済] のまま実行時に
+        # 初めて止まる）。ここは判定を [未] に倒すのではなく、食い違いを名指しする —
+        # -AppId や BuildEntry で上書きする運用もあるため、一致だけを正とはしない
+        if ($Mode -eq "ios" -and $packageOk) {
+            $projSettingsPath = Join-UappPath $target "ProjectSettings\ProjectSettings.asset"
+            if (Test-Path $projSettingsPath) {
+                $inAppId = $false
+                foreach ($line in (Get-Content $projSettingsPath)) {
+                    if ($line -match '^\s*applicationIdentifier:') { $inAppId = $true; continue }
+                    if ($inAppId) {
+                        if ($line -match '^\s*iPhone:\s*(\S+)\s*$') {
+                            if ($Matches[1] -ne $cfg.package) { $iosBundleMismatch = $Matches[1] }
+                            break
+                        }
+                        if ($line -match '^\S') { break }   # ブロック終端
+                    }
+                }
+            }
+        }
     } catch { $configEdited = $false }
 }
 
@@ -567,10 +666,24 @@ if ($configExisted) {
 # 「devicePort ≠ editorBridgePort」では検出できないのに実際は衝突しない、逆も起きる）。
 # **並行実行に限らない**: forward は実行後も残るので、順番に回すだけで踏む（issue #25）
 $portNote = $null
+$iosPortMissing = $false    # iOS 案内（macOS のみ表示）で使う。欠落は衝突ではないのでここでは [未] にしない
 if (Test-Path $configDest) {     # 既存・新規生成のどちらでも見る（雛形の値のままでも重なりは重なり）
+    # **型変換はすべてこのヘルパで行い、不正は $portNote に積む**。`[int]` キャストの例外は
+    # 外側の catch に握り潰され、ポート検査全体が黙って死んで [済] が偽の緑になる
+    # （外部レビュー指摘。`(if …)` の握り潰しと同じ型）。値域は 1〜65535（実行系と同じ）
+    $parsePort = {
+        param($raw)
+        $v = 0
+        if (($null -ne $raw) -and [int]::TryParse([string]$raw, [ref]$v) -and $v -ge 1 -and $v -le 65535) { $v }
+        else { $null }
+    }
+    $badPorts = @()
     try {
         $cfg = Get-Content $configDest -Raw | ConvertFrom-Json
-        $editor = [int]$cfg.editorBridgePort
+        $editor = & $parsePort $cfg.editorBridgePort
+        if ($null -eq $editor) {
+            $badPorts += "editorBridgePort（'$($cfg.editorBridgePort)'）"
+        }
         # ホスト側ポートは local.json の bridgePort。**導入時点ではまだ無いことが多い**
         # （残手順 4 で作る）ので、その場合は既定値で仮判定し、文面でもそう断る
         $hostPort = 13333
@@ -579,10 +692,14 @@ if (Test-Path $configDest) {     # 既存・新規生成のどちらでも見る
         if (Test-Path $localJson) {
             try {
                 $lc = Get-Content $localJson -Raw | ConvertFrom-Json
-                if ($lc.bridgePort) { $hostPort = [int]$lc.bridgePort; $hostPortKnown = $true }
+                if ($null -ne $lc.bridgePort) {
+                    $parsedHost = & $parsePort $lc.bridgePort
+                    if ($null -ne $parsedHost) { $hostPort = $parsedHost; $hostPortKnown = $true }
+                    else { $badPorts += "config\local.json の bridgePort（'$($lc.bridgePort)'）" }
+                }
             } catch { }
         }
-        if ($hostPort -eq $editor) {
+        if ($editor -and $hostPort -eq $editor) {
             $basis = if ($hostPortKnown) { "config\local.json の bridgePort" }
                      else { "既定の 13333（config\local.json が未作成のため**仮の値**）" }
             # **local.json が無いときは断定しない**。エディタ専用運用（adb forward を張らない）や、
@@ -598,6 +715,48 @@ if (Test-Path $configDest) {     # 既存・新規生成のどちらでも見る
                          "**デバイス実行を使わない（エディタ専用）構成や、実行時に -HostPort で" +
                          "別番号を渡す構成なら、このままで問題ない**")
         }
+        # iOS シミュレータの待受は**ホストのポート名前空間で直接 LISTEN する**ため、
+        # devicePort・editorBridgePort・ホスト側 forward のどれとも別番号が必須（docs/02）。
+        # **欠落**（iOS を使わない・旧テンプレ由来の設定）は衝突ではないのでここでは咎めず、
+        # macOS の iOS 案内側で名指しする。**値があるのに不正**は握り潰さない — run-ios-e2e は
+        # 同じ値を明示エラーにするので、ここで黙ると [済] が偽の緑になる（外部レビュー指摘）。
+        # **上の editorBridgePort 警告より後で合成する**（前に置くと上の代入で上書きされる）
+        $iosPort = $null
+        $iosNote = $null
+        if ($null -eq $cfg.iosSimulatorPort) {
+            $iosPortMissing = $true
+            if ($Mode -eq "ios") {
+                # iOS 専用モードでは必須値（run-ios-e2e が明示エラーで止まる）。
+                # 他モードでは任意機能なので咎めない（macOS の iOS 案内側で名指しする）
+                $iosNote = ("e2e-config.json に iosSimulatorPort がありません（旧テンプレからの導入は" +
+                            "既存設定を上書きしないため手で追記が必要。無いままだと run-ios-e2e.ps1 は明示エラーで止まる）")
+            }
+        } else {
+            $iosPort = & $parsePort $cfg.iosSimulatorPort
+            if ($null -eq $iosPort) {
+                $iosNote = ("iosSimulatorPort（'$($cfg.iosSimulatorPort)'）が 1〜65535 の整数ではない" +
+                            "（このままだと run-ios-e2e.ps1 が明示エラーで止まる）")
+            }
+        }
+        $devPort = $null
+        if ($null -ne $cfg.devicePort) {
+            $devPort = & $parsePort $cfg.devicePort
+            if ($null -eq $devPort) { $badPorts += "devicePort（'$($cfg.devicePort)'）" }
+        }
+        if ($iosPort -and (($editor -and $iosPort -eq $editor) -or $iosPort -eq $hostPort -or
+                           ($devPort -and $iosPort -eq $devPort))) {
+            $iosNote = ("iosSimulatorPort（$iosPort）が devicePort / editorBridgePort / ホスト側 forward ポートの" +
+                        "いずれかと同じ値。シミュレータのアプリはホストのポートを直接 LISTEN するため、" +
+                        "**どれとも別番号**にすること（例: $($iosPort + 40)）")
+        }
+        if ($iosNote) {
+            $portNote = if ($portNote) { "$portNote / $iosNote" } else { $iosNote }
+        }
+        if ($badPorts.Count -gt 0) {
+            $badNote = ("次の値が 1〜65535 の整数として読めない: " + ($badPorts -join "、") +
+                        "。読めない値は衝突の判定からも外れているので、直してから再実行で確かめること")
+            $portNote = if ($portNote) { "$portNote / $badNote" } else { $badNote }
+        }
     } catch { }
 }
 
@@ -605,6 +764,12 @@ Write-Host ""
 Write-Host "=== 残りの手動手順（[済]=導入済みを検出。詳細: docs/05-install-to-project.md） ==="
 if ($Mode -eq "editor") {
     Write-Host "モード: editor（エディタ直結E2Eのみ。Android ビルド・adb・AVD は使わない）"
+}
+if ($Mode -eq "ios") {
+    Write-Host "モード: ios（iOS シミュレータ/実機のみ。Android ビルド・adb・AVD は使わない）"
+    if (-not (Test-UappIosSupported)) {
+        Write-Host "     ※ iOS の実行（build-ios / run-ios-e2e）は macOS のみ。このマシンでは導入までで、実行はチームの mac で行う"
+    }
 }
 Write-Host "1. Packages/manifest.json に以下を追加（Unityバージョンに応じて）:"
 Write-Host "     $(Mark $inputSystemVer) com.unity.inputsystem（2022.3系:1.7.0 / Unity6系:1.14+）$(if ($inputSystemVer) { " → $inputSystemVer 導入済み" })"
@@ -618,6 +783,18 @@ if ($Mode -eq "editor") {
                 "package / activity は editor モードでは使わないので空でよい。" +
                 $(if ($configEdited) { "[済] は tests のパスが実在することのみ＝orientation は人が確認する" }
                   else { "tests の指すパスが見つからないか、まだ生成しただけ" }) + "）")
+} elseif ($Mode -eq "ios") {
+    Write-Host "2. $(Mark $configEdited) $configDest の package / orientation を実アプリに合わせて編集"
+    Write-Host ("     （**iOS では package を bundle id として使う**。activity は使わないので空でよい。" +
+                "tests は既定の `"tests`" のままでよい。" +
+                $(if ($configEdited) { "[済] は package 設定済み・tests のパスが実在することまで＝orientation は人が確認する" }
+                  else { "package が雛形のまま、または tests の指すパスが見つからない" }) + "）")
+    if ($iosBundleMismatch) {
+        Write-Host "     → [注意] ProjectSettings の iOS bundle id（$iosBundleMismatch）と package が食い違っています。"
+        Write-Host "       **シミュレータ経路**は build-ios.ps1 が -AppId 未指定だとプロジェクト設定のまま"
+        Write-Host "       ビルドするため、run-ios-e2e.ps1 が .app との不一致で停止します（どちらかへ揃えるか -AppId で明示）。"
+        Write-Host "       実機経路を -AppId / config\local.json の iosDeviceAppId で上書きする構成なら、そちらはこのままでよい"
+    }
 } else {
     Write-Host "2. $(Mark $configEdited) $configDest の package / orientation を実アプリに合わせて編集"
     Write-Host ("     （tests は既定の `"tests`" のままでよい。" +
@@ -632,13 +809,32 @@ if ($testsStale) {
 if ($Mode -eq "editor") {
     Write-Host "3. $(Mark $defineFound) UAPP_E2E_BRIDGE define を付与（**エディタが使うのは Build Settings で選んでいる"
     Write-Host "     プラットフォームの define**。Android のままエディタ再生する構成でも構わないが、そのプラットフォームに付いていること）"
+} elseif ($Mode -eq "ios") {
+    # iOS は BuildEntry がビルド時に一時付与・復元するので、ビルドのための恒久付与は不要。
+    # [済/未] の判定対象にせず、付いている場合は**意図を区別して**注意を出す:
+    # エディタ直結（Play）を iOS プラットフォームのまま使う構成では恒久付与が正当
+    # （エディタはアクティブターゲットの define でコンパイルする）。危険なのは、
+    # その define が残ったまま BuildEntry 以外（自前パイプライン・手動）で本番 iOS ビルドを
+    # 作る場合＝計装が混入する
+    Write-Host "3. [不要] UAPP_E2E_BRIDGE define の恒久付与は不要（build-ios.ps1 の BuildEntry がビルド時に一時付与し、終了時に復元する）"
+    if ($iosDefineLeak) {
+        Write-Host "     → [注意] iOS ターゲットに UAPP_E2E_BRIDGE が恒久付与されています。"
+        Write-Host "       **エディタ直結（iOS プラットフォームのまま Play）を使うための付与なら妥当**ですが、"
+        Write-Host "       **BuildEntry を通さない本番 iOS ビルド（自前パイプライン・手動）には計装が混入**します。"
+        Write-Host "       本番ビルド前に外す運用をチームで明確にしておくこと"
+    }
 } else {
     Write-Host "3. $(Mark $defineFound) テスト用ビルドに UAPP_E2E_BRIDGE define を付与（APK に入れるには Android 向けが必要）"
 }
-Write-Host "     $(if ($defineTargets.Count) { "→ 現在付いているターゲット: $($defineTargets -join ', ')" } else { "→ どのターゲットにも見つからない" })"
-Write-Host "     （自前ビルドスクリプト側で付与する構成は ProjectSettings に現れないため [未] 表示のままでよい）"
+if ($Mode -ne "ios") {
+    Write-Host "     $(if ($defineTargets.Count) { "→ 現在付いているターゲット: $($defineTargets -join ', ')" } else { "→ どのターゲットにも見つからない" })"
+    Write-Host "     （自前ビルドスクリプト側で付与する構成は ProjectSettings に現れないため [未] 表示のままでよい）"
+}
 if ($Mode -eq "editor") {
     Write-Host "4. $(Mark $localJsonDone) uapp_e2e\config\local.sample.json を local.json にコピー（avd は空のままでよい）"
+} elseif ($Mode -eq "ios") {
+    Write-Host "4. $(Mark $localJsonDone) uapp_e2e\config\local.sample.json を local.json にコピー（avd は空のままでよい。"
+    Write-Host "     実機を使うなら iosTeamId / iosDeviceAppId / iosOsAgentBundleId を記入。シミュレータだけなら空のままでよい）"
 } else {
     Write-Host "4. $(Mark $localJsonDone) uapp_e2e\config\local.sample.json を local.json にコピーして各自の環境を記入"
 }
@@ -648,12 +844,42 @@ Write-Host "5. $(Mark $gitignoreDone) .gitignore に追加: uapp_e2e/config/loca
 # 再包含されることもある。判定できないことを [済] に含めて読ませない
 Write-Host "     （判定はパターンの有無まで。既にコミット済みのファイルは行を足しても追跡され続けるので、"
 Write-Host "     その場合は git rm --cached が別途必要）"
-Write-Host "6. $(Mark (-not $portNote)) 待受ポートが他と重ならないこと（devicePort / editorBridgePort）"
+Write-Host "6. $(Mark (-not $portNote)) 待受ポートが他と重ならないこと（devicePort / editorBridgePort / iosSimulatorPort）"
 if ($portNote) { Write-Host "     → $portNote" }
 Write-Host "     （同一デバイスに計装アプリを複数入れる場合も devicePort をアプリごとに分ける）"
 if ($Mode -eq "editor") {
     Write-Host "7. 初回の run-e2e.ps1 -Editor は Packages/manifest.json へ com.unity.pipeline（Unity CLI 連携）を"
     Write-Host "     自動追加する（追跡ファイルが変わる。コミットするか事前にチームで方針を決めておく）"
+}
+if ((Test-UappIosSupported) -or ($Mode -eq "ios")) {
+    # iOS 経路は macOS でしか動かない（xcodebuild / simctl）ので、mac で導入したときだけ案内する。
+    # ただし -Mode ios の明示宣言があれば OS を問わず出す（Windows から導入してチームの mac で
+    # 実行する構成のため。その場合の実行制約はモード行の ※ で断ってある）
+    Write-Host ""
+    Write-Host "=== iOS で使う場合（macOS のみ・任意） ==="
+    if (Test-UappIosSupported) {
+        # **xcrun の存在では判定しない**（Command Line Tools だけでも xcrun は居る — 外部レビュー指摘）。
+        # iphonesimulator SDK が実際に解決できるかで見る（= Xcode 本体＋iOS SDK が要る。
+        # Unity の iOS Support モジュールまでは判定できないので文言で案内）
+        $xcodeOk = $false
+        $xcrunPath = Get-UappCommandPath "xcrun"
+        if ($xcrunPath) {
+            try {
+                & $xcrunPath --sdk iphonesimulator --show-sdk-path *> $null
+                $xcodeOk = ($LASTEXITCODE -eq 0)
+            } catch { }
+        }
+        Write-Host "  $(Mark $xcodeOk) Xcode（iphonesimulator SDK が解決できる$(if (-not $xcodeOk) { "。Xcode 本体を導入し `xcodebuild -runFirstLaunch` を済ませること" })。Unity の iOS Support モジュールは別途 Hub から追加）"
+    }
+    Write-Host "  シミュレータ: uapp_e2e\scripts\build-ios.ps1 → run-ios-e2e.ps1（前提: Xcode＋Unity の iOS Support）"
+    Write-Host "  実機:        build-ios.ps1 -Target device → run-ios-e2e.ps1 -Target device（Apple Development 署名）"
+    Write-Host "  e2e-config.json の iosSimulatorPort を devicePort / editorBridgePort と別番号で設定すること。"
+    if ($iosPortMissing -and $Mode -ne "ios") {
+        # -Mode ios では手順 6 のポート検査が [未] として名指し済み（二重に言わない）
+        Write-Host "  → **e2e-config.json に iosSimulatorPort がありません**（旧テンプレからの導入。"
+        Write-Host "     既存の設定は上書きしないため手で追記が必要。無いままだと run-ios-e2e.ps1 は明示エラーで止まる）"
+    }
+    Write-Host "  制約（アプリ外は操作不可・スクショの取得経路）は SETUP.md の「iOS で使う場合」を先に読むこと"
 }
 if ($installClaude) {
     Write-Host "（AI向け規約は .claude\rules\uapp-e2e.md 経由で自動参照される。CLAUDE.md の書き換えは不要）"

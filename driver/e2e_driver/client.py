@@ -6,6 +6,7 @@ editorBridgePort > 13333 の順で解決する（resolve_port 参照）。
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -140,19 +141,89 @@ class BlockedError(Exception):
         "INACTIVE": "対象が非アクティブ",
     }
 
-    def __init__(self, path: str, blocked_by: str):
+    def __init__(self, path: str, blocked_by: str, blocked_by_components: list[str] | None = None):
         hint = self.HOPELESS.get(blocked_by)
         detail = f"'{path}' is blocked by '{blocked_by}'"
         if hint:
             detail += f" — {hint}（待っても変わらない）"
+        if blocked_by_components:
+            # 遮蔽者のコンポーネント型名。**押して退けるものか・待つべきものか**を
+            # 呼び手が機械判定するための材料（例: 独自の Shield クラス名が入る。
+            # パスの命名に依存した判定をしなくて済む）
+            detail += f"（遮蔽者のコンポーネント: {', '.join(blocked_by_components)}）"
         super().__init__(detail)
         self.path = path
         self.blocked_by = blocked_by
+        self.blocked_by_components: list[str] = list(blocked_by_components or [])
 
     @property
     def hopeless(self) -> bool:
         """待っても解決しない種類か（呼び手が再試行の要否を判断できる）。"""
         return self.blocked_by in self.HOPELESS
+
+
+def _expected_project_path(start: Path | None = None) -> Path | None:
+    """エディタ直結で「繋がるべき Unity プロジェクト」の絶対パス。
+
+    解決順は 明示宣言 > 設定ファイルの位置。
+      1. 環境変数 `UAPP_E2E_PROJECT_PATH`（`run-e2e.ps1 -Editor` が渡す）
+      2. `e2e-config.json` を親方向へ探し、そこから `Assets/` と `ProjectSettings/` を
+         持つディレクトリを特定する（開発リポは設定と同じ階層、導入先は 1 つ上）
+
+    どちらも決まらなければ None（呼び出し側が fail-closed で扱う）。
+    """
+    declared = os.environ.get("UAPP_E2E_PROJECT_PATH")
+    if declared:
+        return Path(declared).resolve()
+    start = Path(start) if start is not None else Path.cwd()
+    for parent in [start, *list(start.parents)[:CONFIG_SEARCH_PARENTS]]:
+        if not (parent / "e2e-config.json").exists():
+            continue
+        # 設定と同じ階層（開発リポのサンプル）か、1 つ上（導入先の uapp_e2e/ 配下）
+        for candidate in (parent, parent.parent):
+            if (candidate / "Assets").is_dir() and (candidate / "ProjectSettings").is_dir():
+                return candidate.resolve()
+        return None
+    return None
+
+
+def _same_project(a: Path, b: str) -> bool:
+    """プロジェクトパスの一致判定。
+
+    **実体が同じかどうかで判定する**（`Path.samefile`＝inode/デバイスの一致）。
+    文字列比較だと、**大小文字を区別しないボリューム**（macOS の既定・Windows）で
+    表記が違うだけの同じプロジェクトを拒否してしまう（実測で `samefile=True` なのに
+    文字列比較は不一致）。**これは安全側ではなく、正当な実行を止めるだけ**。
+    別プロジェクトが inode を共有することはないので、実体比較で緩くなる方向は無い。
+
+    どちらかが存在しないときだけ、シンボリックリンクを解決した文字列で比べる
+    （macOS の /tmp → /private/tmp のような差を吸収する）。
+    """
+    other = Path(b)
+    # **報告側が手元に実在することは要求しない**。ドライバとエディタが別の名前空間に
+    # いる構成（WSL / Docker / リモートマウント。Unity が `D:\repo\Game`、ドライバが
+    # `/mnt/d/repo/Game` を見る等）では、報告されたパスはこちらに存在しない。
+    # **文字列が一致するなら「エディタ自身がそのパスだと答えた」という正当な一致証拠**なので、
+    # 実在を必須にすると正しいエディタを永久に拒否する（レビュー 3 周目の指摘）。
+    # そういう構成では `UAPP_E2E_PROJECT_PATH` に**エディタが報告する側のパス**を設定する
+    try:
+        if a.exists() and other.exists() and a.samefile(other):
+            # **inode が 0 の実装を信用しない**。Windows の一部の仮想ボリューム
+            # （クラウドドライブ・WebDAV）は st_dev / st_ino に 0 を返し、
+            # **別のファイルでも samefile が真**になる（CPython の既知問題）。
+            # その場合は下のパス比較で判断する
+            if a.stat().st_ino != 0:
+                return True
+    except OSError:
+        pass
+    # 大小文字の扱いは OS に合わせる（normcase は Windows でのみ小文字化する）。
+    # 実在するものは realpath でシンボリックリンクを解決してから比べる
+    # （存在しないパスに realpath をかけても実害は無いが、意味があるのは実在時だけ）
+    try:
+        return (os.path.normcase(os.path.realpath(a))
+                == os.path.normcase(os.path.realpath(other)))
+    except OSError:
+        return os.path.normcase(str(a)) == os.path.normcase(str(other))
 
 
 def _check_editor_target(info: dict[str, Any], host: str, port: int) -> None:
@@ -183,6 +254,7 @@ def _check_editor_target(info: dict[str, Any], host: str, port: int) -> None:
         return
     platform = str(info.get("platform", ""))
     if platform.endswith("Editor"):
+        _check_editor_project(info, host, port)
         return
     detail = f"platform={platform!r}" if platform else "ping の応答に platform がありません"
     raise WrongBridgeTargetError(
@@ -198,6 +270,92 @@ def _check_editor_target(info: dict[str, Any], host: str, port: int) -> None:
     )
 
 
+def _check_editor_project(info: dict[str, Any], host: str, port: int) -> None:
+    """**どのプロジェクトのエディタか**まで確かめる（issue #26）。
+
+    `platform` が `*Editor` でも、**同じ `editorBridgePort` を先に握った別プロジェクトの
+    エディタ**なら通ってしまう（先着が待ち受け、後発は bind に失敗して待つ構図）。
+    UI が似ていればテストは通り、**偽の緑**になる。
+
+    照合は ping の `project`（エディタの `dataPath` の親＝プロジェクトルート）と、
+    こちら側が期待するプロジェクトパス。**どちらかが欠けたら止める**（fail-closed）—
+    「確かめられなかった」を「一致した」として先へ進めると、ガードが有名無実になる。
+    """
+    reported = info.get("project")
+    if not reported:
+        raise WrongBridgeTargetError(
+            f"接続先のエディタ（{host}:{port}）が、どのプロジェクトかを返しません。\n"
+            "  E2EBridge が古い可能性があります（ping の project は後から追加されました）。"
+            "**導入先で再ビルド**するか、エディタを開き直してください。\n"
+            "  この照合が無いと、同じ editorBridgePort を先に握った**別プロジェクトのエディタ**へ"
+            "繋がったまま緑になりうるため、確認できないまま先へ進めません"
+        )
+    expected = _expected_project_path()
+    if expected is None:
+        raise WrongBridgeTargetError(
+            f"エディタ直結の接続（{host}:{port}）で、期待するプロジェクトを特定できません"
+            f"（接続先は {reported!r} と答えています）。\n"
+            "  UAPP_E2E_PROJECT_PATH に対象 Unity プロジェクトの絶対パスを設定するか、"
+            "e2e-config.json のあるツリーから実行してください"
+        )
+    if _same_project(expected, str(reported)):
+        return
+    raise WrongBridgeTargetError(
+        f"エディタ直結の接続（{host}:{port}）が、**別のプロジェクトのエディタ**に繋がっています。\n"
+        f"  期待: {expected}\n"
+        f"  接続先: {reported}\n"
+        "  典型原因: 2 つのプロジェクトの editorBridgePort が同じ番号で、先に Play した側が"
+        "ポートを握っている（後発は bind failed のまま待ち続ける）。\n"
+        "  対処: プロジェクトごとに editorBridgePort を別番号にする"
+    )
+
+
+def _check_ios_target(info: dict[str, Any], host: str, port: int) -> None:
+    """`UAPP_E2E_IOS=1` なのに iOS シミュレータ以外へ繋がっていたら明示的に失敗させる。
+
+    エディタ直結ガード（`_check_editor_target`）と同じ約束: **明示宣言だけを根拠に検査する**。
+    iOS シミュレータのアプリは**ホストのポート名前空間で直接 LISTEN する**ため、
+    adb forward（デバイス）や editorBridgePort（エディタ）と同じ番号を選ぶと取り合いになる。
+    宣言があるときだけ ping の `platform`（iOS プレイヤーは `IPhonePlayer`）を確かめ、
+    違えば偽の緑になる前に止める（fail-closed。platform 欠落も通さない）。
+    """
+    if os.environ.get("UAPP_E2E_IOS") != "1":
+        return
+    platform = str(info.get("platform", ""))
+    if platform != "IPhonePlayer":
+        detail = f"platform={platform!r}" if platform else "ping の応答に platform がありません"
+        raise WrongBridgeTargetError(
+            f"iOS 向けの接続（{host}:{port}）なのに、"
+            f"接続先が iOS プレイヤーではありません（{detail}）。\n"
+            "  典型原因: 同じ番号を adb forward（Android 経路）やエディタ（editorBridgePort）が握っている。\n"
+            "  実機の場合は USB トンネル（iproxy）の張り先が想定と違う可能性もある。\n"
+            "  確認: lsof -nP -iTCP:<port> -sTCP:LISTEN で待受プロセスを見る\n"
+            "  対処: e2e-config.json の iosSimulatorPort を devicePort / editorBridgePort /"
+            "ホスト側 forward ポートのどれとも別番号にする"
+        )
+    # **bundle id まで照合する**（platform だけでは「同じポートを握る別の iOS アプリ」を
+    # 識別できない。UAPP_E2E_IOS_BUNDLE_ID は run-ios-e2e.ps1 が e2e-config.json の package を
+    # 渡す。未宣言なら従来どおり platform 検査のみ）
+    expected = os.environ.get("UAPP_E2E_IOS_BUNDLE_ID")
+    if expected:
+        actual = str(info.get("app", ""))
+        if actual != expected:
+            raise WrongBridgeTargetError(
+                f"iOS 向けの接続（{host}:{port}）ですが、接続先のアプリ"
+                f"（app={actual!r}）が期待した bundle id（{expected!r}）と一致しません。"
+                "同じ iosSimulatorPort を別プロジェクトの iOS アプリが握っている可能性があります"
+            )
+
+
+def _check_target_declarations() -> None:
+    """接続先宣言の矛盾を接続前に止める（両方立っていると、どちらの検査も意図どおり働かない）。"""
+    if os.environ.get("UAPP_E2E_EDITOR") == "1" and os.environ.get("UAPP_E2E_IOS") == "1":
+        raise WrongBridgeTargetError(
+            "UAPP_E2E_EDITOR=1 と UAPP_E2E_IOS=1 が同時に宣言されています。"
+            "接続先の意図が判定できないため中断します — 使わない側の環境変数を外してください"
+        )
+
+
 class BridgeClient:
     def __init__(self, host: str = "127.0.0.1", port: int | None = None, timeout: float = 30.0):
         self.host = host
@@ -211,6 +369,7 @@ class BridgeClient:
 
     def connect(self, retries: int = 30, interval: float = 1.0) -> "BridgeClient":
         """アプリ起動直後を考慮してリトライしながら接続する。"""
+        _check_target_declarations()
         last_error: Exception | None = None
         for _ in range(retries):
             try:
@@ -218,6 +377,7 @@ class BridgeClient:
                 self._file = self._sock.makefile("r", encoding="utf-8", newline="\n")
                 info = self.ping()  # 疎通確認（結果は接続先の検証にも使う。往復は増やさない）
                 _check_editor_target(info, self.host, self.port)
+                _check_ios_target(info, self.host, self.port)
                 return self
             except (OSError, BridgeError) as e:
                 last_error = e
@@ -265,6 +425,31 @@ class BridgeClient:
 
     def ping(self) -> dict:
         return self.call("ping")
+
+    def screenshot(self, path=None, max_width: int | None = None) -> bytes:
+        """画面を PNG で撮る（アプリ自身が撮るのでプラットフォーム非依存）。
+
+        **OS 層のキャプチャが使えないときの保険**であって上位互換ではない —
+        写るのは Unity の描画だけで、WebView・ネイティブダイアログ・ソフトキーボードは欠ける。
+        iOS 実機では OS 層の手段が版で入れ替わる（16 以前は idevicescreenshot、
+        17 以降は XCUITest の OS レイヤーエージェント。後者は端末側で
+        「設定 → デベロッパ → UI オートメーションを有効」が要る）ため、
+        **どちらも使えない構成でだけこれが最後の手段になる**。
+        Android・エディタ・iOS シミュレータでも同じ手段で撮れる。
+
+        path を渡すと保存もする。max_width を指定すると縮小して転送量を抑える
+        （実機は解像度が大きく、base64 が数 MB になる）。
+        """
+        args = {}
+        if max_width:
+            args["maxWidth"] = int(max_width)
+        result = self.call("screenshot", **args)
+        png = base64.b64decode(result["base64"])
+        if path is not None:
+            target = Path(path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(png)
+        return png
 
     def dump(self, scope: str = "ui", probe: str = "selectable", path: str | None = None) -> dict:
         args: dict[str, Any] = {"scope": scope, "probe": probe}
@@ -356,3 +541,42 @@ class BridgeClient:
         """
         return self.call("ngui_event", path=path, event=event)
 
+
+
+def wait_for_bridge(timeout: float = 60.0, host: str = "127.0.0.1",
+                    port: int | None = None, interval: float = 1.0) -> BridgeClient:
+    """ブリッジが応答するまで待って、接続済みクライアントを返す。
+
+    **Play をまたぐテストの定番部品**（導入先要望）: エディタ直結では
+    `unity cmd editor_stop` → `editor_play` のあと、ブリッジが再び待ち受けるまで
+    数秒〜数十秒かかる。各プロジェクトが自前のポーリングを書かなくて済むよう、
+    「タイムアウトまで接続を試し続ける」だけをここに置く。
+
+        client = wait_for_bridge(timeout=60)   # ポートは e2e-config.json を自動解決
+
+    接続できなければ ConnectionError（BridgeClient.connect と同じ内容）を投げる。
+    """
+    # 実時間の deadline で打ち切る（回数換算だと、接続だけ受理して ping に応答しない
+    # 停止途中のリスナー相手に「1 試行 = ソケット timeout 30 秒」が積み上がり、
+    # timeout=60 のつもりが 30 分級になりうる）。各試行のソケット timeout も残時間で抑える
+    deadline = time.monotonic() + timeout
+    last_error: Exception | None = None
+    while True:
+        # **最低 1 回は必ず試す**（timeout=0 は「即時プローブ 1 回」。ループ先頭で
+        # 残時間切れを判定すると 0 や負値が一度も接続せずに失敗する — 再レビュー指摘）。
+        # ソケット timeout は残時間で抑える（下限で丸めると短い timeout 指定を応答しない
+        # リスナー相手に超過する。0.05 は「試行を成立させる最小値」で体感に影響しない。
+        # 上限 10 秒は 1 接続が固まったまま全体を使い切るのを避けるため）
+        remaining = max(deadline - time.monotonic(), 0.0)
+        client = BridgeClient(host=host, port=port,
+                              timeout=min(max(remaining, 0.05), 10.0))
+        try:
+            return client.connect(retries=1, interval=0)
+        except ConnectionError as e:
+            last_error = e
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(min(max(interval, 0.1), max(deadline - time.monotonic(), 0)))
+    raise ConnectionError(
+        f"E2EBridge が {timeout} 秒以内に応答しません: {last_error}"
+    )

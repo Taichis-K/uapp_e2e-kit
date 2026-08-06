@@ -493,7 +493,7 @@ function selectScreen(id) {
       <td>${STATE_MARK[b.state]}</td>
       <td><b>${esc(b.text || b.name)}</b><br><span class="mono sub">${esc(b.path)}</span>
         ${dests.map(t => `<br><span class="golink" data-goto="${esc(t.to)}">→ ${esc(labelOf(t.to))}</span>${covBadge(t.to)}`).join("")}
-        ${b.state === "blocked" && b.blockedBy ? `<br><span class="sub">遮蔽: <span class="mono">${esc(b.blockedBy)}</span></span>` : ""}</td>
+        ${b.state === "blocked" && b.blockedBy ? `<br><span class="sub">遮蔽: <span class="mono">${esc(b.blockedBy)}</span>${(b.blockedByComponents || []).length ? `（${b.blockedByComponents.map(esc).join(", ")}）` : ""}</span>` : ""}</td>
       <td style="white-space:nowrap">${STATE_LABEL[b.state]}${CAN_PROBE && b.state !== "blocked"
         ? `<br><button class="probe-btn" data-btn="${i}">▶ タップ</button>` : ""}</td>
       <td class="mono sub">${b.tests.map(esc).join("<br>") || "—"}</td>
@@ -509,7 +509,8 @@ function selectScreen(id) {
       <span class="mono">${esc(b.path)}</span>
       ${destsOf(s.id, b.path).map(t => "<br>→ " + esc(labelOf(t.to)) + " " + covBadge(t.to)).join("")}
       ${b.tests.length ? "<br>テスト: <span class='mono'>" + b.tests.map(esc).join("<br>") + "</span>" : ""}
-      ${b.state === "blocked" && b.blockedBy ? "<br>遮蔽: <span class='mono'>" + esc(b.blockedBy) + "</span>" : ""}`);
+      ${b.state === "blocked" && b.blockedBy ? "<br>遮蔽: <span class='mono'>" + esc(b.blockedBy) + "</span>" +
+        ((b.blockedByComponents || []).length ? "（" + b.blockedByComponents.map(esc).join(", ") + "）" : "") : ""}`);
     hs.addEventListener("mouseenter", () => rowOf(+hs.dataset.btn)?.classList.add("hl"));
     hs.addEventListener("mouseleave", () => rowOf(+hs.dataset.btn)?.classList.remove("hl"));
     hs.addEventListener("click", () => {

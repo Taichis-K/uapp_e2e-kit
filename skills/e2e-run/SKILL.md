@@ -26,6 +26,11 @@ description: UnityアプリのE2Eテストを実行し、失敗時は証跡（lo
 3. 実行: `uapp_e2e\scripts\run-e2e.ps1`（テストのみ再実行なら `-SkipInstall`、部分実行は `-PytestArgs "-k <名前>"`）
 4. 全パスなら結果を報告して終了
 
+**iOS で検証する場合（macOS のみ）**: `uapp_e2e\scripts\build-ios.ps1` → `run-ios-e2e.ps1`
+（実機は両方に `-Target device`。adb を使うテストは自動 deselect される。
+`-PytestArgs` は空白区切りで分割されるため追加除外は `--deselect` で書く。
+制約と前提は SETUP.md の「iOS で使う場合」を先に読む）
+
 ## 失敗時の解析（この順で見る）
 
 1. pytest の失敗メッセージ。`BlockedError` は「誰に遮られたか」のパス付き —

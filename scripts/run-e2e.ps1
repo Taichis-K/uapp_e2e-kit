@@ -444,7 +444,14 @@ if ($Editor) {
         $wait = [System.Diagnostics.Stopwatch]::StartNew()
         $notified = $false
         while ($true) {
-            $raw = & $unityCli @cliGlobalArgs @CliArgs --format json --no-banner 2>&1 | Out-String
+            # **CLI の出力（UTF-8）をコンソール符号化で復号しない**（run-unity-tests.ps1 の
+            # Invoke-Pipeline と同じ理由: cp932 だとマルチバイトの後続バイトが `"` を飲み込み
+            # JSON が壊れる。dump の日本語 UI 名・日本語テスト名で発症する）
+            $prevEnc = [Console]::OutputEncoding
+            try {
+                [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+                $raw = & $unityCli @cliGlobalArgs @CliArgs --format json --no-banner 2>&1 | Out-String
+            } finally { [Console]::OutputEncoding = $prevEnc }
             $parsed = $null
             try { $parsed = $raw | ConvertFrom-Json } catch {}
             if ($parsed -and $parsed.success) {
@@ -482,13 +489,20 @@ if ($Editor) {
     # **名前はホスト全体スコープへ変換する**。素の名前だと Unix では
     # `/tmp/.dotnet/shm/session<ID>/` に隔離され、**別ターミナルからの同時実行を素通しする**
     # （＝このガードが黙って無効になる。mac で実測）。変換は Get-UappHostMutexName に集約。
-    $mutexName = Get-UappHostMutexName ("uapp_e2e-editor-" + (($projectDir.ToLowerInvariant() -replace "[^a-z0-9]", "-")))
+    # 名前の組み立ては restart-editor-play.ps1 と共有する（片方だけ別名だと排他が素通りする）
+    $mutexName = Get-UappEditorPlayMutexName $projectDir
     $editorMutex = New-Object System.Threading.Mutex($false, $mutexName)
     $mutexAcquired = $false
     try { $mutexAcquired = $editorMutex.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $mutexAcquired = $true }
     if (-not $mutexAcquired) {
         throw "このプロジェクトへの -Editor 実行が別プロセスで進行中です。完了を待って再実行"
     }
+    # 子（pytest→restart-editor-play.ps1）への「同一実行単位」の証明は、**この実行だけが
+    # 保持するリース mutex**で行う（実行ごとのランダム名・保持は下の finally まで）。
+    # PID 方式は不成立だった（4 周目レビュー指摘: `.\scripts\run-e2e.ps1` はシェル内で動くため
+    # $PID は対話シェルの PID。実行が終わってもシェルは生き続け、stale トークンが素通りする）
+    $sessionMutexName = Get-UappHostMutexName ("uapp_e2e-editor-session-" + [guid]::NewGuid().ToString("n"))
+    $sessionMutex = New-Object System.Threading.Mutex($true, $sessionMutexName)
     try {
 
     # エディタが Pipeline 接続済みかを確認。未接続なら pipeline install → エディタ起動 → 接続待ち
@@ -602,6 +616,14 @@ if ($Editor) {
     }
 
     # Game view 解像度: 実機と同等のアンカー配置にする（不一致だと UI が画面外に落ちて NOTHING_HIT になる）
+    # 解像度の優先順位: -EditorResolution 引数 > e2e-config.json の editorResolution > orientation 由来。
+    # **UI の設計解像度が orientation 既定と違うプロジェクトは editorResolution を設定する**
+    # （導入先実測: 900x1600 設計のところへ既定 1080x2340 で流すと、座標決め打ちのテストだけが
+    # 静かに壊れる — 大半の要素は取れてしまうので気づきにくい。毎回 -EditorResolution を
+    # 付ける運用は忘れるため、git 管理の設定に置けるようにする）
+    if (-not $EditorResolution -and $config.editorResolution) {
+        $EditorResolution = "$($config.editorResolution)"
+    }
     if (-not $EditorResolution) {
         $EditorResolution = if ($config.orientation -eq "landscape") { "2340x1080" } else { "1080x2340" }
     }
@@ -660,6 +682,14 @@ if ($Editor) {
     try {
         # **環境変数は try の中でだけ触る**（下の finally が必ず戻す）
         $env:UAPP_E2E_EDITOR = "1"
+        # このプロセスが保持している editor-play mutex の名前を子（pytest→テストが呼ぶ
+        # restart-editor-play.ps1）へ渡す。無いと、テスト中の Play 再起動が親の保持する
+        # mutex に阻まれて必ず中断する（＝Play またぎテストという本来用途が成立しない）。
+        # リース mutex の名前も渡す: 子は「名前一致＋リースがまだ保持されている」ときだけ
+        # 素通しする（この実行が終われば finally でリースが手放されるので、残った子が
+        # 次の実行の排他を stale トークンで素通りすることはない）
+        $env:UAPP_E2E_EDITOR_LOCK = $mutexName
+        $env:UAPP_E2E_EDITOR_LOCK_SESSION = $sessionMutexName
         if ($cliProxyDisable) { $env:UAPP_E2E_UNITY_CLI_PROXY_DISABLE = "1" }
         if ($editorPortToPass) { $env:UAPP_E2E_BRIDGE_PORT = $editorPortToPass }
         # ジャーニーのスクリーンショットは adb ではなく Unity CLI の screenshot で撮る
@@ -693,6 +723,8 @@ if ($Editor) {
     } finally {
         Pop-Location
         Remove-Item Env:\UAPP_E2E_EDITOR -ErrorAction SilentlyContinue
+        Remove-Item Env:\UAPP_E2E_EDITOR_LOCK -ErrorAction SilentlyContinue
+        Remove-Item Env:\UAPP_E2E_EDITOR_LOCK_SESSION -ErrorAction SilentlyContinue
         if ($savedCliProxyEnv) { $env:UAPP_E2E_UNITY_CLI_PROXY_DISABLE = $savedCliProxyEnv }
         else { Remove-Item Env:\UAPP_E2E_UNITY_CLI_PROXY_DISABLE -ErrorAction SilentlyContinue }
         Remove-Item Env:\UAPP_E2E_JOURNEY_DIR -ErrorAction SilentlyContinue
@@ -709,6 +741,8 @@ if ($Editor) {
 
     } finally {
         # 途中の throw でもプロセス間ロックを確実に解放する（Play/シーン操作前の失敗を含む）
+        $sessionMutex.ReleaseMutex()
+        $sessionMutex.Dispose()
         $editorMutex.ReleaseMutex()
         $editorMutex.Dispose()
     }

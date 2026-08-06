@@ -6,5 +6,6 @@
   "deviceRotation": null,
   "devicePort": 13333,
   "editorBridgePort": 13343,
+  "iosSimulatorPort": 13353,
   "uiType": "ugui-nis"
 }

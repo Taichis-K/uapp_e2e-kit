@@ -38,11 +38,36 @@ Python ドライバ側の解決と挙動を揃え、片側だけフォールバ�
   `WrongBridgeTargetError` で止める（**宣言の無い接続は検査されない**）。
   **踏まないのは番号を分けること**。`install-to-project.ps1`（導入時・local.json が無ければ既定で仮判定）と
   `run-e2e.ps1`（forward の直前・`-HostPort` 確定後なので誤検知なし）の両方が検査する
+- **iOS シミュレータ（macOS のみ。kit 0.1.9 で配布キットに統合済み）**: `run-ios-e2e.ps1` /
+  `build-ios.ps1` / `iosSimulatorPort` が該当。シミュレータのアプリは**ホストのポート名前空間で直接
+  LISTEN する**（adb forward 相当は不要）。そのため `e2e-config.json` の `iosSimulatorPort` が
+  実際に取り合いになる相手は **①起動中の他プロジェクトの iOS アプリの `iosSimulatorPort`
+  ②全プロジェクトの `editorBridgePort` ③adb forward が握るホスト側ポート ④その他のホスト上の
+  LISTEN 全部** — このどれとも別番号にする（`devicePort` 自体はデバイス内の別名前空間だが、
+  慣例としてホスト側 forward ポートと同番号にするため、結果的に避けるのが安全）。
+  ポートはアプリへ **`SIMCTL_CHILD_UAPP_E2E_BRIDGE_PORT` 環境変数**で渡す（`run-ios-e2e.ps1` が設定。
+  `simctl launch` の後置引数はプロセスの argv には届くが Unity の managed 側からは見えない。
+  2026-08-05 実測）。起動 Intent 相当の経路は無いので、解決順序は 2（環境変数）→ 5（既定）になる。
+  ドライバは **`UAPP_E2E_IOS=1` を宣言した接続に限り** ping の `platform` が `IPhonePlayer` で
+  あることを検査し、違えば `WrongBridgeTargetError` で止める（エディタ直結ガードと同じ約束。
+  宣言の無い接続は検査されない。`UAPP_E2E_EDITOR` との同時宣言は接続前に明示エラー）。
+  adb を使う操作は `UAPP_E2E_IOS=1` では明示エラーになる（Android 端末の誤検証防止）
+- **iOS 実機のポート（同じく kit 0.1.9 で統合済み）**: 実機はシミュレータと違い
+  ホストから直接届かないので、**`iproxy <ホスト側>:<デバイス側> -u <UDID>` で USB トンネル**を張る
+  （Android の `adb forward` と同じ役割）。デバイス側は `iosSimulatorPort` を流用し、
+  **ホスト側は既定で `iosSimulatorPort + 10`**（`-HostPort` で変更可）。
+  ポートの渡し方は**版で変わる**: iOS 17 以降は **`DEVICECTL_CHILD_UAPP_E2E_BRIDGE_PORT`**
+  （`SIMCTL_CHILD_` と同型の接頭辞）、iOS 16 以前は `idevicedebug --env UAPP_E2E_BRIDGE_PORT=…`。
+  **無いと既定 13333 で待ち受けて設定と食い違う**
+- **OS レイヤーエージェントのポート（同上）**: XCUITest ランナーの HTTP は**デバイス側 8200**
+  （`-OsAgentPort`）で待ち受け、**実機ではホスト側 `+1`（既定 8201）**へ iproxy でトンネルする。
+  ブリッジのポートとは別系統なので、**ホスト上の他の LISTEN とも別番号**にすること
 - **Python ドライバ側の接続先解決**（`BridgeClient` / `resolve_port`）: 明示引数 >
   環境変数 `UAPP_E2E_BRIDGE_PORT` > カレントディレクトリから親方向に探索した
   `e2e-config.json` の `editorBridgePort` > 既定 13333。
   ポート未指定の `BridgeClient()` はエディタ直結の設定と自動で一致する
-  （デバイス向けの pytest は forward したホスト側ポートに固定されるため影響しない）
+  （デバイス向けの pytest は forward したホスト側ポートに固定され、iOS シミュレータ向けは
+  `run-ios-e2e.ps1` が `UAPP_E2E_BRIDGE_PORT` に `iosSimulatorPort` を渡すため影響しない）
 
 ポート競合時の挙動: bind に失敗したブリッジは**2秒間隔で約60秒間リトライ**し、ポートが解放され次第
 自己回復する（logcat に `[E2EBridge] bind failed ... リトライします` が出る）。
@@ -86,14 +111,60 @@ Android ネイティブ座標（左上原点・物理ピクセル）へ変換が
 ```json
 → {"cmd": "ping"}
 ← {"bridge": "1.0", "app": "com.uapp.e2esample", "unity": "6000.3.6f1",
-   "platform": "Android", "screen": {"w": 1080, "h": 2400}, "activePointers": 0, ...}
+   "platform": "Android", "project": null, "scene": "SampleScene",
+   "screen": {"w": 1080, "h": 2400}, "activePointers": 0, ...}
 ```
+`scene` はアクティブシーン名。**「遷移を待つ」ポーリングは dump ではなく ping で回せる**
+（全ツリーを取らないぶん間隔を詰めやすい。導入先要望で追加）。
 `platform` は `Application.platform`（エディタなら `OSXEditor` / `WindowsEditor` / `LinuxEditor`）。
 **`UAPP_E2E_EDITOR=1` が宣言されているときに限り**、ドライバは接続直後にこれを見て、
 エディタ以外へ繋がっていたら `WrongBridgeTargetError` で止める
 （`connect()` が疎通確認で叩く ping の結果を流用するので往復は増えない）。デバイス実行が残した `adb forward` が `editorBridgePort` と同じ番号を握ると、
 エディタのつもりで端末のアプリを検証してしまうため。**宣言の無い接続は検査されない** —
 手動でエディタへ繋ぐときも `UAPP_E2E_EDITOR=1` を付ける（`adb` の使用ガードと同じ約束）。
+
+`project` は**エディタのときだけ**返るプロジェクトルートの絶対パス（`dataPath` の親。
+プレイヤーでは `null`）。**`platform` だけでは「どのプロジェクトのエディタか」が分からない** —
+2 つのプロジェクトの `editorBridgePort` が同じ番号だと、先に Play した側がポートを握り、
+後発は bind に失敗して待つ。この状態で後発のテストを回すと**先着のエディタへ繋がったまま
+緑になりうる**（UI が似ていれば気づけない。issue #26）。そこでドライバは
+`UAPP_E2E_EDITOR=1` の接続に限り、この値と**期待するプロジェクト**
+（`UAPP_E2E_PROJECT_PATH` → `e2e-config.json` のあるツリーから特定）を照合する。
+**どちらかが欠けても止める**（fail-closed。確かめられなかったものを一致扱いにすると
+ガードが有名無実になる）。**`project` は後から追加したので、古い計装のままでは止まる** —
+その場合は導入先で再ビルドする。
+
+### screenshot
+
+```
+→ {"cmd": "screenshot", "args": {"maxWidth": 720}}   # maxWidth は省略可（既定: 等倍）
+← {"format": "png", "width": 720, "height": 1560, "bytes": 123456, "base64": "..."}
+```
+
+アプリ自身が画面を撮って PNG（base64）で返す。**外部ツールも特権も要らないので全経路で使える**が、
+**限界と代償がある**ため、ドライバは既定でこのコマンドを使わない
+（`UAPP_E2E_BRIDGE_SCREENSHOT=1` を宣言したときだけ）:
+
+- **Unity の描画結果しか写らない**。ネイティブ WebView・システムダイアログ・ソフトキーボード・
+  広告 SDK のビューは **Unity の描画パイプラインの外**にあるため欠ける（Unity 公式仕様）。
+  **画面に出ているものを忠実に残したいなら OS 層のキャプチャを使う** — Android は
+  `adb screencap`（ドライバの `adb.screencap()` / ジャーニー記録が既定で使う）、
+  iOS はシミュレータが `simctl io`、実機は **iOS 16 以前なら `idevicescreenshot`**、
+  **iOS 17 以降は OS レイヤーエージェント（自前の XCUITest ランナー）**
+  （後者は端末側で「設定 → デベロッパ → UI オートメーションを有効」が要る）。
+  **ただし iOS の実行経路と OS エージェントは配布キットに未収録**（開発リポジトリ側の実装）。
+  **エディタ直結は OS 層ではなく Unity CLI 経由の撮影**で、Unity のフレームを撮る点はこのコマンドと
+  同じ（ネイティブビューは写らない）。**このコマンドはそれらが使えない場合の代替**であって、
+  上位互換ではない（撮影手段の選択順は docs/07-viewer.md の表）
+- **撮る瞬間だけアプリのフレームにコストがかかる**。GPU の読み戻しは
+  `CaptureScreenshotIntoRenderTexture` ＋ `AsyncGPUReadback` で非同期化し、`maxWidth` の縮小も
+  読み戻し前に GPU 上で済ませてあるが、**PNG エンコード（メインスレッド）は残る**。
+  影響の大きさは実プロジェクトの描画負荷と解像度に依存する
+- **撮影中は後続コマンドを実行しない**（要求時と違う画面を撮らないための順序保証）。
+  撮影中に来た 2 件目の screenshot は `INTERNAL` エラーで返す
+
+**このコマンドは E2EBridge の追加なので、導入先は再ビルドが必要**（古い計装へ送ると
+`UNKNOWN_COMMAND` になる。ドライバはその場合、画像なしで記録を続ける）。
 
 ### dump
 UI 階層をツリー JSON で返す。AI がテストを書くための「地図」。
@@ -132,6 +203,13 @@ UI 階層をツリー JSON で返す。AI がテストを書くための「地�
   `EventSystem.RaycastAll` の最前面ヒットで判定
 - `blockedBy`: 遮られている場合の遮蔽オブジェクトのパス。特殊値:
   `"INACTIVE"`（非アクティブ）/ **`"NOT_RAYCASTABLE"`** / `"NOTHING_HIT"` / `"NO_EVENTSYSTEM"`
+- `blockedByComponents`: `blockedBy` が**パスのときだけ**付く、遮蔽者が持つコンポーネント型名の
+  一覧（Transform 除く・重複なし。例: `["Image", "DialogShield"]`）。
+  **「押して退けるものか・待つべきものか」を呼び手が機械判定するための材料**
+  （導入先実測: 押しても退かないシールドを連打してしまった。パスの命名に依存せず、
+  遮蔽者のクラス名で分岐できる）。種別の解釈はプロジェクト固有なので、ブリッジは
+  事実だけを返し判断は呼び手に委ねる。dump のノードにも同じ規則で付く。
+  ドライバの `BlockedError` は `blocked_by_components` 属性とメッセージ末尾でこれを持つ
 - **`hittable: false` の理由は 3 通りあり、対処が違う**（混ぜると AI が無関係な対象を追う）:
 
   | 値 | 意味 | 対処 |

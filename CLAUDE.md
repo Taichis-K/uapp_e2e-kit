@@ -34,6 +34,16 @@ $env:UAPP_E2E_EDITOR = "1"; pytest tests; Remove-Item Env:\UAPP_E2E_EDITOR
 
 対象は adb を直接使わないテストのみ（logcat アサート・adb タップ入りのテストは
 エディタ直結モードでは明示エラーになる → `-k` で除外する）。
+
+**Play をまたぐテスト**（新規ユーザーからやり直す等、メモリ上の状態を捨てたい場合）は
+1 プロセスの中で完結できる: `.\scripts\restart-editor-play.ps1`（Play 停止 → 再生。
+Unity CLI 必須）→ ドライバの `wait_for_bridge(timeout=60)` でブリッジ復帰を待って接続し直す。
+
+```python
+from e2e_driver import wait_for_bridge
+# （PowerShell 側で .\scripts\restart-editor-play.ps1 を実行した後）
+client = wait_for_bridge(timeout=60)   # ポートは e2e-config.json を自動解決
+```
 サンドボックス環境（Codex 等）で pytest がハング/失敗するときは、一時領域がワークスペース外の
 `%TEMP%` に作られ拒否されるのが典型原因 → `--basetemp ..\Builds\pytest-tmp` を付ける（gitignore 済み領域）。
 
@@ -42,7 +52,12 @@ UI階層の確認（**テストを書く前に必ず実物を見る**。例は�
 
 ```powershell
 cd driver
-python -c "from e2e_driver import BridgeClient; import json; print(json.dumps(BridgeClient().connect().dump(), indent=1, ensure_ascii=False))"
+$env:UAPP_E2E_EDITOR = '1'   # **必ず宣言する**。宣言があるときだけ、ドライバが
+                             # 「本当にこのプロジェクトのエディタか」を確かめる
+                             # （platform＋project 照合。宣言が無い接続は検査されない）
+try {
+  python -c "from e2e_driver import BridgeClient; import json; print(json.dumps(BridgeClient().connect().dump(), indent=1, ensure_ascii=False))"
+} finally { Remove-Item Env:\UAPP_E2E_EDITOR -ErrorAction SilentlyContinue }
 ```
 
 **エディタへ繋ぐときは `UAPP_E2E_EDITOR=1` を付け、使い終わったら必ず消す**:
@@ -86,7 +101,11 @@ python -m e2e_driver.journey ..\Builds\journey    # → report.html 生成（詳
 
 1. **dump を見てから書く**。コードから推測した名前でテストを書かない。
    `Builds/journey/journey.json`（ジャーニー記録）があれば**画面・ボタン・カバレッジの索引**として
-   先に読んでよいが、過去のスナップショットなので使うパスは生 dump で最終確認する
+   先に読んでよいが、過去のスナップショットなので使うパスは生 dump で最終確認する。
+   **`Selectable`（Button 等）を使わない UI 実装では `dump(probe="all")` を使う** —
+   既定の `probe="selectable"` は Selectable 持ちしか hittable 判定しないため、
+   透明 Image や独自ボタンだけの画面では**押せる対象が 1 件も出ず**、
+   「操作待ちではない」と誤読する（導入先で実際に踏まれた）
 2. タップは `Gestures.tap`（hittable検証込み）。`BlockedError` は遮蔽者のパスを含む —
    仕様（先に閉じる/`wait_until_hittable`）かバグ（アプリ修正）かをそこから判断する
 3. 待機は `wait_until_visible / gone / hittable / until` を使う。`time.sleep` は
@@ -104,7 +123,8 @@ python -m e2e_driver.journey ..\Builds\journey    # → report.html 生成（詳
 5. **NGUI のレガシーInput構成では `ngui_tap / ngui_press / ngui_release`**（`pointer_*` は届かない）。
    構成は `ping` の `ngui` と、NGUI が `Input.touchCount` を直読みしているかで判断
 6. マルチタッチテストには logcat 例外アサート（`adb.clear_logcat()` → 操作 → `adb.unity_exceptions()` 空）を付ける
-7. 描画の検証は `adb.screencap()` で画像を取得して読む（エディタ直結では journey のスクリーンショットを見る）
+7. 描画の検証は `adb.screencap()` で画像を取得して読む（エディタ直結では journey のスクリーンショットを見る）。
+   **撮影は「OS 層優先・計装は保険」の 2 段構え** — `adb screencap` は画面に出ているものをそのまま残せるが、計装の `client.screenshot()` は **Unity の描画しか写らない**（WebView・ネイティブダイアログ・ソフトキーボードは欠ける）。後者は既定オフで、`UAPP_E2E_BRIDGE_SCREENSHOT=1` を宣言したときだけ使える（縮小は `UAPP_E2E_BRIDGE_SCREENSHOT_MAX_WIDTH`）
 
 ## 失敗解析の優先順位
 
@@ -137,6 +157,18 @@ python -m e2e_driver.journey ..\Builds\journey    # → report.html 生成（詳
   前提と既知の差分は [SETUP.md](SETUP.md) の「macOS で使う場合」。
   **パス結合に `Join-Path $dir "A\B"` と書かない**（mac では `\` が区切りにならない）。
   代わりに `Join-UappPath $dir "A\B"` を使う（両方の区切りを解釈する）
+- **対応プラットフォームは Android（実機・エミュレーター）・エディタ直結・iOS（macOS のみ）**。
+  iOS は 0.1.9 で統合された（`build-ios.ps1` / `run-ios-e2e.ps1`。シミュレータ・実機とも）。
+  使う前に [SETUP.md](SETUP.md) の「iOS で使う場合」の制約表を**設計前に**読むこと —
+  特に **iOS のアプリ外（外部ブラウザ・システムダイアログ）の操作は、計装では不可・
+  同梱の OS レイヤーエージェント（`run-ios-e2e.ps1 -OsAgent`）でも座標タップとスクショまでしか
+  検証されていない**（Android は同梱の `adb` uiautomator 経由で文字入力まで可能）。
+  **外部ブラウザ認証を含む導線は iOS では検証が止まりうる**前提で設計する
+- **計装が撮るスクショ（`client.screenshot()`）は Unity の描画しか写らない**。
+  WebView・ネイティブダイアログ・ソフトキーボード・広告 SDK のビューは欠ける。
+  **画面に出ているものを忠実に残すなら OS 層**（Android は `adb screencap`。ジャーニー記録は
+  既定でこちらを使う）。計装側の撮影は**撮る瞬間にアプリのフレームコストがかかる**ため既定オフ
+  （`UAPP_E2E_BRIDGE_SCREENSHOT=1` で有効化）
 - 計装は `UAPP_E2E_BRIDGE` define のあるビルドのみ。**本番ビルドに define を付けない**
 - `Assets/uapp_e2e/E2EBridge/` を変更したら `docs/02-protocol.md` と `driver/e2e_driver/` を同期
 - 計装入りビルドを社外配布しない

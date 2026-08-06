@@ -371,7 +371,16 @@ if ($Editor) {
                       @("--format", "json", "--no-banner")
             $raw = (Invoke-WithTimeout -FilePath $unityCli -Arguments (@($cliGlobalArgs) + $quoted) -TimeoutSeconds $TimeoutSeconds).Output
         } else {
-            $raw = & $unityCli @cliGlobalArgs cmd --project-path $projectDir @CmdArgs --format json --no-banner 2>&1 | Out-String
+            # **CLI の出力（UTF-8）をコンソール符号化で復号しない**。日本語 Windows の既定
+            # （cp932）だと、日本語テスト名等のマルチバイトの**後続バイトが直後の `"` を
+            # 飲み込んで JSON が壊れ、「全件成功なのに失敗扱い」**になる（unity-nis の
+            # 日本語テスト名で実測。ASCII 名だけのプロジェクトでは発症しない）。
+            # `&` 直取りの復号は [Console]::OutputEncoding に従うため、この間だけ UTF-8 にする
+            $prevEnc = [Console]::OutputEncoding
+            try {
+                [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+                $raw = & $unityCli @cliGlobalArgs cmd --project-path $projectDir @CmdArgs --format json --no-banner 2>&1 | Out-String
+            } finally { [Console]::OutputEncoding = $prevEnc }
         }
         $parsed = $null
         try { $parsed = $raw | ConvertFrom-Json } catch {}
@@ -450,6 +459,19 @@ if ($Editor) {
     # コンパイルは始まらないので、**開始待ちは短い猶予で打ち切る**（無変更なら待つ意味がない）。
     # そのうえで最後に必ず `EditorUtility.scriptCompilationFailed` を見る。これは
     # 「まだ走っていない」に影響されず、**現在のアセンブリが壊れているか**をそのまま返す
+    # **Play 中なら待つ前に止める**（導入先 §24・実測）: Unity は Play 中のスクリプトコンパイルを
+    # 保留するため、このまま recompile を投げると 300 秒待った末に「Console でコンパイルエラーを
+    # 確認しろ」という**存在しないエラーを探させる誤誘導**になる。バランス調整で人がゲームを
+    # 遊んで放置しているのが常態の導入先があるので、**自動では停止しない**（進行中のプレイが消える）
+    $esProbe = Invoke-Pipeline @("editor_status") -AllowFail -TimeoutSeconds 60
+    $esResult = if ($esProbe) { $esProbe.data.result } else { $null }
+    if ($esResult -is [string]) { try { $esResult = $esResult | ConvertFrom-Json } catch {} }
+    $playMode = "$($esResult.playMode)"
+    if ($playMode -in @("playing", "paused")) {
+        throw ("エディタが Play 中です（playMode: $playMode）。Unity は Play 中のスクリプトコンパイルを" +
+               "保留するため、このまま待ってもテストは始まりません。**Play を停止してから再実行**" +
+               "してください（人が操作している可能性があるため、自動では停止しません）")
+    }
     Write-Host "[$projectName] コンパイルを確認中..."
     # **`recompile` 自身の戻り値を捨てない**（これが「走り出したか」の一次情報）。
     # com.unity.pipeline の RecompileCommand は AssetDatabase.Refresh() のあと
@@ -480,7 +502,14 @@ if ($Editor) {
         $probe = Invoke-Pipeline @("recompile_status") -AllowFail -TimeoutSeconds 60
         if (-not $probe -or -not $probe.success) {
             if (-not $sawCompiling) {
-                throw ("recompile_status が応答しません（コンパイルは開始していない）。" +
+                # **コールドスタート直後の一瞬の非応答を即死にしない**（導入先 §25・実測:
+                # キットが自分で起動したエディタは接続直後まだインポート中で、recompile_status が
+                # 数秒だけ応答を落とす。直後に叩くと 1 秒で返り、再実行すれば通っていた）。
+                # 非応答は「何も分からない」であって、偽の緑の原因だった「up_to_date の誤読」とは
+                # 別物なので、**猶予内のリトライは §16 のガードを弱めない**（状態が取れたときの
+                # 判定と最後の砦は不変）。猶予を超えても応答が無ければ従来どおり止める
+                if ($sw.Elapsed.TotalSeconds -lt 30) { Start-Sleep -Milliseconds 700; continue }
+                throw ("recompile_status が 30 秒応答しません（コンパイルは開始していない）。" +
                        "エディタと Pipeline の接続を確認してください")
             }
             Start-Sleep -Milliseconds 700
@@ -516,7 +545,17 @@ if ($Editor) {
         Start-Sleep -Milliseconds 700
     }
     if (-not $compileDone) {
-        throw ("コンパイルが 300 秒で終わりません（最後の状態: $phase）。" +
+        # 保険: 事前検査の後で人が Play を始めた場合もここへ来る。playMode を添えて
+        # 「存在しないコンパイルエラーを探させる」誤誘導を避ける（導入先 §24）
+        $lateEs = Invoke-Pipeline @("editor_status") -AllowFail -TimeoutSeconds 30
+        $lateResult = if ($lateEs) { $lateEs.data.result } else { $null }
+        if ($lateResult -is [string]) { try { $lateResult = $lateResult | ConvertFrom-Json } catch {} }
+        $latePlay = "$($lateResult.playMode)"
+        $playHint = if ($latePlay -in @("playing", "paused")) {
+            "**エディタが Play 中です（playMode: $latePlay）。Unity は Play 中コンパイルを保留するので、" +
+            "Play を停止してから再実行してください（コンパイルエラーではない可能性が高い）。**"
+        } elseif ($latePlay) { "（playMode: $latePlay）" } else { "" }
+        throw ("コンパイルが 300 秒で終わりません（最後の状態: $phase）。$playHint" +
                "エディタの Console でコンパイルエラーを確認してください。" +
                "この状態で走らせると古いアセンブリのまま緑になりうるので中断します")
     }

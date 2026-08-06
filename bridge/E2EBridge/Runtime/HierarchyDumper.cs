@@ -117,12 +117,14 @@ namespace E2EBridge
             var shouldProbe = probe == "all" || (probe == "selectable" && clickable);
             if (shouldProbe && go.activeInHierarchy && screenRect is Rect pr)
             {
-                var (hittable, blockedBy) = isNgui
+                var (hittable, blockedBy, blocker) = isNgui
                     ? NguiAdapter.Probe(go, pr.center)
                     : RaycastProbe.Probe(go, pr.center);
                 node["hittable"] = hittable;
                 if (blockedBy != null)
                     node["blockedBy"] = blockedBy;
+                if (blocker != null)
+                    node["blockedByComponents"] = ComponentNames(blocker);
             }
 
             if (t.childCount > 0)
@@ -134,6 +136,23 @@ namespace E2EBridge
             }
 
             return node;
+        }
+
+        /// <summary>
+        /// 遮蔽オブジェクトが持つコンポーネント型名の一覧（Transform を除く・重複なし）。
+        /// 呼び手が「押して退けるものか・待つべきものか」を機械判定するための事実情報。
+        /// </summary>
+        private static JArray ComponentNames(GameObject go)
+        {
+            var names = new JArray();
+            var seen = new HashSet<string>();
+            foreach (var component in go.GetComponents<Component>())
+            {
+                if (component == null || component is Transform) continue;   // Missing Script は null になる
+                var name = component.GetType().Name;
+                if (seen.Add(name)) names.Add(name);
+            }
+            return names;
         }
 
         // ------------------------------------------------------------- resolve
@@ -170,12 +189,17 @@ namespace E2EBridge
 
                 if (go.activeInHierarchy)
                 {
-                    var (hittable, blockedBy) = isNgui
+                    var (hittable, blockedBy, blocker) = isNgui
                         ? NguiAdapter.Probe(go, rect.center)
                         : RaycastProbe.Probe(go, rect.center);
                     result["hittable"] = hittable;
                     if (blockedBy != null)
                         result["blockedBy"] = blockedBy;
+                    // **「押して退けるものか・待つべきものか」を呼び手が機械判定するための材料**。
+                    // 種別の解釈（shield か UI か）はプロジェクト固有なので、ブリッジは
+                    // 事実（遮蔽者が持つコンポーネント型名）だけを返し、判断は呼び手に委ねる
+                    if (blocker != null)
+                        result["blockedByComponents"] = ComponentNames(blocker);
                 }
                 else
                 {

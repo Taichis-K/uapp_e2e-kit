@@ -53,7 +53,7 @@ from e2e_driver.journey import JourneyRecorder
 
 c = BridgeClient().connect()
 j = JourneyRecorder(c, "Builds/journey")
-j.capture("title")           # 現在画面を記録（スクショは adb 必須。エディタ直結時は自動スキップ）
+j.capture("title")           # 現在画面を記録（スクショの手段は接続先ごとに選ばれる。下の「制約」の表）
 g = j.wrap(Gestures(c))
 g.tap("Canvas/StartButton")
 j.capture("home")            # 遷移 title -[Canvas/StartButton]-> home が自動記録される
@@ -80,6 +80,9 @@ j.save()
       "scene": "TitleScene",      // dump の scene
       "screen": {"w": 2400, "h": 1080},   // capture時の Unity 解像度（座標系の基準）
       "screenshot": "screens/title.png",  // journey.json からの相対パス。取得不可なら null
+      "screenshotSource": "adb",  // どの経路で撮ったか（下の「制約」の表と同じ値。取得不可なら null）
+                                  // **画像があっても経路で写る内容が違う**（OS 合成か Unity 描画のみか）ので必ず見る。
+                                  // ビューアーは表示しないため、判断するときは journey.json を直接読む
       "capturedAt": "2026-07-12T12:34:56+09:00",
       "buttons": [                // dump(probe=selectable) で hittable 判定が付いたノード
         {
@@ -188,7 +191,21 @@ journey.json は可視化専用ではなく、**AI がテストを書くとき�
 
 ## 制約
 
-- スクリーンショットは adb 経由（デバイス/AVD のみ）。エディタ直結時は screenshot なしで記録される
+- スクリーンショットの取得手段は**接続先ごとに選ばれる**（上から順に試し、使えなければ次へ）:
+
+  | 接続先 | `screenshotSource` | 手段 | 何が写るか |
+  |---|---|---|---|
+  | iOS（OS エージェント起動時） | `os-agent` | XCUITest の `XCUIScreen.screenshot()` | **OS が合成した画面そのまま**。実機は **CoreDevice に載っていること（`pairingState: paired`）＋端末側の「設定 → デベロッパ → UI オートメーションを有効」**が前提。CoreDevice に載らない端末では使えない（iOS 16 の 1 台で実測。版で決まるかは未確認） |
+  | エディタ直結 | `editor-cli` | Unity CLI 経由の撮影 | Unity のフレーム（ネイティブビューは写らない） |
+  | iOS シミュレータ | `simctl` | `simctl io screenshot` | **OS が合成した画面そのまま** |
+  | iOS 実機・iOS 16 以前（**実装は iOS の主版 ≤16 のときだけ試行する**。実測は iOS 16 の 1 台。`pairingState` は使わない — それは上の OS エージェント行の可否条件） | `idevicescreenshot` | `idevicescreenshot` | **OS が合成した画面そのまま** |
+  | Android 実機/AVD | `adb` | `adb screencap` | **OS が合成した画面そのまま** |
+  | 上記が使えないとき | `bridge` | 計装の `screenshot`（**既定オフ**。`UAPP_E2E_BRIDGE_SCREENSHOT=1` で有効化。縮小は `UAPP_E2E_BRIDGE_SCREENSHOT_MAX_WIDTH`） | Unity の描画のみ・撮影時にアプリのフレームコスト |
+
+  **表の並びは実装（`journey.py`）の試行順そのもの**。順序を変えるときは両方直すこと。
+  iOS の 3 行は macOS でのみ使える（kit 0.1.9 で iOS 経路を統合済み。前提と制約は
+  SETUP.md の「iOS で使う場合」）。
+  どの手段も使えなければ画像なしで記録する（`screenshot` と `screenshotSource` が `null`）
 - 「ボタン」の判定は dump の probe=selectable と同じ（uGUI Selectable ＋ NGUI コライダー保持ノード）。
   独自入力実装のボタンは写らないことがある — その場合 dump を確認し `probe="all"` で capture する
 - 記録した瞬間のスナップショットであり、ライブ表示ではない
