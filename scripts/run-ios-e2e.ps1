@@ -629,6 +629,19 @@ $script:agentLog = $null
 $script:agentFailed = $false
 $script:agentStopped = $false
 if ($OsAgent) {
+    # **同じ案内を 2 か所へ書かない**（片方だけ直す事故が実際に起きている）。
+    # エージェントが起動しない／応答しない両方の経路で、この 1 本を使う
+    $agentHelp = "。**実機でこれが出るときは端末側の前提を疑う** — ①「設定 → デベロッパ → " +
+        "UI オートメーションを有効」が ON か確認する（OFF だと install も起動も通り" +
+        "「Automation Running」まで出るのに約 8 秒で接続が切られ、クラッシュレポートも残らない。" +
+        "2026-08-06 実測）②復旧手順を実行する: **USB を抜く → 端末を再起動 → ロック解除 → " +
+        "UI オートメーションを OFF→ON → USB を挿す**（2026-08-07 に採用。" +
+        "**ケーブルを挿したまま再起動した直後は同じ症状が再現した**）③それでも駄目なら切り分ける: " +
+        "対照テスト `xcodebuild test -only-testing:UappOsAgentRunner/UappOsAgent/testTrivial` と、" +
+        "ジェスチャ単体のプローブ `TEST_RUNNER_UAPP_OS_AGENT_GESTURE_PROBE=direct`（または " +
+        "`dispatch`）付きの `-only-testing:UappOsAgentRunner/UappOsAgent/testRunAgent`。" +
+        "**対照テストの通過は常駐エージェントの生存を保証しない**（すぐ終わるので短い窓に掛からない）。" +
+        "詳細は SETUP.md の「iOS で使う場合」"
     if (-not $OsAgentPort) { $OsAgentPort = 8200 }
     if ($OsAgentPort -lt 1 -or $OsAgentPort -gt 65535) { throw "-OsAgentPort が値域外です: $OsAgentPort" }
     $agentProject = Join-UappPath $root "oslayer/UappOsAgent/UappOsAgent.xcodeproj"
@@ -757,8 +770,7 @@ if ($OsAgent) {
         $ready = $false
         while ((Get-Date) -lt $deadline) {
             if ($agentProc.HasExited) {
-                throw ("OS エージェントが起動直後に終了しました（詳細: $script:agentLog）" +
-                        "。**実機でこれが出るときは、まず端末の「設定 → デベロッパ → UI オートメーションを有効」を確認する** — これが OFF だと install も起動も通り「Automation Running」まで出るのに約 8 秒で接続が切られ、クラッシュレポートも残らない（2026-08-06 実測）。切り分けは、すぐ終わる対照テストを走らせること: xcodebuild test -only-testing:UappOsAgentRunner/UappOsAgent/testTrivial")
+                throw ("OS エージェントが起動直後に終了しました（詳細: $script:agentLog）" + $agentHelp)
             }
             $probe = $null
             try {
@@ -773,8 +785,7 @@ if ($OsAgent) {
             Start-Sleep -Seconds 3
         }
         if (-not $ready) {
-            throw ("OS エージェントが応答しません（6 分。詳細: $script:agentLog）" +
-                   "。**実機でこれが出るときは、まず端末の「設定 → デベロッパ → UI オートメーションを有効」を確認する** — これが OFF だと install も起動も通り「Automation Running」まで出るのに約 8 秒で接続が切られ、クラッシュレポートも残らない（2026-08-06 実測）。切り分けは、すぐ終わる対照テストを走らせること: xcodebuild test -only-testing:UappOsAgentRunner/UappOsAgent/testTrivial")
+            throw ("OS エージェントが応答しません（6 分。詳細: $script:agentLog）" + $agentHelp)
         }
         Write-Host "OS エージェント: $agentUrl（$(if ($isDevice) { "USB トンネル経由" } else { "シミュレータ直" })）"
     }

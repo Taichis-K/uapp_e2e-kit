@@ -74,6 +74,39 @@ final class UappOsAgent: XCTestCase {
             return
         }
 
+        // **ジェスチャ単体の対照実験**（2026-08-07 に実機で `/tap`・`/swipe` を送ると
+        // ランナーが落ちる件の切り分け用。シミュレータでは同じ操作が通る）。
+        // HTTP を挟まずにジェスチャだけを送り、呼び出し経路を選べる:
+        //   `direct`   … テストのスレッドから直接呼ぶ（サーバーも `main.sync` も通らない）
+        //   `dispatch` … 別キューから `DispatchQueue.main.sync` で呼ぶ（**常駐時と同じ経路**）
+        // 3 つのログ（sending / returned / survived）の**どこで途切れるか**で、
+        // 「ジェスチャ API そのもの」「`main.sync` の経路」「送った後の生存」を分けられる。
+        // **どちらのモードでも落ちるなら HTTP サーバーは無関係**と言い切れる
+        let probeMode = ProcessInfo.processInfo.environment["UAPP_OS_AGENT_GESTURE_PROBE"] ?? ""
+        if probeMode == "direct" || probeMode == "dispatch" {
+            let seconds = Double(ProcessInfo.processInfo.environment["UAPP_OS_AGENT_PROBE_SECONDS"] ?? "") ?? 60
+            NSLog("[UappOsAgent] gesture probe: mode=\(probeMode) idle=\(Int(seconds))s (main=\(Thread.isMainThread))")
+            let deadline = Date().addingTimeInterval(seconds)
+            if probeMode == "direct" {
+                performProbeGesture()
+                while Date() < deadline { Thread.sleep(forTimeInterval: 0.25) }
+            } else {
+                // 常駐時と同じ形にする: ネットワーク用の直列キューから `main.sync` で呼び、
+                // 呼び出し側が塞がっている間、メインは RunLoop を回して待つ。
+                // **1 秒遅らせる**のは、待ち側が回り始めてから送るため（送信が先だと
+                // メインが RunLoop に入る前で、常駐時と条件が変わる）
+                let queue = DispatchQueue(label: "uapp.os.agent.probe")
+                queue.asyncAfter(deadline: .now() + 1) {
+                    NSLog("[UappOsAgent] gesture probe: calling main.sync")
+                    DispatchQueue.main.sync { self.performProbeGesture() }
+                    NSLog("[UappOsAgent] gesture probe: main.sync returned")
+                }
+                while Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.25)) }
+            }
+            NSLog("[UappOsAgent] gesture probe: survived")
+            return
+        }
+
         let server = HttpServer(port: UappOsAgent.port, token: UappOsAgent.token)
         server.handler = { [weak self] request in
             guard let self = self else { return HttpResponse(status: 500, json: ["error": "agent gone"]) }
@@ -189,6 +222,21 @@ final class UappOsAgent: XCTestCase {
         default:
             return HttpResponse(status: 404, json: ["error": "unknown: \(request.method) \(request.path)"])
         }
+    }
+
+    /// 対照実験で送るジェスチャ。**副作用の小さいものを既定にする** —
+    /// ホーム画面のページ送り（縦スワイプではなく上下だが、アプリは起動しない）。
+    /// アプリを起動してしまうと「ランナーが背面へ回った」という別の要因が混ざる。
+    /// `UAPP_OS_AGENT_PROBE_GESTURE=tap` で tap 側も試せる（画面上端付近＝ホーム画面では無反応）
+    private func performProbeGesture() {
+        let kind = ProcessInfo.processInfo.environment["UAPP_OS_AGENT_PROBE_GESTURE"] ?? "swipe"
+        NSLog("[UappOsAgent] gesture probe: sending \(kind) (main=\(Thread.isMainThread))")
+        if kind == "tap" {
+            coordinate(0.5, 0.06).tap()
+        } else {
+            coordinate(0.5, 0.7).press(forDuration: 0.2, thenDragTo: coordinate(0.5, 0.3))
+        }
+        NSLog("[UappOsAgent] gesture probe: \(kind) returned")
     }
 
     private var springboard: XCUIApplication {

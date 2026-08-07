@@ -246,8 +246,9 @@ if (-not $NoJourney) {
 }
 
 # --- エージェント開発ダッシュボード連携（任意・別リポジトリ） ---
-# **導入されていない環境では何も変えない**: pytest の引数も増やさず、ファイルも作らない。
-# JUnit XML は件数の記録にしか使わないので、連携が有効なときだけ出力する
+# **導入されていない環境では申告を変えない**: ダッシュボードのイベントは書かない。
+# JUnit XML は従来ダッシュボード連携時だけ出力していたが、テスト内訳の表示
+# （導入先の自作 / キット同梱。issue #30）にも使うため常に出力する
 $emitHelper = Join-UappPath $PSScriptRoot "emit-status.ps1"
 $dashEnabled = $false
 # 連携の準備で失敗しても E2E 本体を巻き込まない（ErrorActionPreference="Stop" 下で throw させない）
@@ -262,12 +263,12 @@ try {
 $junitPath = $null
 
 function Enable-JunitOutput {
-    <# 連携が有効なときだけ pytest に渡す --junitxml を組み立てる。
+    <# pytest に渡す --junitxml を組み立てる（件数の記録と内訳表示に使う）。
        出力先は**ターゲットごとに分ける**（同一プロジェクトの並行実行が互いの XML を壊さないため）。
-       準備に失敗したら連携を諦めて空配列を返す（テスト実行を止めない）。 #>
+       準備に失敗したら諦めて空配列を返す（テスト実行を止めない。ダッシュボード連携は
+       件数なしの exitCode 記録に落ちる＝Send-E2eEvidence の既存フォールバック）。 #>
     param([Parameter(Mandatory)][string]$Tag)
 
-    if (-not $script:dashEnabled) { return @() }
     try {
         $safeTag = ($Tag -replace '[^A-Za-z0-9._-]', '_')
         $script:junitPath = Join-UappPath $root "Builds\e2e-results-$projectName-$safeTag.xml"
@@ -276,8 +277,66 @@ function Enable-JunitOutput {
         return @("--junitxml=$script:junitPath")
     } catch {
         $script:junitPath = $null
-        $script:dashEnabled = $false
         return @()
+    }
+}
+
+function Show-TestBreakdown {
+    <# 「N passed」の内訳を「導入先の自作 / キット同梱」で表示する（issue #30・
+       導入先フィードバック §27: 同梱テストが増え、合計だけでは導入先のゲームについて
+       何も言わない数字になっていた。v0.1.9 時点で自作の割合 18%）。
+       **数え方は変えず見せ方だけ**を分ける。同梱の判定は kit-manifest.json
+       （installer が書く所有記録）の driver\tests\ 配下エントリを正とする
+       ＝配布テスト一覧の新たなハードコードを作らない（installer と自動で追随）。
+       manifest が無い開発リポジトリ・XML が無い実行では何も出さない（内訳は補助表示。
+       失敗しても本流の結果に影響させない）。 #>
+    if (-not $script:junitPath -or -not (Test-Path $script:junitPath)) { return }
+    $manifestPath = Join-UappPath $root "kit-manifest.json"
+    if (-not (Test-Path $manifestPath)) { return }
+    try {
+        $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
+        # 例: "driver\tests\test_client_unit.py" → "test_client_unit"（区切りは両 OS を許容）
+        $kitModules = @($manifest.PSObject.Properties.Name |
+            ForEach-Object { $_ -replace '\\', '/' } |
+            Where-Object { $_ -match '(^|/)driver/tests/[^/]+\.py$' } |
+            ForEach-Object { [System.IO.Path]::GetFileNameWithoutExtension($_) })
+        if (-not $kitModules.Count) { return }
+        $own = 0; $kit = 0; $ownFailed = 0; $kitFailed = 0; $ownSkipped = 0; $kitSkipped = 0
+        $xml = [xml](Get-Content $script:junitPath -Raw)
+        foreach ($case in $xml.SelectNodes("//testcase")) {
+            # classname は "tests.test_client_unit" のようなドット区切りモジュールパス
+            # （pytest 既定の xunit2。クラス入りなら末尾にクラス名が足される）
+            $isKit = $false
+            foreach ($part in (("" + $case.classname) -split '\.')) {
+                if ($kitModules -contains $part) { $isKit = $true; break }
+            }
+            $failed = [bool]($case.SelectSingleNode("failure") -or $case.SelectSingleNode("error"))
+            # **skip は「実行した」に数えない**（レビュー指摘: 自作が全件 skip でも
+            # 「自作 N 件」と出て注意行も出ず、「同梱だけで緑」がすり抜ける）
+            $skipped = (-not $failed) -and [bool]$case.SelectSingleNode("skipped")
+            if ($isKit) {
+                if ($skipped) { $kitSkipped++ } else { $kit++; if ($failed) { $kitFailed++ } }
+            } else {
+                if ($skipped) { $ownSkipped++ } else { $own++; if ($failed) { $ownFailed++ } }
+            }
+        }
+        if (($own + $kit + $ownSkipped + $kitSkipped) -eq 0) { return }
+        $line = "[$projectName] テスト内訳: 導入先の自作 $own 件 / キット同梱 $kit 件"
+        if (($ownFailed + $kitFailed) -gt 0) {
+            $line += "（失敗: 自作 $ownFailed / 同梱 $kitFailed）"
+        }
+        if (($ownSkipped + $kitSkipped) -gt 0) {
+            $line += "（skip: 自作 $ownSkipped / 同梱 $kitSkipped）"
+        }
+        Write-Host $line
+        if ($own -eq 0) {
+            # 数字の水増しで最も危険な形（フィードバック §27 の核心）: 同梱だけで
+            # 緑に見えるが、導入先のゲームは 1 件も検証されていない（全件 skip も同じ）
+            Write-Host ("[$projectName] 注意: 導入先の自作テストが 1 件も実行されていません" +
+                        "（この緑はキットの自己検証だけで、ゲームの導線は検証していません）")
+        }
+    } catch {
+        # 内訳は補助表示。読めない XML・壊れた manifest で本流を止めない
     }
 }
 
@@ -747,6 +806,7 @@ if ($Editor) {
         $editorMutex.Dispose()
     }
 
+    Show-TestBreakdown
     Send-E2eEvidence -ExitCode $exit -Mode "editor"
     if ($exit -ne 0) {
         $shot = Join-UappPath $root "Builds\failure\screen.png"
@@ -885,6 +945,7 @@ try {
     Remove-Item Env:\UAPP_E2E_JOURNEY_DIR -ErrorAction SilentlyContinue
 }
 
+Show-TestBreakdown
 if ($exit -ne 0) {
     # 失敗時はAIが読める証跡を残す
     $evidence = Join-UappPath $root "Builds\failure"
