@@ -33,12 +33,23 @@ param(
     # 環境変数 UAPP_E2E_UNITY_CLI_PROXY_DISABLE=1 でも同じ。**プロキシ経由が必要な認証・
     # ダウンロードも直結になる**ので、既定では付けない
     [switch]$UnityCliProxyDisable,
+    # 導入先の自作テストの実行数が 0 なら失敗にする（既定オフ。導入先フィードバック起点＝
+    # 「自作 0 件は緑だが無意味なので失敗と同じ扱いにしたい」。検証ループの門として使う）。
+    # 判定はテスト内訳表示と同じ（kit-manifest.json 由来・skip は実行数に数えない）。
+    # **判定できない環境では明示エラー**（manifest の無い開発リポジトリ・XML が書けない等。
+    # fail-open にすると門のつもりが素通しになる）。
+    # 環境変数 UAPP_E2E_REQUIRE_PROJECT_TESTS=1 でも有効化できる（ラッパーから渡しやすくする）
+    [switch]$RequireProjectTests,
     [string]$PytestArgs = ""
 )
 
 $ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot "uapp-platform.ps1")   # OS 差分の吸収（Windows / macOS。mac は暫定・未検証）
+
+# -RequireProjectTests は環境変数でも有効化できる（ラッパー・CI から渡しやすくする。
+# スイッチ明示が常に優先＝環境変数で無効化はできない）
+$requireProjectTests = [bool]$RequireProjectTests -or ($env:UAPP_E2E_REQUIRE_PROJECT_TESTS -eq "1")
 
 function Get-DeviceFreeBytes {
     <#
@@ -289,10 +300,12 @@ function Show-TestBreakdown {
        （installer が書く所有記録）の driver\tests\ 配下エントリを正とする
        ＝配布テスト一覧の新たなハードコードを作らない（installer と自動で追随）。
        manifest が無い開発リポジトリ・XML が無い実行では何も出さない（内訳は補助表示。
-       失敗しても本流の結果に影響させない）。 #>
-    if (-not $script:junitPath -or -not (Test-Path $script:junitPath)) { return }
+       失敗しても本流の結果に影響させない）。
+       **戻り値**: 判定できたら内訳（OwnRun / KitRun / OwnSkipped / KitSkipped）、
+       判定できなければ $null（-RequireProjectTests の門はこの区別を fail-closed に使う）。 #>
+    if (-not $script:junitPath -or -not (Test-Path $script:junitPath)) { return $null }
     $manifestPath = Join-UappPath $root "kit-manifest.json"
-    if (-not (Test-Path $manifestPath)) { return }
+    if (-not (Test-Path $manifestPath)) { return $null }
     try {
         $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
         # 例: "driver\tests\test_client_unit.py" → "test_client_unit"（区切りは両 OS を許容）
@@ -300,7 +313,7 @@ function Show-TestBreakdown {
             ForEach-Object { $_ -replace '\\', '/' } |
             Where-Object { $_ -match '(^|/)driver/tests/[^/]+\.py$' } |
             ForEach-Object { [System.IO.Path]::GetFileNameWithoutExtension($_) })
-        if (-not $kitModules.Count) { return }
+        if (-not $kitModules.Count) { return $null }
         $own = 0; $kit = 0; $ownFailed = 0; $kitFailed = 0; $ownSkipped = 0; $kitSkipped = 0
         $xml = [xml](Get-Content $script:junitPath -Raw)
         foreach ($case in $xml.SelectNodes("//testcase")) {
@@ -320,7 +333,11 @@ function Show-TestBreakdown {
                 if ($skipped) { $ownSkipped++ } else { $own++; if ($failed) { $ownFailed++ } }
             }
         }
-        if (($own + $kit + $ownSkipped + $kitSkipped) -eq 0) { return }
+        if (($own + $kit + $ownSkipped + $kitSkipped) -eq 0) {
+            # XML と manifest はあるのに testcase が 0 件＝「実行 0 と判定できた」なので
+            # 表示は出さないが、門には数えられた事実を返す（判定不能とは区別する）
+            return [pscustomobject]@{ OwnRun = 0; KitRun = 0; OwnSkipped = 0; KitSkipped = 0 }
+        }
         $line = "[$projectName] テスト内訳: 導入先の自作 $own 件 / キット同梱 $kit 件"
         if (($ownFailed + $kitFailed) -gt 0) {
             $line += "（失敗: 自作 $ownFailed / 同梱 $kitFailed）"
@@ -335,9 +352,29 @@ function Show-TestBreakdown {
             Write-Host ("[$projectName] 注意: 導入先の自作テストが 1 件も実行されていません" +
                         "（この緑はキットの自己検証だけで、ゲームの導線は検証していません）")
         }
+        return [pscustomobject]@{ OwnRun = $own; KitRun = $kit
+                                  OwnSkipped = $ownSkipped; KitSkipped = $kitSkipped }
     } catch {
         # 内訳は補助表示。読めない XML・壊れた manifest で本流を止めない
+        return $null
     }
+}
+
+function Get-ProjectTestsGateFailure {
+    <# -RequireProjectTests の門（issue #31・導入先フィードバック §28: 「自作 0 件は
+       緑だが無意味なので失敗と同じ扱いにしたい」）。失敗理由の文字列を返す（通過なら $null）。
+       **判定できない環境では fail-closed**（門のつもりが素通しになるのを防ぐ）。 #>
+    param($Breakdown)
+    if (-not $script:requireProjectTests) { return $null }
+    if ($null -eq $Breakdown) {
+        return ("-RequireProjectTests が指定されていますが、自作テストの実行数を判定できません" +
+                "（kit-manifest.json と JUnit XML の両方が要ります。導入先レイアウトで使ってください）")
+    }
+    if ($Breakdown.OwnRun -eq 0) {
+        return ("導入先の自作テストが 1 件も実行されていないため失敗にします（-RequireProjectTests）。" +
+                "テスト指定（tests / -PytestArgs の -k・--ignore・--deselect）を確認してください")
+    }
+    return $null
 }
 
 function Send-E2eEvidence {
@@ -806,14 +843,22 @@ if ($Editor) {
         $editorMutex.Dispose()
     }
 
-    Show-TestBreakdown
-    Send-E2eEvidence -ExitCode $exit -Mode "editor"
+    $breakdown = Show-TestBreakdown
+    $gateFailure = Get-ProjectTestsGateFailure $breakdown
+    $finalExit = $exit
+    if ($gateFailure -and $finalExit -eq 0) { $finalExit = 1 }
+    Send-E2eEvidence -ExitCode $finalExit -Mode "editor"
     if ($exit -ne 0) {
         $shot = Join-UappPath $root "Builds\failure\screen.png"
         $editorLog = Get-UappEditorLogPath   # 置き場は OS で違う（分岐は uapp-platform.ps1 側）
         Write-Host ("失敗解析: " + $(if (Test-Path $shot) { "$shot（画像として読む） → " } else { "" }) +
                     "エディタの Console と Editor.log（$editorLog）を確認")
         exit $exit
+    }
+    if ($gateFailure) {
+        # **最後に出す**（導入先フィードバック §28: 途中の注意行は pytest の warnings に埋もれる）
+        Write-Host "[$projectName] $gateFailure"
+        exit $finalExit
     }
     Write-Host "[$projectName] E2E テスト成功（エディタ直結）。"
     exit 0
@@ -945,7 +990,8 @@ try {
     Remove-Item Env:\UAPP_E2E_JOURNEY_DIR -ErrorAction SilentlyContinue
 }
 
-Show-TestBreakdown
+$breakdown = Show-TestBreakdown
+$gateFailure = Get-ProjectTestsGateFailure $breakdown
 if ($exit -ne 0) {
     # 失敗時はAIが読める証跡を残す
     $evidence = Join-UappPath $root "Builds\failure"
@@ -959,6 +1005,12 @@ if ($exit -ne 0) {
     Write-Host "失敗時の証跡を保存: $evidence （screen.png / unity-logcat.txt / crash.txt）"
     Send-E2eEvidence -ExitCode $exit -Mode "device" -FailureDir $evidence
     exit $exit
+}
+if ($gateFailure) {
+    Send-E2eEvidence -ExitCode 1 -Mode "device"
+    # **最後に出す**（導入先フィードバック §28: 途中の注意行は pytest の warnings に埋もれる）
+    Write-Host "[$projectName] $gateFailure"
+    exit 1
 }
 Send-E2eEvidence -ExitCode $exit -Mode "device"
 Write-Host "[$projectName] E2E テスト成功。"
