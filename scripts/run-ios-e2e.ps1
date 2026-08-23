@@ -71,7 +71,7 @@ $ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot "uapp-platform.ps1")
 
-$root = (Resolve-Path (Join-UappPath $PSScriptRoot "..")).Path
+$root = (Resolve-Path -LiteralPath (Join-UappPath $PSScriptRoot "..")).Path
 
 # xcrun の解決が macOS 専用ガードを兼ねる
 $xcrun = Get-UappCommandPath "xcrun"
@@ -86,28 +86,28 @@ if (-not $Arch) {
 # **サンプル判定は代入より先に取る**。PowerShell の変数名は大小文字を区別しないため、
 # 下の `$projectPath = ...` はパラメータ `$ProjectPath` と同一変数＝上書きになる
 $isSample = $false
-if ($ProjectPath) { $projectPath = (Resolve-Path $ProjectPath).Path }
-elseif ((Test-Path (Join-UappPath $root "..\Assets")) -and (Test-Path (Join-UappPath $root "..\ProjectSettings"))) {
+if ($ProjectPath) { $projectPath = (Resolve-Path -LiteralPath $ProjectPath).Path }
+elseif ((Test-Path -LiteralPath (Join-UappPath $root "..\Assets")) -and (Test-Path -LiteralPath (Join-UappPath $root "..\ProjectSettings"))) {
     # 導入先レイアウト: uapp_e2e\ の親が Unity プロジェクト（run-e2e.ps1 と同じ規則）。
     # これが無いと、導入先で -ProjectPath を省いた実行が $root\unity-nis（存在しない）を探して必ず落ちる
-    $projectPath = (Resolve-Path (Join-UappPath $root "..")).Path
+    $projectPath = (Resolve-Path -LiteralPath (Join-UappPath $root "..")).Path
 }
 else {
     $projectPath = Join-UappPath $root $Project
     $isSample = $true
 }
-if (-not (Test-Path $projectPath)) { throw "プロジェクトがありません: $projectPath" }
+if (-not (Test-Path -LiteralPath $projectPath)) { throw "プロジェクトがありません: $projectPath" }
 $projectPath = Get-UappNormalizedDir $projectPath
 $projectName = Split-Path $projectPath -Leaf
 
 # 設定解決: キット内（導入配置: <project>\uapp_e2e\e2e-config.json）→ プロジェクト直下
 # （本リポジトリのサンプル配置）。run-e2e.ps1 と同じ規則
 $configPath = Join-UappPath $root "e2e-config.json"
-if (-not (Test-Path $configPath)) {
+if (-not (Test-Path -LiteralPath $configPath)) {
     $configPath = Join-UappPath $projectPath "e2e-config.json"
 }
-if (-not (Test-Path $configPath)) { throw "e2e-config.json がありません（$root または $projectPath 直下）" }
-$config = Get-Content $configPath -Raw | ConvertFrom-Json
+if (-not (Test-Path -LiteralPath $configPath)) { throw "e2e-config.json がありません（$root または $projectPath 直下）" }
+$config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
 $package = $config.package
 if (-not $package) { throw "e2e-config.json に package がありません（iOS では bundle id として使う）" }
 # **値域まで厳格に検査する**（Unity 側・Python 側は不正値を警告してフォールバックするため、
@@ -205,7 +205,7 @@ if ($isDevice) {
     # 実機: UDID を確定して以後の全操作を同一個体へ固定する（シミュレータ側と同じ約束）
     if (-not $Udid) {
         $localConfigPath = Join-UappPath $root "config\local.json"
-        $local = if (Test-Path $localConfigPath) { Get-Content $localConfigPath -Raw | ConvertFrom-Json } else { $null }
+        $local = if (Test-Path -LiteralPath $localConfigPath) { Get-Content -LiteralPath $localConfigPath -Raw | ConvertFrom-Json } else { $null }
         if ($local -and $local.iosDeviceUdid) { $Udid = $local.iosDeviceUdid }
     }
     $ideviceId = Get-UappCommandPath "idevice_id"
@@ -300,7 +300,7 @@ if ($isDevice) {
                 if (-not $launched) { throw "devicectl process launch に失敗しました（5 回試行。詳細: $launchLog）: $package" }
             }
             finally {
-                if ($null -eq $prevChildPort) { Remove-Item Env:\DEVICECTL_CHILD_UAPP_E2E_BRIDGE_PORT -ErrorAction SilentlyContinue }
+                if ($null -eq $prevChildPort) { Remove-Item -LiteralPath Env:\DEVICECTL_CHILD_UAPP_E2E_BRIDGE_PORT -ErrorAction SilentlyContinue }
                 else { $env:DEVICECTL_CHILD_UAPP_E2E_BRIDGE_PORT = $prevChildPort }
             }
             Start-Sleep -Seconds 5   # ブリッジが listen を張るまでの猶予（接続側でもリトライする）
@@ -405,7 +405,7 @@ else {
     $deviceExplicit = [bool]$Device
     if (-not $Device) {
         $localConfigPath = Join-UappPath $root "config\local.json"
-        $local = if (Test-Path $localConfigPath) { Get-Content $localConfigPath -Raw | ConvertFrom-Json } else { $null }
+        $local = if (Test-Path -LiteralPath $localConfigPath) { Get-Content -LiteralPath $localConfigPath -Raw | ConvertFrom-Json } else { $null }
         $Device = if ($local -and $local.iosSimulatorDevice) { $local.iosSimulatorDevice } else { "iPhone 16" }
     }
 
@@ -480,7 +480,7 @@ else {
             if ($LASTEXITCODE -ne 0) { throw "simctl launch に失敗しました: $package" }
         }
         finally {
-            if ($null -eq $prevChildPort) { Remove-Item Env:\SIMCTL_CHILD_UAPP_E2E_BRIDGE_PORT -ErrorAction SilentlyContinue }
+            if ($null -eq $prevChildPort) { Remove-Item -LiteralPath Env:\SIMCTL_CHILD_UAPP_E2E_BRIDGE_PORT -ErrorAction SilentlyContinue }
             else { $env:SIMCTL_CHILD_UAPP_E2E_BRIDGE_PORT = $prevChildPort }
         }
         # **PID が取れない・lsof が無い、は fail-open にしない**（照合が静かに無効になると
@@ -543,8 +543,8 @@ else {
 # iproxy が残り、ホスト側ポートを握り続ける）
 try {
 $driverDir = Join-UappPath $root "driver"
-if (-not (Test-Path $driverDir)) { $driverDir = Join-UappPath $root "uapp_e2e\driver" }
-if (-not (Test-Path $driverDir)) { throw "driver ディレクトリが見つかりません（開発リポ: driver/ 導入先: uapp_e2e/driver/）" }
+if (-not (Test-Path -LiteralPath $driverDir)) { $driverDir = Join-UappPath $root "uapp_e2e\driver" }
+if (-not (Test-Path -LiteralPath $driverDir)) { throw "driver ディレクトリが見つかりません（開発リポ: driver/ 導入先: uapp_e2e/driver/）" }
 
 $pythonExe = Get-UappPython
 if (-not $pythonExe) { throw "python が見つかりません（python3 を導入してください）" }
@@ -572,7 +572,7 @@ if ($PytestArgs) {
     foreach ($known in $knownAdbTests) {
         $file = ($known -split "::")[0]
         $covered = ($testsKey -eq "tests" -or $testsKey -eq $file)
-        if ($covered -and (Test-Path (Join-UappPath $driverDir $file))) {
+        if ($covered -and (Test-Path -LiteralPath (Join-UappPath $driverDir $file))) {
             $pytestArgList += @("--deselect", $known)
         }
     }
@@ -645,7 +645,7 @@ if ($OsAgent) {
     if (-not $OsAgentPort) { $OsAgentPort = 8200 }
     if ($OsAgentPort -lt 1 -or $OsAgentPort -gt 65535) { throw "-OsAgentPort が値域外です: $OsAgentPort" }
     $agentProject = Join-UappPath $root "oslayer/UappOsAgent/UappOsAgent.xcodeproj"
-    if (-not (Test-Path $agentProject)) {
+    if (-not (Test-Path -LiteralPath $agentProject)) {
         throw ("OS エージェントのプロジェクトがありません: $agentProject" +
                "（配布キットでは oslayer/ を導入先でビルドする）")
     }
@@ -682,14 +682,14 @@ if ($OsAgent) {
         Remove-Item -LiteralPath $coreDeviceJson -Force -ErrorAction SilentlyContinue
         & $xcrun devicectl list devices --json-output $coreDeviceJson *> $null
         $listExit = $LASTEXITCODE
-        if ($listExit -ne 0 -or -not (Test-Path $coreDeviceJson)) {
+        if ($listExit -ne 0 -or -not (Test-Path -LiteralPath $coreDeviceJson)) {
             throw ("CoreDevice の端末一覧を取得できません（devicectl list devices の終了コード $listExit）。" +
                    "-OsAgent は XCUITest を使うので、CoreDevice に載っていることを確認できないまま進めません。" +
                    "USB 接続とロック解除を確認してください")
         }
         $pairing = $null
         try {
-            $listed = (Get-Content $coreDeviceJson -Raw | ConvertFrom-Json).result.devices |
+            $listed = (Get-Content -LiteralPath $coreDeviceJson -Raw | ConvertFrom-Json).result.devices |
                 Where-Object { $_.hardwareProperties.udid -eq $udid }
         } catch {
             throw "CoreDevice の端末一覧を解析できません（$coreDeviceJson）: $($_.Exception.Message)"
@@ -709,7 +709,7 @@ if ($OsAgent) {
         $agentArgs += @("-destination-timeout", "120")
         if (-not $Team) {
             $localConfigPath2 = Join-UappPath $root "config\local.json"
-            $local2 = if (Test-Path $localConfigPath2) { Get-Content $localConfigPath2 -Raw | ConvertFrom-Json } else { $null }
+            $local2 = if (Test-Path -LiteralPath $localConfigPath2) { Get-Content -LiteralPath $localConfigPath2 -Raw | ConvertFrom-Json } else { $null }
             if ($local2 -and $local2.iosTeamId) { $Team = $local2.iosTeamId }
         }
         if (-not $Team) { throw "実機で -OsAgent を使うには署名チームが要ります（config/local.json の iosTeamId）" }
@@ -718,7 +718,7 @@ if ($OsAgent) {
                         "CODE_SIGN_STYLE=Automatic", "CODE_SIGNING_ALLOWED=YES")
         if (-not $OsAgentBundleId) {
             $localConfigPath3 = Join-UappPath $root "config\local.json"
-            $local3 = if (Test-Path $localConfigPath3) { Get-Content $localConfigPath3 -Raw | ConvertFrom-Json } else { $null }
+            $local3 = if (Test-Path -LiteralPath $localConfigPath3) { Get-Content -LiteralPath $localConfigPath3 -Raw | ConvertFrom-Json } else { $null }
             if ($local3 -and $local3.iosOsAgentBundleId) { $OsAgentBundleId = $local3.iosOsAgentBundleId }
         }
         if ($OsAgentBundleId) { $agentArgs += @("PRODUCT_BUNDLE_IDENTIFIER=$OsAgentBundleId") }
@@ -750,9 +750,9 @@ if ($OsAgent) {
         }
     }
     finally {
-        if ($null -eq $prevAgentPort) { Remove-Item Env:\TEST_RUNNER_UAPP_OS_AGENT_PORT -ErrorAction SilentlyContinue }
+        if ($null -eq $prevAgentPort) { Remove-Item -LiteralPath Env:\TEST_RUNNER_UAPP_OS_AGENT_PORT -ErrorAction SilentlyContinue }
         else { $env:TEST_RUNNER_UAPP_OS_AGENT_PORT = $prevAgentPort }
-        if ($null -eq $prevAgentToken) { Remove-Item Env:\TEST_RUNNER_UAPP_OS_AGENT_TOKEN -ErrorAction SilentlyContinue }
+        if ($null -eq $prevAgentToken) { Remove-Item -LiteralPath Env:\TEST_RUNNER_UAPP_OS_AGENT_TOKEN -ErrorAction SilentlyContinue }
         else { $env:TEST_RUNNER_UAPP_OS_AGENT_TOKEN = $prevAgentToken }
     }
     if (-not $agentProc) { throw "OS エージェントを起動できませんでした" }
@@ -825,24 +825,24 @@ try {
     # **-OsAgent（XCUITest）が OS 層の手段**で、それも使わないなら
     # ブリッジ側（-BridgeScreenshot・Unity の描画のみ）が最後の手段になる
     if ($isDevice) {
-        Remove-Item Env:\UAPP_E2E_IOS_UDID -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath Env:\UAPP_E2E_IOS_UDID -ErrorAction SilentlyContinue
         $env:UAPP_E2E_IOS_DEVICE_UDID = $udid
         $env:UAPP_E2E_IOS_DEVICE_MAJOR = "$iosMajor"   # 17 以降は OS 層の撮影を試さない
     } else {
         $env:UAPP_E2E_IOS_UDID = $udid
-        Remove-Item Env:\UAPP_E2E_IOS_DEVICE_UDID -ErrorAction SilentlyContinue
-    Remove-Item Env:\UAPP_E2E_IOS_DEVICE_MAJOR -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath Env:\UAPP_E2E_IOS_DEVICE_UDID -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath Env:\UAPP_E2E_IOS_DEVICE_MAJOR -ErrorAction SilentlyContinue
     }
     # -NoJourney のときは**継承された環境変数も一時的に外す**（残すと呼び出し元の
     # Android 用ディレクトリへ iOS の記録が混ざり、プラットフォーム分離を破る）
     if ($JourneyDir) { $env:UAPP_E2E_JOURNEY_DIR = $JourneyDir }
-    else { Remove-Item Env:\UAPP_E2E_JOURNEY_DIR -ErrorAction SilentlyContinue }
+    else { Remove-Item -LiteralPath Env:\UAPP_E2E_JOURNEY_DIR -ErrorAction SilentlyContinue }
     if ($agentUrl) {
         $env:UAPP_E2E_OS_AGENT_URL = $agentUrl
         $env:UAPP_E2E_OS_AGENT_TOKEN = $agentToken
     } else {
-        Remove-Item Env:\UAPP_E2E_OS_AGENT_URL -ErrorAction SilentlyContinue
-        Remove-Item Env:\UAPP_E2E_OS_AGENT_TOKEN -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath Env:\UAPP_E2E_OS_AGENT_URL -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath Env:\UAPP_E2E_OS_AGENT_TOKEN -ErrorAction SilentlyContinue
     }
     if ($BridgeScreenshot) {
         $env:UAPP_E2E_BRIDGE_SCREENSHOT = "1"
@@ -852,7 +852,7 @@ try {
     & $pythonExe @pytestArgList
     $testExit = $LASTEXITCODE
     # ジャーニーが記録されていれば自己完結レポートを更新する（失敗時も解析に使うため生成する）
-    if ($JourneyDir -and (Test-Path (Join-UappPath $JourneyDir "journey.json"))) {
+    if ($JourneyDir -and (Test-Path -LiteralPath (Join-UappPath $JourneyDir "journey.json"))) {
         & $pythonExe -m e2e_driver.journey $JourneyDir
         if ($LASTEXITCODE -eq 0) {
             Write-Host "ジャーニーレポート: $(Join-UappPath $JourneyDir 'report.html')"
@@ -863,17 +863,17 @@ try {
 }
 finally {
     Pop-Location
-    if ($null -eq $prevIos) { Remove-Item Env:\UAPP_E2E_IOS -ErrorAction SilentlyContinue } else { $env:UAPP_E2E_IOS = $prevIos }
-    if ($null -eq $prevPort) { Remove-Item Env:\UAPP_E2E_BRIDGE_PORT -ErrorAction SilentlyContinue } else { $env:UAPP_E2E_BRIDGE_PORT = $prevPort }
-    if ($null -eq $prevBundle) { Remove-Item Env:\UAPP_E2E_IOS_BUNDLE_ID -ErrorAction SilentlyContinue } else { $env:UAPP_E2E_IOS_BUNDLE_ID = $prevBundle }
-    if ($null -eq $prevUdid) { Remove-Item Env:\UAPP_E2E_IOS_UDID -ErrorAction SilentlyContinue } else { $env:UAPP_E2E_IOS_UDID = $prevUdid }
-    if ($null -eq $prevJourney) { Remove-Item Env:\UAPP_E2E_JOURNEY_DIR -ErrorAction SilentlyContinue } else { $env:UAPP_E2E_JOURNEY_DIR = $prevJourney }
-    if ($null -eq $prevAgentUrl) { Remove-Item Env:\UAPP_E2E_OS_AGENT_URL -ErrorAction SilentlyContinue } else { $env:UAPP_E2E_OS_AGENT_URL = $prevAgentUrl }
-    if ($null -eq $prevAgentClientToken) { Remove-Item Env:\UAPP_E2E_OS_AGENT_TOKEN -ErrorAction SilentlyContinue } else { $env:UAPP_E2E_OS_AGENT_TOKEN = $prevAgentClientToken }
-    if ($null -eq $prevDeviceUdid) { Remove-Item Env:\UAPP_E2E_IOS_DEVICE_UDID -ErrorAction SilentlyContinue } else { $env:UAPP_E2E_IOS_DEVICE_UDID = $prevDeviceUdid }
-    if ($null -eq $prevDeviceMajor) { Remove-Item Env:\UAPP_E2E_IOS_DEVICE_MAJOR -ErrorAction SilentlyContinue } else { $env:UAPP_E2E_IOS_DEVICE_MAJOR = $prevDeviceMajor }
-    if ($null -eq $prevBridgeShot) { Remove-Item Env:\UAPP_E2E_BRIDGE_SCREENSHOT -ErrorAction SilentlyContinue } else { $env:UAPP_E2E_BRIDGE_SCREENSHOT = $prevBridgeShot }
-    if ($null -eq $prevBridgeShotWidth) { Remove-Item Env:\UAPP_E2E_BRIDGE_SCREENSHOT_MAX_WIDTH -ErrorAction SilentlyContinue } else { $env:UAPP_E2E_BRIDGE_SCREENSHOT_MAX_WIDTH = $prevBridgeShotWidth }
+    if ($null -eq $prevIos) { Remove-Item -LiteralPath Env:\UAPP_E2E_IOS -ErrorAction SilentlyContinue } else { $env:UAPP_E2E_IOS = $prevIos }
+    if ($null -eq $prevPort) { Remove-Item -LiteralPath Env:\UAPP_E2E_BRIDGE_PORT -ErrorAction SilentlyContinue } else { $env:UAPP_E2E_BRIDGE_PORT = $prevPort }
+    if ($null -eq $prevBundle) { Remove-Item -LiteralPath Env:\UAPP_E2E_IOS_BUNDLE_ID -ErrorAction SilentlyContinue } else { $env:UAPP_E2E_IOS_BUNDLE_ID = $prevBundle }
+    if ($null -eq $prevUdid) { Remove-Item -LiteralPath Env:\UAPP_E2E_IOS_UDID -ErrorAction SilentlyContinue } else { $env:UAPP_E2E_IOS_UDID = $prevUdid }
+    if ($null -eq $prevJourney) { Remove-Item -LiteralPath Env:\UAPP_E2E_JOURNEY_DIR -ErrorAction SilentlyContinue } else { $env:UAPP_E2E_JOURNEY_DIR = $prevJourney }
+    if ($null -eq $prevAgentUrl) { Remove-Item -LiteralPath Env:\UAPP_E2E_OS_AGENT_URL -ErrorAction SilentlyContinue } else { $env:UAPP_E2E_OS_AGENT_URL = $prevAgentUrl }
+    if ($null -eq $prevAgentClientToken) { Remove-Item -LiteralPath Env:\UAPP_E2E_OS_AGENT_TOKEN -ErrorAction SilentlyContinue } else { $env:UAPP_E2E_OS_AGENT_TOKEN = $prevAgentClientToken }
+    if ($null -eq $prevDeviceUdid) { Remove-Item -LiteralPath Env:\UAPP_E2E_IOS_DEVICE_UDID -ErrorAction SilentlyContinue } else { $env:UAPP_E2E_IOS_DEVICE_UDID = $prevDeviceUdid }
+    if ($null -eq $prevDeviceMajor) { Remove-Item -LiteralPath Env:\UAPP_E2E_IOS_DEVICE_MAJOR -ErrorAction SilentlyContinue } else { $env:UAPP_E2E_IOS_DEVICE_MAJOR = $prevDeviceMajor }
+    if ($null -eq $prevBridgeShot) { Remove-Item -LiteralPath Env:\UAPP_E2E_BRIDGE_SCREENSHOT -ErrorAction SilentlyContinue } else { $env:UAPP_E2E_BRIDGE_SCREENSHOT = $prevBridgeShot }
+    if ($null -eq $prevBridgeShotWidth) { Remove-Item -LiteralPath Env:\UAPP_E2E_BRIDGE_SCREENSHOT_MAX_WIDTH -ErrorAction SilentlyContinue } else { $env:UAPP_E2E_BRIDGE_SCREENSHOT_MAX_WIDTH = $prevBridgeShotWidth }
 }
 
 # **エージェントの停止と成否合成は、証跡収集・ダッシュボード送信より前に行う**

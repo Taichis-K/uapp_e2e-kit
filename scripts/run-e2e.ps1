@@ -40,6 +40,12 @@ param(
     # fail-open にすると門のつもりが素通しになる）。
     # 環境変数 UAPP_E2E_REQUIRE_PROJECT_TESTS=1 でも有効化できる（ラッパーから渡しやすくする）
     [switch]$RequireProjectTests,
+    # 逆向きの宣言: この実行では導入先の自作テストを**期待しない**（注入運用など、
+    # テストをハブ側に置いて対象へ導入しない構成。issue #35-A）。指定すると
+    # 「自作テストが 1 件も実行されていません」の注意行を出さない（内訳表示は出す）。
+    # 正常な運用で警告が出続けると、本来この警告が拾いたい取りこぼしに鈍感になるため。
+    # -RequireProjectTests との同時指定は矛盾なので明示エラーにする
+    [switch]$NoProjectTests,
     [string]$PytestArgs = ""
 )
 
@@ -50,6 +56,12 @@ $ErrorActionPreference = "Stop"
 # -RequireProjectTests は環境変数でも有効化できる（ラッパー・CI から渡しやすくする。
 # スイッチ明示が常に優先＝環境変数で無効化はできない）
 $requireProjectTests = [bool]$RequireProjectTests -or ($env:UAPP_E2E_REQUIRE_PROJECT_TESTS -eq "1")
+# 環境変数で有効化された門と -NoProjectTests がぶつかる形もあるので、**解決後の値**で判定する
+# （スイッチ同士だけを見ると、ラッパーが環境変数で門を立てている環境で矛盾を見逃す）
+if ($NoProjectTests -and $requireProjectTests) {
+    throw ("-NoProjectTests と -RequireProjectTests（または UAPP_E2E_REQUIRE_PROJECT_TESTS=1）は" +
+           "同時に指定できません（自作テストを期待しない宣言と、無ければ失敗にする門は矛盾します）")
+}
 
 function Get-DeviceFreeBytes {
     <#
@@ -78,7 +90,7 @@ function Format-InstallFailure {
     #>
     param([string]$Output, [int]$ExitCode, [string]$Apk, [string]$Package, [long]$FreeBytes = 0)
 
-    $apkMb = [math]::Round((Get-Item $Apk).Length / 1MB)
+    $apkMb = [math]::Round((Get-Item -LiteralPath $Apk).Length / 1MB)
     $freeMb = if ($FreeBytes -gt 0) { [math]::Round($FreeBytes / 1MB) } else { $null }
     $hint = switch -Regex ($Output) {
         # 文言は Android の版で違う（INSTALL_FAILED_INSUFFICIENT_STORAGE のこともあれば、
@@ -193,7 +205,7 @@ function Test-UnityProjectLocked {
     $instanceFile = Join-UappPath $ProjectDir "Library\EditorInstance.json"
     if (Test-Path -LiteralPath $instanceFile) {
         try {
-            $editorPid = [int]((Get-Content $instanceFile -Raw | ConvertFrom-Json).process_id)
+            $editorPid = [int]((Get-Content -LiteralPath $instanceFile -Raw | ConvertFrom-Json).process_id)
             $proc = if ($editorPid) { Get-Process -Id $editorPid -ErrorAction SilentlyContinue } else { $null }
             if ($proc -and $proc.ProcessName -eq "Unity") { return $true }
         } catch { }
@@ -209,7 +221,7 @@ function Test-UnityProjectLocked {
         return $true
     }
 }
-$root = (Resolve-Path (Join-UappPath $PSScriptRoot "..")).Path
+$root = (Resolve-Path -LiteralPath (Join-UappPath $PSScriptRoot "..")).Path
 
 # Python の実体を先に決める（pytest / ジャーニー生成 / スクショで使う）。
 # **mac は `python` が無く `python3` だけ、という構成が普通**なので裸で呼ばない
@@ -220,10 +232,10 @@ if (-not $script:pythonExe) {
 
 # 対象プロジェクト解決: -ProjectPath 優先 → キット親がUnityプロジェクトならそれ → $root\$Project
 if ($ProjectPath) {
-    $projectDir = (Resolve-Path $ProjectPath).Path
+    $projectDir = (Resolve-Path -LiteralPath $ProjectPath).Path
 }
-elseif ((Test-Path (Join-UappPath $root "..\Assets")) -and (Test-Path (Join-UappPath $root "..\ProjectSettings"))) {
-    $projectDir = (Resolve-Path (Join-UappPath $root "..")).Path
+elseif ((Test-Path -LiteralPath (Join-UappPath $root "..\Assets")) -and (Test-Path -LiteralPath (Join-UappPath $root "..\ProjectSettings"))) {
+    $projectDir = (Resolve-Path -LiteralPath (Join-UappPath $root "..")).Path
 }
 else {
     $projectDir = Join-UappPath $root $Project
@@ -284,7 +296,7 @@ function Enable-JunitOutput {
         $safeTag = ($Tag -replace '[^A-Za-z0-9._-]', '_')
         $script:junitPath = Join-UappPath $root "Builds\e2e-results-$projectName-$safeTag.xml"
         New-Item -ItemType Directory -Force (Split-Path $script:junitPath -Parent) | Out-Null
-        Remove-Item $script:junitPath -ErrorAction SilentlyContinue   # 前回結果を誤読しない
+        Remove-Item -LiteralPath $script:junitPath -ErrorAction SilentlyContinue   # 前回結果を誤読しない
         return @("--junitxml=$script:junitPath")
     } catch {
         $script:junitPath = $null
@@ -303,11 +315,11 @@ function Show-TestBreakdown {
        失敗しても本流の結果に影響させない）。
        **戻り値**: 判定できたら内訳（OwnRun / KitRun / OwnSkipped / KitSkipped）、
        判定できなければ $null（-RequireProjectTests の門はこの区別を fail-closed に使う）。 #>
-    if (-not $script:junitPath -or -not (Test-Path $script:junitPath)) { return $null }
+    if (-not $script:junitPath -or -not (Test-Path -LiteralPath $script:junitPath)) { return $null }
     $manifestPath = Join-UappPath $root "kit-manifest.json"
-    if (-not (Test-Path $manifestPath)) { return $null }
+    if (-not (Test-Path -LiteralPath $manifestPath)) { return $null }
     try {
-        $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
         # 例: "driver\tests\test_client_unit.py" → "test_client_unit"（区切りは両 OS を許容）
         $kitModules = @($manifest.PSObject.Properties.Name |
             ForEach-Object { $_ -replace '\\', '/' } |
@@ -315,7 +327,7 @@ function Show-TestBreakdown {
             ForEach-Object { [System.IO.Path]::GetFileNameWithoutExtension($_) })
         if (-not $kitModules.Count) { return $null }
         $own = 0; $kit = 0; $ownFailed = 0; $kitFailed = 0; $ownSkipped = 0; $kitSkipped = 0
-        $xml = [xml](Get-Content $script:junitPath -Raw)
+        $xml = [xml](Get-Content -LiteralPath $script:junitPath -Raw)
         foreach ($case in $xml.SelectNodes("//testcase")) {
             # classname は "tests.test_client_unit" のようなドット区切りモジュールパス
             # （pytest 既定の xunit2。クラス入りなら末尾にクラス名が足される）
@@ -346,9 +358,11 @@ function Show-TestBreakdown {
             $line += "（skip: 自作 $ownSkipped / 同梱 $kitSkipped）"
         }
         Write-Host $line
-        if ($own -eq 0) {
+        if ($own -eq 0 -and -not $script:NoProjectTests) {
             # 数字の水増しで最も危険な形（フィードバック §27 の核心）: 同梱だけで
-            # 緑に見えるが、導入先のゲームは 1 件も検証されていない（全件 skip も同じ）
+            # 緑に見えるが、導入先のゲームは 1 件も検証されていない（全件 skip も同じ）。
+            # **-NoProjectTests を宣言した実行では出さない**（注入運用では対象へテストを
+            # 置かないのが正常で、出し続けると本当の取りこぼしに鈍感になる ― issue #35-A）
             Write-Host ("[$projectName] 注意: 導入先の自作テストが 1 件も実行されていません" +
                         "（この緑はキットの自己検証だけで、ゲームの導線は検証していません）")
         }
@@ -384,9 +398,9 @@ function Send-E2eEvidence {
     $junitPath = $script:junitPath
 
     $data = @{ suite = "e2e"; project = $projectName; mode = $Mode; exitCode = $ExitCode }
-    if ($junitPath -and (Test-Path $junitPath)) {
+    if ($junitPath -and (Test-Path -LiteralPath $junitPath)) {
         try {
-            $suite = ([xml](Get-Content $junitPath -Raw)).SelectSingleNode("//testsuite")
+            $suite = ([xml](Get-Content -LiteralPath $junitPath -Raw)).SelectSingleNode("//testsuite")
             if ($suite) {
                 $failed = [int]$suite.failures + [int]$suite.errors
                 $data.failed = $failed
@@ -398,20 +412,20 @@ function Send-E2eEvidence {
             # 件数が取れなくても exitCode だけで記録する
         }
     }
-    if ($JourneyDir -and (Test-Path (Join-UappPath $JourneyDir "report.html"))) {
+    if ($JourneyDir -and (Test-Path -LiteralPath (Join-UappPath $JourneyDir "report.html"))) {
         $data.journeyReport = Join-UappPath $JourneyDir "report.html"
     }
-    if ($FailureDir -and (Test-Path $FailureDir)) { $data.failureDir = $FailureDir }
+    if ($FailureDir -and (Test-Path -LiteralPath $FailureDir)) { $data.failureDir = $FailureDir }
     Send-DashEvent -Kind "evidence.e2e" -StartPath $root -Data $data
 }
 
 # 設定解決: キット内（導入配置: <project>\uapp_e2e\e2e-config.json）→ プロジェクト直下（本リポジトリのサンプル配置）
 $configPath = Join-UappPath $root "e2e-config.json"
-if (-not (Test-Path $configPath)) {
+if (-not (Test-Path -LiteralPath $configPath)) {
     $configPath = Join-UappPath $projectDir "e2e-config.json"
 }
-if (-not (Test-Path $configPath)) { throw "e2e-config.json がありません（$root または $projectDir 直下）" }
-$config = Get-Content $configPath -Raw | ConvertFrom-Json
+if (-not (Test-Path -LiteralPath $configPath)) { throw "e2e-config.json がありません（$root または $projectDir 直下）" }
+$config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
 $package = $config.package
 $activity = $config.activity
 # デバイス内で待ち受けるポート（e2e-config.json の devicePort、未指定は 13333）。
@@ -440,10 +454,35 @@ if ($Editor) {
     }
 
     # com.unity.pipeline は Unity 6 以降のみ
-    $projVer = (Get-Content (Join-UappPath $projectDir "ProjectSettings\ProjectVersion.txt") -TotalCount 1) -replace "m_EditorVersion:\s*", ""
+    $projVer = (Get-Content -LiteralPath (Join-UappPath $projectDir "ProjectSettings\ProjectVersion.txt") -TotalCount 1) -replace "m_EditorVersion:\s*", ""
     if ([int]($projVer -split "\.")[0] -lt 6000) {
         throw ("-Editor は Unity 6 以降のみ対応（com.unity.pipeline の要件。このプロジェクト: $projVer）。" +
                "手動手順: エディタで Play → `$env:UAPP_E2E_EDITOR='1' で pytest")
+    }
+
+    function Save-CliRawEvidence {
+        <#
+          .SYNOPSIS
+          JSON にできなかった CLI 応答を生のまま証跡へ残す（issue #32）。
+
+          .NOTES
+          症状は ConvertFrom-Json の無関係なエラーに化けるため（文字化けで閉じ引用符が
+          食われる・版差でヘルプが混ざる等）、生の応答が無いと原因に辿れない。
+          **保存は補助であり本流を壊さない** — 書き込み失敗（権限・ロック・容量）は
+          警告に留め、元の失敗メッセージ・戻り値をそのまま生かす（$ErrorActionPreference=Stop
+          の下で裸に書くと、保存側の例外が本来の CLI エラーを置き換える）。
+        #>
+        param([string]$Label, [string]$Raw)
+        if (-not "$Raw".Trim()) { return }
+        try {
+            $rawDir = Join-UappPath $root "Builds\failure"
+            New-Item -ItemType Directory -Force $rawDir | Out-Null
+            $rawFile = Join-UappPath $rawDir "unity-cli-raw.txt"
+            Set-Content -LiteralPath $rawFile -Value ("=== unity $Label ($(Get-Date -Format o)) ===`r`n$Raw") -Encoding utf8
+            Write-Host "[$projectName] CLI 応答を JSON にできなかったため、生の応答を保存: $rawFile"
+        } catch {
+            Write-Warning "CLI 生応答の保存に失敗（本来の失敗はこの後に出る）: $_"
+        }
     }
 
     function Invoke-UnityCliStatus {
@@ -478,13 +517,14 @@ if ($Editor) {
                 $process.WaitForExit(10000) | Out-Null
                 return @{ TimedOut = $true; Json = $null; Raw = "" }
             }
-            $raw = ((Get-Content $outFile -Raw -ErrorAction SilentlyContinue) +
-                    (Get-Content $errFile -Raw -ErrorAction SilentlyContinue))
+            $raw = ((Get-Content -LiteralPath $outFile -Raw -ErrorAction SilentlyContinue) +
+                    (Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue))
             $json = $null
             try { $json = $raw | ConvertFrom-Json } catch { $json = $null }
+            if (-not $json) { Save-CliRawEvidence -Label "status" -Raw $raw }
             return @{ TimedOut = $false; Json = $json; Raw = $raw }
         } finally {
-            Remove-Item $outFile, $errFile -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $outFile, $errFile -Force -ErrorAction SilentlyContinue
         }
     }
 
@@ -574,6 +614,10 @@ if ($Editor) {
             }
             Start-Sleep -Seconds 3
         }
+        # JSON にできなかった応答は生のまま証跡に残す（issue #32。status 側は
+        # Invoke-UnityCliStatus が同じヘルパで保存する — 導入先は自作側に同じ仕掛けを
+        # 入れて文字化けの原因へ到達した）
+        if (-not $parsed) { Save-CliRawEvidence -Label ($CliArgs -join ' ') -Raw $raw }
         if (-not $AllowFail -and (-not $parsed -or -not $parsed.success)) {
             throw "unity $($CliArgs -join ' ') が失敗: $raw"
         }
@@ -597,6 +641,43 @@ if ($Editor) {
     # 保持するリース mutex**で行う（実行ごとのランダム名・保持は下の finally まで）。
     # PID 方式は不成立だった（4 周目レビュー指摘: `.\scripts\run-e2e.ps1` はシェル内で動くため
     # $PID は対話シェルの PID。実行が終わってもシェルは生き続け、stale トークンが素通りする）
+    # **他プロジェクトのエディタが開いていたら警告する**（issue #36。弾きはしない）。
+    # -Editor の排他はプロジェクト単位の mutex なので、別 clone の Play とは競合しない。
+    # 同一マシン・同一開発サーバーへの 2 本同時実行は clone が多い運用ほど現実に起き、
+    # 導入先では相手側が起動エラーのループに入って約 5 分を失っている。
+    # **弾かない理由**: 他プロジェクトのエディタは無関係な作業者のものでもありうる
+    # （こちらの都合で止める筋合いはない）。判定できるのは「起動しているか」までで、
+    # Play 中かどうかは他プロジェクトへ CLI を投げないと分からない＝越権なので踏み込まない。
+    # **プロジェクトの特定は unity-editor-status.ps1 に一本化する**（同じ推定を 2 か所へ
+    # 書くと、片方だけ直して判定がずれる）
+    try {
+        $statusScript = Join-UappPath $PSScriptRoot "unity-editor-status.ps1"
+        if (Test-Path -LiteralPath $statusScript) {
+            $pwshExe = (Get-Process -Id $PID).Path
+            $statusJson = & $pwshExe -NoProfile -File $statusScript -ProjectPath $projectDir -Json 2>$null | Out-String
+            # **同名 clone を取りこぼさない**: -projectPath が取れない GUI 起動では
+            # unity-editor-status がウィンドウタイトルの**名前だけ**で isTarget を立てる
+            # （evidence=windowTitle）。clone は末尾名が同じになりがちで、まさに今回
+            # 警告したい構成が「対象」に化けて落ちる。パス一致で確かめられたものだけを
+            # 自分のものとみなし、名前一致どまりは「かもしれない」として出す
+            $others = @(($statusJson | ConvertFrom-Json).processes |
+                        Where-Object { -not $_.batchmode -and
+                                       -not ($_.isTarget -and $_.evidence -eq "commandLine") } |
+                        ForEach-Object {
+                            if ($_.projectPath) { $_.projectPath }
+                            elseif ($_.project) { "$($_.project)（パス不明・同名の別 clone かもしれない）" }
+                        } | Where-Object { $_ } | Select-Object -Unique)
+            if ($others.Count -gt 0) {
+                Write-Host ("[$projectName] 注意: 別プロジェクトの Unity エディタが起動しています（" +
+                            ($others -join " / ") + "）。同一マシンで E2E を並行させると、" +
+                            "共有リソース（開発サーバー・デバイス・ポート）の取り合いで" +
+                            "相手側が不安定になることがあります")
+            }
+        }
+    } catch {
+        # 検出は補助。失敗しても本流は止めない
+        Write-Warning "他プロジェクトのエディタ検出に失敗（無視して続行）: $_"
+    }
     $sessionMutexName = Get-UappHostMutexName ("uapp_e2e-editor-session-" + [guid]::NewGuid().ToString("n"))
     $sessionMutex = New-Object System.Threading.Mutex($true, $sessionMutexName)
     try {
@@ -744,7 +825,7 @@ if ($Editor) {
             "UnityEditor.PlayModeWindow.SetCustomRenderingResolution($($wh[0]), $($wh[1]), `"uapp_e2e E2E`");`nreturn `"ok`";`n")
         $null = Invoke-UnityCli @("cmd", "eval_file", "--file", $evalTmp)
     } finally {
-        Remove-Item $evalTmp -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $evalTmp -ErrorAction SilentlyContinue
     }
     Write-Host "[$projectName] Game view 解像度: $EditorResolution / Play 開始..."
 
@@ -812,25 +893,25 @@ if ($Editor) {
             & $script:pythonExe -c "from e2e_driver import editor_screenshot as es; import sys; sys.exit(0 if es.capture(sys.argv[1]) else 1)" $shot
             if ($LASTEXITCODE -eq 0) { Write-Host "失敗時のスクリーンショット: $shot" }
         }
-        if ($JourneyDir -and (Test-Path (Join-UappPath $JourneyDir "journey.json"))) {
+        if ($JourneyDir -and (Test-Path -LiteralPath (Join-UappPath $JourneyDir "journey.json"))) {
             & $script:pythonExe -m e2e_driver.journey $JourneyDir
             if ($LASTEXITCODE -eq 0) { Write-Host "ジャーニーレポート: $(Join-UappPath $JourneyDir 'report.html')" }
         }
     } finally {
         Pop-Location
-        Remove-Item Env:\UAPP_E2E_EDITOR -ErrorAction SilentlyContinue
-        Remove-Item Env:\UAPP_E2E_EDITOR_LOCK -ErrorAction SilentlyContinue
-        Remove-Item Env:\UAPP_E2E_EDITOR_LOCK_SESSION -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath Env:\UAPP_E2E_EDITOR -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath Env:\UAPP_E2E_EDITOR_LOCK -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath Env:\UAPP_E2E_EDITOR_LOCK_SESSION -ErrorAction SilentlyContinue
         if ($savedCliProxyEnv) { $env:UAPP_E2E_UNITY_CLI_PROXY_DISABLE = $savedCliProxyEnv }
-        else { Remove-Item Env:\UAPP_E2E_UNITY_CLI_PROXY_DISABLE -ErrorAction SilentlyContinue }
-        Remove-Item Env:\UAPP_E2E_JOURNEY_DIR -ErrorAction SilentlyContinue
+        else { Remove-Item -LiteralPath Env:\UAPP_E2E_UNITY_CLI_PROXY_DISABLE -ErrorAction SilentlyContinue }
+        Remove-Item -LiteralPath Env:\UAPP_E2E_JOURNEY_DIR -ErrorAction SilentlyContinue
         # 設定した分は全部消す（消し漏れると、次に手で pytest を回したときに
         # 古いプロジェクトのエディタへスクリーンショットを撮りに行く）
-        Remove-Item Env:\UAPP_E2E_UNITY_CLI -ErrorAction SilentlyContinue
-        Remove-Item Env:\UAPP_E2E_PROJECT_PATH -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath Env:\UAPP_E2E_UNITY_CLI -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath Env:\UAPP_E2E_PROJECT_PATH -ErrorAction SilentlyContinue
         # **消すのではなく元の値へ戻す**（呼び出し元が設定していた値を奪わない）
         if ($savedBridgePort) { $env:UAPP_E2E_BRIDGE_PORT = $savedBridgePort }
-        else { Remove-Item Env:\UAPP_E2E_BRIDGE_PORT -ErrorAction SilentlyContinue }
+        else { Remove-Item -LiteralPath Env:\UAPP_E2E_BRIDGE_PORT -ErrorAction SilentlyContinue }
         # Play は必ず終了させる（次のタスクのために排他資源を解放）
         $null = Invoke-UnityCli @("cmd", "editor_stop") -AllowFail
     }
@@ -851,7 +932,7 @@ if ($Editor) {
     if ($exit -ne 0) {
         $shot = Join-UappPath $root "Builds\failure\screen.png"
         $editorLog = Get-UappEditorLogPath   # 置き場は OS で違う（分岐は uapp-platform.ps1 側）
-        Write-Host ("失敗解析: " + $(if (Test-Path $shot) { "$shot（画像として読む） → " } else { "" }) +
+        Write-Host ("失敗解析: " + $(if (Test-Path -LiteralPath $shot) { "$shot（画像として読む） → " } else { "" }) +
                     "エディタの Console と Editor.log（$editorLog）を確認")
         exit $exit
     }
@@ -890,8 +971,8 @@ if ($DeviceSerial) { $adbTarget = @("-s", $DeviceSerial) }
 if ($LASTEXITCODE -ne 0) { throw "デバイスが接続されていません (adb devices で確認)" }
 
 if (-not $SkipInstall) {
-    if (-not (Test-Path $Apk)) { throw "APK がありません: $Apk （先に build-android.ps1 -Project $projectName を実行）" }
-    $apkBytes = (Get-Item $Apk).Length
+    if (-not (Test-Path -LiteralPath $Apk)) { throw "APK がありません: $Apk （先に build-android.ps1 -Project $projectName を実行）" }
+    $apkBytes = (Get-Item -LiteralPath $Apk).Length
     Write-Host "[$projectName] インストール中: $Apk （$([math]::Round($apkBytes / 1MB)) MB）"
 
     # 入れてみて失敗するより先に空きを見る。計装アプリを複数並べると普通に足りなくなり、
@@ -923,8 +1004,8 @@ if ($null -ne $config.deviceRotation) {
 if ($HostPort -eq 0) {
     $HostPort = 13333
     $localConfigPath = Join-UappPath $root "config\local.json"
-    if (Test-Path $localConfigPath) {
-        $local = Get-Content $localConfigPath -Raw | ConvertFrom-Json
+    if (Test-Path -LiteralPath $localConfigPath) {
+        $local = Get-Content -LiteralPath $localConfigPath -Raw | ConvertFrom-Json
         if ($local.bridgePort) { $HostPort = $local.bridgePort }
     }
 }
@@ -973,7 +1054,7 @@ try {
     $exit = $LASTEXITCODE
     # ジャーニーが記録されていれば自己完結レポートを更新する（失敗時も解析に使うため生成する）。
     # journey フィクスチャを使うテストが無かった実行では journey.json が無いのでスキップ
-    if ($JourneyDir -and (Test-Path (Join-UappPath $JourneyDir "journey.json"))) {
+    if ($JourneyDir -and (Test-Path -LiteralPath (Join-UappPath $JourneyDir "journey.json"))) {
         & $script:pythonExe -m e2e_driver.journey $JourneyDir
         if ($LASTEXITCODE -eq 0) {
             Write-Host "ジャーニーレポート: $(Join-UappPath $JourneyDir 'report.html')"
@@ -983,11 +1064,11 @@ try {
     }
 } finally {
     Pop-Location
-    Remove-Item Env:\UAPP_E2E_PACKAGE -ErrorAction SilentlyContinue
-    Remove-Item Env:\UAPP_E2E_BRIDGE_PORT -ErrorAction SilentlyContinue
-    Remove-Item Env:\UAPP_E2E_DEVICE_PORT -ErrorAction SilentlyContinue
-    Remove-Item Env:\UAPP_E2E_DEVICE_SERIAL -ErrorAction SilentlyContinue
-    Remove-Item Env:\UAPP_E2E_JOURNEY_DIR -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath Env:\UAPP_E2E_PACKAGE -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath Env:\UAPP_E2E_BRIDGE_PORT -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath Env:\UAPP_E2E_DEVICE_PORT -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath Env:\UAPP_E2E_DEVICE_SERIAL -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath Env:\UAPP_E2E_JOURNEY_DIR -ErrorAction SilentlyContinue
 }
 
 $breakdown = Show-TestBreakdown

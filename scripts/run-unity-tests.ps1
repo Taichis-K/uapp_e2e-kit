@@ -111,7 +111,7 @@ function Test-UnityProjectLocked {
     $instanceFile = Join-UappPath $ProjectDir "Library\EditorInstance.json"
     if (Test-Path -LiteralPath $instanceFile) {
         try {
-            $editorPid = [int]((Get-Content $instanceFile -Raw | ConvertFrom-Json).process_id)
+            $editorPid = [int]((Get-Content -LiteralPath $instanceFile -Raw | ConvertFrom-Json).process_id)
             $proc = if ($editorPid) { Get-Process -Id $editorPid -ErrorAction SilentlyContinue } else { $null }
             if ($proc -and $proc.ProcessName -eq "Unity") { return $true }
         } catch { }
@@ -128,19 +128,19 @@ function Test-UnityProjectLocked {
         return $true
     }
 }
-$root = (Resolve-Path (Join-UappPath $PSScriptRoot "..")).Path
+$root = (Resolve-Path -LiteralPath (Join-UappPath $PSScriptRoot "..")).Path
 
 # 対象プロジェクト解決: -ProjectPath 優先 → キット親がUnityプロジェクトならそれ → $root\$Project
 if ($ProjectPath) {
-    $projectDir = (Resolve-Path $ProjectPath).Path
+    $projectDir = (Resolve-Path -LiteralPath $ProjectPath).Path
 }
-elseif ((Test-Path (Join-UappPath $root "..\Assets")) -and (Test-Path (Join-UappPath $root "..\ProjectSettings"))) {
-    $projectDir = (Resolve-Path (Join-UappPath $root "..")).Path
+elseif ((Test-Path -LiteralPath (Join-UappPath $root "..\Assets")) -and (Test-Path -LiteralPath (Join-UappPath $root "..\ProjectSettings"))) {
+    $projectDir = (Resolve-Path -LiteralPath (Join-UappPath $root "..")).Path
 }
 else {
     $projectDir = Join-UappPath $root $Project
 }
-if (-not (Test-Path $projectDir)) { throw "プロジェクトがありません: $projectDir" }
+if (-not (Test-Path -LiteralPath $projectDir)) { throw "プロジェクトがありません: $projectDir" }
 # **末尾の `\` を落とす**。タブ補完は `unity-nis\` の形を作り、`Resolve-Path` はそれを保つ。
 # 付いたまま `"$projectDir"` と引用すると、閉じ引用符が `\"`（エスケープされた引用符）と
 # 解釈され、**後続の引数までパスに飲み込まれる**（Windows の引数解釈規則。実測済み:
@@ -154,7 +154,7 @@ $projectName = Split-Path $projectDir -Leaf
 $buildsDir = Join-UappPath $root "Builds"
 New-Item -ItemType Directory -Force $buildsDir | Out-Null
 if (-not $Output) { $Output = Join-UappPath $buildsDir "test-results-$projectName-$Mode.xml" }
-if (Test-Path $Output) { Remove-Item $Output -Force }   # 前回結果を誤読しない
+if (Test-Path -LiteralPath $Output) { Remove-Item -LiteralPath $Output -Force }   # 前回結果を誤読しない
 
 function Format-CliArg {
     <#
@@ -216,11 +216,11 @@ function Invoke-WithTimeout {
             $process.WaitForExit(10000) | Out-Null
             return @{ TimedOut = $true; Output = ""; ExitCode = $null }
         }
-        $text = ((Get-Content $outFile -Raw -ErrorAction SilentlyContinue) +
-                 (Get-Content $errFile -Raw -ErrorAction SilentlyContinue))
+        $text = ((Get-Content -LiteralPath $outFile -Raw -ErrorAction SilentlyContinue) +
+                 (Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue))
         return @{ TimedOut = $false; Output = $text; ExitCode = $process.ExitCode }
     } finally {
-        Remove-Item $outFile, $errFile -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $outFile, $errFile -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -653,13 +653,13 @@ if ($unityCli) {
     # フォールバック: Unity 本体を batchmode で起動する（CLI と同じ NUnit XML を出力させる）
     if (-not $UnityPath) {
         $versionFile = Join-UappPath $projectDir "ProjectSettings\ProjectVersion.txt"
-        if (-not (Test-Path $versionFile)) { throw "ProjectVersion.txt がありません: $versionFile" }
-        if ((Get-Content $versionFile -Raw) -notmatch "m_EditorVersion:\s*(\S+)") {
+        if (-not (Test-Path -LiteralPath $versionFile)) { throw "ProjectVersion.txt がありません: $versionFile" }
+        if ((Get-Content -LiteralPath $versionFile -Raw) -notmatch "m_EditorVersion:\s*(\S+)") {
             throw "ProjectVersion.txt からバージョンを読めません: $versionFile"
         }
         $unityVersion = $Matches[1]
         $localConfigPath = Join-UappPath $root "config\local.json"
-        $local = if (Test-Path $localConfigPath) { Get-Content $localConfigPath -Raw | ConvertFrom-Json } else { $null }
+        $local = if (Test-Path -LiteralPath $localConfigPath) { Get-Content -LiteralPath $localConfigPath -Raw | ConvertFrom-Json } else { $null }
         # エディタ実体の並び（Windows は <root>\<版>\Editor\Unity.exe、
         # mac は <root>/<版>/Unity.app/Contents/MacOS/Unity）は uapp-platform.ps1 が吸収する
         $editorRoots = if ($local -and $local.editorRoots) { $local.editorRoots }
@@ -694,7 +694,7 @@ if ($unityCli) {
 
 # --- 結果の要約（NUnit XML）: AI が失敗原因に直行できるよう、失敗のみ抜き出す ---
 # （ダッシュボード連携のヘルパーは経路A/B 共通なので上で読み込んでいる）
-if (-not (Test-Path $Output)) {
+if (-not (Test-Path -LiteralPath $Output)) {
     Send-TestEvidence @{
         suite = "unity-$($Mode.ToLower())"; project = $projectName
         ok = $false; exitCode = $exit; error = "結果XMLが出力されなかった（$via）"
@@ -707,7 +707,7 @@ if (-not (Test-Path $Output)) {
     } else { "Unity のログを確認" }
     throw "テスト結果が出力されませんでした（$via / exit=$exit）: $Output。$hint"
 }
-$xml = [xml](Get-Content $Output -Raw)
+$xml = [xml](Get-Content -LiteralPath $Output -Raw)
 $run = $xml.DocumentElement
 Write-Host ""
 Write-Host "=== $Mode テスト結果（$via） ==="

@@ -17,19 +17,19 @@ $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "uapp-platform.ps1")   # OS 差分の吸収（Windows / macOS。mac は暫定・未検証）
 
 $cliGlobalArgs = Get-UappUnityCliGlobalArgs -ProxyDisable:(Resolve-UappUnityCliProxyDisable)
-$root = (Resolve-Path (Join-UappPath $PSScriptRoot "..")).Path
+$root = (Resolve-Path -LiteralPath (Join-UappPath $PSScriptRoot "..")).Path
 
 # プロジェクト解決は他スクリプトと同じ規則: -ProjectPath 優先 → キット親がUnityプロジェクト → $root\$Project
 if ($ProjectPath) {
-    $projectDir = (Resolve-Path $ProjectPath).Path
+    $projectDir = (Resolve-Path -LiteralPath $ProjectPath).Path
 }
-elseif ((Test-Path (Join-UappPath $root "..\Assets")) -and (Test-Path (Join-UappPath $root "..\ProjectSettings"))) {
-    $projectDir = (Resolve-Path (Join-UappPath $root "..")).Path
+elseif ((Test-Path -LiteralPath (Join-UappPath $root "..\Assets")) -and (Test-Path -LiteralPath (Join-UappPath $root "..\ProjectSettings"))) {
+    $projectDir = (Resolve-Path -LiteralPath (Join-UappPath $root "..")).Path
 }
 else {
     $projectDir = Join-UappPath $root $Project
 }
-if (-not (Test-Path $projectDir)) { throw "プロジェクトがありません: $projectDir" }
+if (-not (Test-Path -LiteralPath $projectDir)) { throw "プロジェクトがありません: $projectDir" }
 $projectDir = Get-UappNormalizedDir $projectDir
 $projectName = Split-Path $projectDir -Leaf
 

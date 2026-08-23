@@ -1,4 +1,4 @@
-# uapp_e2e — E2Eテストキット（導入先プロジェクト用）
+﻿# uapp_e2e — E2Eテストキット（導入先プロジェクト用）
 
 このフォルダは Unity 製 Android アプリの E2E テスト基盤キット。
 計装SDK（`Assets/uapp_e2e/E2EBridge/`、`UAPP_E2E_BRIDGE` define 時のみ有効）と、
@@ -20,7 +20,47 @@ Codex 等は `uapp_e2e/AGENTS.md`（同）から参照される。
 .\scripts\run-unity-tests.ps1 -Mode EditMode  # 内側ループ（C#のEditMode/PlayModeテスト。失敗は要約表示）
 .\scripts\unity-editor-status.ps1             # **このプロジェクト**のエディタが開いているかを判定（-Json 可）
                                               # Get-Process Unity では判定できない（他プロジェクトと混同する）
+.\scripts\close-editor.ps1                    # このプロジェクトのエディタを閉じる（closed を確認するまで待つ）
+                                              # 未保存シーンがあれば中断（捨てるなら -Force）
 ```
+
+**自作の運用スクリプトは `scripts-local\` へ置く**（`scripts\` はキット所有で、更新の上書きと
+`uninstall.ps1` の削除対象。自作分を置くと消える）。自作テストの `driver\tests\` と同じ扱い。
+
+**キット所有ファイルを自分が改変したか確かめるには**
+`install-to-project.ps1 -ProjectPath <このプロジェクト> -VerifyManifest`（照合のみ・導入はしない。
+改変や不在があれば終了コード 1）。**installer は導入先には無い**ので、
+**配布 zip を展開した場所から実行する**（詳しくは SETUP.md のトラブル節）。**`kit-manifest.json` のハッシュはテキストの改行を LF に
+正規化してから取っている**ので、**素の `Get-FileHash` / `sha256sum` と直接比べても
+CRLF を含むファイルは一致しない** — 自前で突き合わせると「ほぼ全件が改変」に見える
+（導入先で実際にこの誤読が起きた）。照合は必ず上のコマンドで行う。
+
+### 注入モード（1 つのキットを多数の clone で使い回す）
+
+同一プロダクトの clone が並び、E2E を回す対象が日替わりで変わる運用では、
+**キットは 1 か所（ハブ）に置き、対象へは一時的に注入して使う**:
+
+```powershell
+.\scripts\inject-to-project.ps1 -TargetProject <clone>      # 注入（計装・define・pipeline・ポート設定だけ）
+.\scripts\run-e2e.ps1 -Editor -ProjectPath <clone> -NoProjectTests   # 実行（テストはハブ側）
+.\scripts\close-editor.ps1 -ProjectPath <clone>             # 閉じる
+.\scripts\inject-to-project.ps1 -TargetProject <clone> -Eject       # 撤去
+.\scripts\inject-to-project.ps1 -List                        # 台帳（対象 → スロットとポート）
+```
+
+- **対象にはテスト・ドライバ・スクリプトを置かない**（フル導入との違い）。だから
+  run-e2e には `-NoProjectTests` を付ける（自作テストが 0 件でも注意行を出さない宣言）
+- **ポートは台帳（`config\targets.json`・git 管理外）が対象ごとに割り当てる**。
+  重複は「別プロジェクトのエディタを操作する」事故に直結するので、台帳と
+  ドライバ側の接続先検査（`UAPP_E2E_EDITOR=1` の platform + project 照合）の**両方**で守る
+- **撤去は記録ベース**（対象の `uapp_e2e-inject.json` に入れた物を記録し、それだけを戻す）。
+  記録が無い対象を推測で消すことはしない。途中で失敗しても記録は残るのでやり直せる
+- 注入は**フル導入済み・既に計装がある対象・非 Unity プロジェクト**を**常に拒否する**
+  （`-Force` でも通さない。所有関係が壊れて撤去できなくなるため）。`-Force` で警告に
+  落とせるのは**対象のエディタが開いている / 状態を判定できない**場合と、
+  **既存の `e2e-config.json` がある**場合（退避して撤去時に戻す）
+- 対象の UI 実装に合わせて `-UiType ngui-legacy` 等を渡す（既定 `ugui-nis`。
+  生成する `e2e-config.json` に書かれる。`-Orientation` も同様）
 
 複数ターゲット同時: `-DeviceSerial emulator-5556 -HostPort 13335` のように分離する。
 エディタ再生中のアプリへは adb 不要で `BridgeClient()` で直接接続できる
@@ -139,6 +179,28 @@ python -m e2e_driver.journey ..\Builds\journey    # → report.html 生成（詳
 5. **全テスト接続エラーなら `Builds/failure/crash.txt`**（ネイティブクラッシュはUnityタグに出ない）。
    `adb shell pidof <package>` が空ならプロセス死亡
 6. dump を再取得して期待とのUI差分を見る
+7. **エディタ直結で Unity CLI の応答が壊れる／JSON にならない**とき、run-e2e は生の応答を
+   `Builds/failure/unity-cli-raw.txt` へ自動保存する。まずそれを見る（`ConvertFrom-Json` の
+   エラーメッセージは原因と無関係な見た目になる — 文字化けで閉じ引用符が食われる・
+   版差でヘルプ文が混ざる等）
+
+**自作の PowerShell スクリプトから `unity cmd` を直接叩くときは、先頭で文字コードを明示する**。
+コンソールを持たない起動（`Start-Process -RedirectStandardOutput` 等。AI からの detached 実行が典型）
+では出力の符号化が OEM（日本語環境なら cp932）に落ち、**日本語を含む応答だけ** JSON が壊れる
+（ASCII 応答では再現せず、手で叩くと正常なので誤診しやすい。キット同梱スクリプトは対処済みだが、
+自作スクリプトには自分で入れる必要がある）:
+
+```powershell
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+```
+
+**結果の読み方（3 つ）**:
+**赤いとき＝測り方を疑う**（判定式の戻り値でなく出力そのものを見る）/
+**緑のとき＝測った対象を疑う**（何件・どのファイルを測ったのかを出力で確かめる。
+「偽の緑」は毎回、測っていないものを測ったつもりになっている形だった）/
+**どちらとも言えないとき＝直近の変更を証拠なしに犯人にしない**
+（疑う順番としては正しいが、条件を 1 つずつ外して再現を取るまで断定しない）。
 
 **切り分けでやってはいけないこと（エディタ直結）**: `InputSystem.DisableDevice(...)` での
 デバイス無効化と、`IPointerDownHandler` 等のイベントハンドラの直接呼び出し。どちらも

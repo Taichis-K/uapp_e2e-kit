@@ -629,7 +629,7 @@ function Get-UappDevOnlyScript {
         # （SETUP の iOS 節・スキルの導線・E2EBridge.Editor.BuildEntry の iOS エントリ・
         # oslayer/ の同梱と揃えて解除した。issue #27）
         "install-to-project.ps1", "package-kit.ps1", "publish-kit.ps1", "verify-all.ps1",
-        "check-portability.ps1"
+        "check-portability.ps1", "check-kit-docs.ps1"
     )
 }
 
@@ -668,6 +668,200 @@ function Start-UappBackgroundProcess {
         -RedirectStandardOutput $LogPath -RedirectStandardError ($LogPath + ".err")
 }
 
+function Resolve-UappFsPath {
+    <#
+      .SYNOPSIS
+      相対パスを **PowerShell の位置（$PWD）基準**で絶対パスにする。
+
+      .NOTES
+      .NET の `System.IO` API は相対パスを **`[Environment]::CurrentDirectory`** で解決するが、
+      PowerShell の `Set-Location` はそれを更新しない。相対パスをそのまま .NET へ渡すと
+      **別の場所を見て「無い」と判断し、黙って何もしない** ―
+      `[ ]` を含むパスで踏んだのと同じ「例外も出ないので成功したと思い込む」クラス（issue #37）。
+      **実測**（レビューで発覚）: `$PWD=/usr` / `CurrentDirectory=<repo>` のとき
+      `Test-Path -LiteralPath bin` は True、`[IO.Directory]::Exists("bin")` は False。
+      .NET へ寄せた関数は、**必ずこれを通してから**渡すこと。
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    return [System.IO.Path]::GetFullPath($Path, (Get-Location -PSProvider FileSystem).ProviderPath)
+}
+
+# --- ディレクトリ操作を .NET へ寄せる理由（下の 4 関数に共通） -----------------
+# **PowerShell の FileSystem プロバイダは、パス末尾の要素を親ディレクトリの列挙に対して
+# 大小文字を無視して照合し、複数当たっても先頭を無条件に採用する**
+# （`FileSystemProvider.GetCorrectCasedPath()` が `Directory.GetFileSystemEntries(親, 要素)` の
+# `entries[0]` を採る。`NormalizePath()` から呼ばれるのでプロバイダ経由の操作すべてに効く）。
+# 結果として `Remove-Item -LiteralPath <dir> -Recurse` や `Get-ChildItem -LiteralPath <dir>` が
+# **大小文字だけ違う隣のディレクトリ**を消したり列挙したりする。**`-LiteralPath` でも防げない**
+# （`-LiteralPath` はワイルドカード解釈を止めるだけで、この正規化は通る）。
+#   - 一次情報: <https://github.com/PowerShell/PowerShell/issues/13939>
+#     （報告は Windows の `fsutil file setCaseSensitiveInfo` 環境で `rmdir hh` が `HH` を消す。
+#     ラベルは Area-FileSystem-Provider、**Resolution-No Activity で自動クローズ＝未修正**。
+#     原因の特定はメンテナ jborean93 のコメント。**この issue 自身は `-Recurse` にも
+#     `-LiteralPath` にも `Get-ChildItem` にも言及していない**）
+#   - 実装: `src/System.Management.Automation/namespaces/FileSystemProvider.cs`
+# **.NET の API（`Directory.Delete` / `EnumerateFiles` / `GetFileSystemEntries`）は
+# 指定どおりの実体を見る**（macOS 26.6 / pwsh 7.6.4 / case-sensitive APFS で両方向とも実測）。
+# だからここでは .NET へ寄せる ― **プロバイダ側の問題であって .NET の仕様の問題ではない**。
+#
+# **どちらが犠牲になるかは親ディレクトリの生の列挙順で先に来た側**で、名前の対によって変わる
+# （実測: `Xx`/`xX` と `Cc`/`cC` は誤り、`Bb`/`bB` と `Ee`/`eE` は偶然正しい。作成順には依存しない）。
+# **つまり「大文字側が消える」ではないし、名前の対によっては検証が偶然通る**。
+#
+# **`Remove-Item <dir> -Force`（`-Recurse` なし）も同じ誤解決をする**うえ、隣が非空だと
+# 「has children and the Recurse parameter was not specified」の**対話待ちでハングする**
+# （`$ErrorActionPreference=Stop` でも抑止されない。実測）。
+# **check-portability が機械で拾えるのは `-Recurse` の付いた形まで**なので、
+# ディレクトリを消す・列挙する箇所は必ずこの下の関数を使うこと。
+#
+# **未対処**: `Get-ChildItem` に `-Filter`／glob を渡している箇所（`build-ios.ps1` /
+# `run-ios-e2e.ps1` の `*.app` 探索など）は、列挙の意図があるのでそのまま残している。
+# 大小文字違いの兄弟ディレクトリがある環境では同じ誤解決を起こしうる。
+
+function Test-UappDirEmpty {
+    <#
+      .SYNOPSIS
+      ディレクトリが空か（隠し項目も含めて 1 件も無いか）を返す。**存在しなければ $false**。
+
+      .NOTES
+      戻り値の意味は「空であることを確かめられた」。非存在を $false にしているのは、
+      呼び出し側が「空なら畳む」に使うため（無いものは畳まなくてよい）。
+      `Get-ChildItem` で数えないのは上のコメントの理由。隠し項目も含むので `-Force` 相当。
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    $p = Resolve-UappFsPath $Path
+    if (-not [System.IO.Directory]::Exists($p)) { return $false }
+    return (@([System.IO.Directory]::GetFileSystemEntries($p)).Count -eq 0)
+}
+
+function Test-UappReparsePoint {
+    # symlink / ジャンクションか（Unix の symlink にも ReparsePoint が立つ）。判定できなければ $false
+    param([Parameter(Mandatory)][string]$Path)
+    try { return [bool]([System.IO.File]::GetAttributes($Path) -band [System.IO.FileAttributes]::ReparsePoint) }
+    catch { return $false }
+}
+
+function Get-UappTreeItemInternal {
+    <#
+      .SYNOPSIS
+      Get-UappTreeFile / Get-UappTreeDirectory の共通実装。
+
+      .NOTES
+      **既定はリンクを辿らない**。`SearchOption.AllDirectories` は**ディレクトリの symlink を
+      辿る**ため（<https://learn.microsoft.com/en-us/dotnet/api/system.io.searchoption>）、
+      これを削除系の列挙に使うと**リンク先の実ファイルを消す**。置き換え前の
+      `Get-ChildItem -Recurse`（`-FollowSymlink` なし）は辿らなかったので、既定を合わせないと
+      退行になる ― 実際に一度そう書いて外部レビューに指摘された。
+      **辿るのは robocopy `/E` に合わせる `Copy-UappTree` だけ**（`-FollowSymlink` で明示）。
+      リンクしたディレクトリ**自体**は列挙に含める（その下へ降りないだけ）。
+    #>
+    param([Parameter(Mandatory)][string]$Path, [ValidateSet("File", "Directory")][string]$Kind,
+          [switch]$NoRecurse, [switch]$FollowSymlink)
+    $p = Resolve-UappFsPath $Path
+    if (-not [System.IO.Directory]::Exists($p)) { return @() }
+    if ($NoRecurse) {
+        return @(if ($Kind -eq "File") { [System.IO.Directory]::EnumerateFiles($p) }
+                 else { [System.IO.Directory]::EnumerateDirectories($p) })
+    }
+    if ($FollowSymlink) {
+        $opt = [System.IO.SearchOption]::AllDirectories
+        return @(if ($Kind -eq "File") { [System.IO.Directory]::EnumerateFiles($p, "*", $opt) }
+                 else { [System.IO.Directory]::EnumerateDirectories($p, "*", $opt) })
+    }
+    $out = New-Object System.Collections.Generic.List[string]
+    $stack = New-Object System.Collections.Generic.Stack[string]
+    $stack.Push($p)
+    while ($stack.Count -gt 0) {
+        $d = $stack.Pop()
+        if ($Kind -eq "File") { foreach ($f in [System.IO.Directory]::EnumerateFiles($d)) { $out.Add($f) } }
+        foreach ($sub in [System.IO.Directory]::EnumerateDirectories($d)) {
+            if ($Kind -eq "Directory") { $out.Add($sub) }
+            if (-not (Test-UappReparsePoint $sub)) { $stack.Push($sub) }
+        }
+    }
+    return @($out)
+}
+
+function Get-UappTreeFile {
+    <#
+      .SYNOPSIS
+      ディレクトリ配下のファイルの**フルパス文字列**を返す（既定は再帰・**リンクを辿らない**）。
+      無ければ空配列。
+    #>
+    param([Parameter(Mandatory)][string]$Path, [switch]$NoRecurse, [switch]$FollowSymlink)
+    return Get-UappTreeItemInternal -Path $Path -Kind File -NoRecurse:$NoRecurse -FollowSymlink:$FollowSymlink
+}
+
+function Get-UappTreeDirectory {
+    <#
+      .SYNOPSIS
+      ディレクトリ配下のディレクトリの**フルパス文字列**を返す（既定は再帰・**リンクを辿らない**）。
+      無ければ空配列。
+    #>
+    param([Parameter(Mandatory)][string]$Path, [switch]$NoRecurse, [switch]$FollowSymlink)
+    return Get-UappTreeItemInternal -Path $Path -Kind Directory -NoRecurse:$NoRecurse -FollowSymlink:$FollowSymlink
+}
+
+function Get-UappTreeEntry {
+    <#
+      .SYNOPSIS
+      ディレクトリ直下の項目（ファイル・ディレクトリ）の**フルパス文字列**を返す。無ければ空配列。
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    $p = Resolve-UappFsPath $Path
+    if (-not [System.IO.Directory]::Exists($p)) { return @() }
+    return @([System.IO.Directory]::GetFileSystemEntries($p))
+}
+
+function Remove-UappTree {
+    <#
+      .SYNOPSIS
+      ファイル／ディレクトリを削除する（ディレクトリは再帰）。**無ければ何もしない**（冪等）。
+
+      .NOTES
+      `Remove-Item -Recurse` を使わない理由は上のコメント。
+
+      **`Remove-Item -Recurse -Force` との差**（レビューで突き合わせ・実測）:
+      存在しないパスは例外にせず何もしない（`Remove-Item` は ItemNotFoundException）。
+      それ以外 ― ファイル対象／ディレクトリへの symlink（リンクだけ消えて先は残る）／
+      ツリー内部の symlink を辿らない／末尾の区切り／Unix の 444 ファイル ― は同じ挙動。
+      **「無いから何もしない」と「パスを間違えたから何もしない」が表示上は同じ**なので、
+      消えたことを確かめたい呼び出し側は事前に `Test-Path` を取ること。
+
+      **Windows の読み取り専用**: `Directory.Delete` は読み取り専用ファイルで失敗する
+      （`Remove-Item -Force` は落としてくれる）。揃えるため Windows でだけ先に落とすが、
+      **落とすのは ReadOnly だけ**（`FileAttributes.Normal` を代入すると Hidden / System まで
+      落ち、削除が途中で失敗したときに**属性だけ書き換わったファイルが対象に残る**）。
+      **この分岐は Windows でのみ実行されるため mac では未検証**。
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    $p = Resolve-UappFsPath $Path
+    if ([System.IO.File]::Exists($p)) {
+        Clear-UappReadOnly $p
+        [System.IO.File]::Delete($p)
+        return
+    }
+    if (-not [System.IO.Directory]::Exists($p)) { return }
+    if (Test-UappWindows) {
+        # 読み取り専用が 1 つでも残っていると Directory.Delete が途中で落ちる
+        # （git の pack ファイル等で実際に起きる）。落とせないものは無視して本体へ進み、
+        # 本当に消せなければ Directory.Delete 側の例外で分かる
+        foreach ($f in (Get-UappTreeFile $p)) { Clear-UappReadOnly $f }
+    }
+    [System.IO.Directory]::Delete($p, $true)
+}
+
+function Clear-UappReadOnly {
+    # 読み取り専用属性**だけ**を落とす（Windows 用。他の属性は保つ）。失敗は無視する
+    param([Parameter(Mandatory)][string]$Path)
+    try {
+        $attr = [System.IO.File]::GetAttributes($Path)
+        if ($attr -band [System.IO.FileAttributes]::ReadOnly) {
+            [System.IO.File]::SetAttributes($Path, ($attr -band (-bnot [System.IO.FileAttributes]::ReadOnly)))
+        }
+    } catch { }
+}
+
 function Copy-UappTree {
     <#
       .SYNOPSIS
@@ -678,11 +872,18 @@ function Copy-UappTree {
       失敗したら例外を投げる（呼び出し元は $ErrorActionPreference = "Stop" 前提）。
 
       **robocopy /E に合わせるために要るもの**（外すと静かに欠ける）:
-      - `-Force` … 隠し項目も列挙する。**Unix では `.` で始まる名前が隠し扱い**なので、
-        これが無いと mac でドットファイルが無言で配布から落ちる
-      - `-FollowSymlink` … ディレクトリのシンボリックリンクの先も辿る（robocopy は
-        `/SL` を付けない限り辿る）。付けないとリンク配下が丸ごと欠落する
+      - 隠し項目も列挙する。**Unix では `.` で始まる名前が隠し扱い**なので、
+        落とすと mac でドットファイルが無言で配布から落ちる
+      - ディレクトリのシンボリックリンクの先も辿る（robocopy は `/SL` を付けない限り辿る）。
+        辿らないとリンク配下が丸ごと欠落する
       - 空ディレクトリも作る … `/E` は空ディレクトリを含める契約
+
+      列挙は **`Get-UappTreeDirectory` / `Get-UappTreeFile` に `-FollowSymlink` を付けて**行う
+      （**この関数だけが辿る**。既定は辿らない ― 削除系の列挙が辿るとリンク先を消すため）。
+      `Get-ChildItem -LiteralPath <dir>` は**大小文字だけ違う隣のディレクトリを列挙する**
+      ことがあり、**返る `FullName` もそちら側**なので、コピー元を丸ごと取り違える
+      （上のコメントの理由。実測で「隣の中身だけがコピーされる」ことを確認）。
+      .NET の列挙は隠し項目を含み、ディレクトリの symlink も辿る（robocopy と同じ契約）
     #>
     param(
         [Parameter(Mandatory)][string]$Source,
@@ -694,8 +895,8 @@ function Copy-UappTree {
     New-Item -ItemType Directory -Force $Destination | Out-Null
 
     # 空ディレクトリを含めて構造を先に作る（除外ディレクトリ自身とその配下は作らない）
-    foreach ($dir in (Get-ChildItem -LiteralPath $srcRoot -Recurse -Directory -Force -FollowSymlink -ErrorAction SilentlyContinue)) {
-        $relDir = $dir.FullName.Substring($srcRoot.Length).TrimStart('\', '/')
+    foreach ($dir in (Get-UappTreeDirectory $srcRoot -FollowSymlink)) {
+        $relDir = $dir.Substring($srcRoot.Length).TrimStart('\', '/')
         if ($ExcludeDirectory.Count -gt 0) {
             $segments = @($relDir -split '[\\/]+')
             if (@($segments | Where-Object { $ExcludeDirectory -contains $_ }).Count -gt 0) { continue }
@@ -704,8 +905,8 @@ function Copy-UappTree {
         if (-not (Test-Path -LiteralPath $destDir)) { New-Item -ItemType Directory -Force $destDir | Out-Null }
     }
 
-    foreach ($file in (Get-ChildItem -LiteralPath $srcRoot -Recurse -File -Force -FollowSymlink)) {
-        $rel = $file.FullName.Substring($srcRoot.Length).TrimStart('\', '/')
+    foreach ($file in (Get-UappTreeFile $srcRoot -FollowSymlink)) {
+        $rel = $file.Substring($srcRoot.Length).TrimStart('\', '/')
         if ($ExcludeDirectory.Count -gt 0) {
             # 除外はディレクトリ名の一致で見る（相対パスの最後の要素＝ファイル名は対象外）
             $dirSegments = @($rel -split '[\\/]+')
@@ -719,6 +920,6 @@ function Copy-UappTree {
         if ($destDir -and -not (Test-Path -LiteralPath $destDir)) {
             New-Item -ItemType Directory -Force $destDir | Out-Null
         }
-        Copy-Item -LiteralPath $file.FullName -Destination $dest -Force
+        Copy-Item -LiteralPath $file -Destination $dest -Force
     }
 }

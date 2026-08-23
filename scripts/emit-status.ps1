@@ -79,9 +79,9 @@ function Send-DashEvent {
             # 候補は「このホストが所有し」「ハートビートが切れていない」進行中の単位だけ。
             # 別マシンの作業や放置された単位に実測値を付けると、突き合わせの信頼性が壊れる
             $active = @()
-            foreach ($f in (Get-ChildItem $unitsDir -Filter *.json -File -ErrorAction SilentlyContinue)) {
+            foreach ($f in (Get-ChildItem -LiteralPath $unitsDir -Filter *.json -File -ErrorAction SilentlyContinue)) {
                 try {
-                    $u = Get-Content $f.FullName -Raw | ConvertFrom-Json
+                    $u = Get-Content -LiteralPath $f.FullName -Raw | ConvertFrom-Json
                     if (-not $u.unitId -or $u.state -in @("done", "failed", "aborted")) { continue }
                     if ($u.owner -and $u.owner.host -and $u.owner.host -ne $thisHost) { continue }
                     $beat = if ($u.lastHeartbeat) { $u.lastHeartbeat } else { $u.startedAt }

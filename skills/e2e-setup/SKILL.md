@@ -12,4 +12,7 @@ description: uapp_e2e E2Eテスト環境をこのプロジェクトにセット�
 - 最後に必ずビルド→ping疎通まで実際に動かして検証し、変更ファイル一覧を報告する
 
 キットがまだ無い場合（GitHub URLやzipを渡された場合）は、ユーザーの許可を得て取得・展開し、
-`scripts\install-to-project.ps1 -ProjectPath <対象>` で配置してから SETUP.md に従う。
+**展開先の `SETUP.md` を先に読んでその手順に従う**。installer の置き場は入手形態で変わるので
+（配布 zip と公開リポの clone は**直下**、開発リポジトリは `scripts\` 配下）、
+**ここでパスを決め打ちにしない** ― SETUP.md の冒頭に「直下に `install-to-project.ps1` が
+あるかで見分ける」判別手順がある。

@@ -50,19 +50,19 @@ $ErrorActionPreference = "Stop"
 
 # CLI のグローバル引数は 1 か所で決めて全呼び出しへ渡す（check-portability.ps1 が検査する）
 $cliGlobalArgs = Get-UappUnityCliGlobalArgs -ProxyDisable:(Resolve-UappUnityCliProxyDisable -Switch:$UnityCliProxyDisable)
-$root = (Resolve-Path (Join-UappPath $PSScriptRoot "..")).Path
+$root = (Resolve-Path -LiteralPath (Join-UappPath $PSScriptRoot "..")).Path
 
 # プロジェクト解決は他スクリプトと同じ規則: -ProjectPath 優先 → キット親がUnityプロジェクト → $root\$Project
 if ($ProjectPath) {
-    $projectDir = (Resolve-Path $ProjectPath).Path
+    $projectDir = (Resolve-Path -LiteralPath $ProjectPath).Path
 }
-elseif ((Test-Path (Join-UappPath $root "..\Assets")) -and (Test-Path (Join-UappPath $root "..\ProjectSettings"))) {
-    $projectDir = (Resolve-Path (Join-UappPath $root "..")).Path
+elseif ((Test-Path -LiteralPath (Join-UappPath $root "..\Assets")) -and (Test-Path -LiteralPath (Join-UappPath $root "..\ProjectSettings"))) {
+    $projectDir = (Resolve-Path -LiteralPath (Join-UappPath $root "..")).Path
 }
 else {
     $projectDir = Join-UappPath $root $Project
 }
-if (-not (Test-Path $projectDir)) { throw "プロジェクトがありません: $projectDir" }
+if (-not (Test-Path -LiteralPath $projectDir)) { throw "プロジェクトがありません: $projectDir" }
 # **末尾の `\` を落とす**（run-e2e.ps1 / run-unity-tests.ps1 と同じ正規化）。
 # タブ補完は `unity-nis\` の形を作り、`Resolve-Path` はそれを保つ。付いたまま引用すると
 # 閉じ引用符が `\"` と解釈され、**後続の引数までパスに飲み込まれる**。
@@ -166,8 +166,8 @@ function Get-CliStatus {
             try { $p.Kill() } catch { }
             return [pscustomobject]@{ available = $true; timedOut = $true; connected = $false; state = $null }
         }
-        $raw = ((Get-Content $outFile -Raw -ErrorAction SilentlyContinue) +
-                (Get-Content $errFile -Raw -ErrorAction SilentlyContinue))
+        $raw = ((Get-Content -LiteralPath $outFile -Raw -ErrorAction SilentlyContinue) +
+                (Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue))
         $json = $null
         try { $json = $raw | ConvertFrom-Json } catch { }
         $connected = [bool]($json -and $json.success -and $json.data.count -ge 1)
@@ -188,7 +188,7 @@ function Get-EditorInstance {
     param([Parameter(Mandatory)][string]$Dir)
     $file = Join-UappPath $Dir "Library\EditorInstance.json"
     if (-not (Test-Path -LiteralPath $file)) { return $null }
-    try { $json = Get-Content $file -Raw | ConvertFrom-Json } catch { return $null }
+    try { $json = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json } catch { return $null }
     # $pid は PowerShell の読み取り専用変数（自プロセスの PID）なので使えない
     $editorPid = [int]($json.process_id)
     $proc = if ($editorPid) { Get-Process -Id $editorPid -ErrorAction SilentlyContinue } else { $null }

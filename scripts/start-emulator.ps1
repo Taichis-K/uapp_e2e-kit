@@ -9,12 +9,12 @@ param(
 $ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot "uapp-platform.ps1")   # OS 差分の吸収（Windows / macOS。mac は暫定・未検証）
-$root = (Resolve-Path (Join-UappPath $PSScriptRoot "..")).Path
+$root = (Resolve-Path -LiteralPath (Join-UappPath $PSScriptRoot "..")).Path
 
 if (-not $Avd) {
     $localConfig = Join-UappPath $root "config\local.json"
-    if (Test-Path $localConfig) {
-        $Avd = (Get-Content $localConfig -Raw | ConvertFrom-Json).avd
+    if (Test-Path -LiteralPath $localConfig) {
+        $Avd = (Get-Content -LiteralPath $localConfig -Raw | ConvertFrom-Json).avd
     }
     if (-not $Avd) { throw "AVD が未指定です（config\local.json の avd か -Avd 引数で指定）" }
 }

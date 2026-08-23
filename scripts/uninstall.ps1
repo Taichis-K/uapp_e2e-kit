@@ -18,15 +18,15 @@ $ErrorActionPreference = "Stop"
 
 # --- 対象の解決: 引数 > 自身の配置場所（<プロジェクト>\uapp_e2e\scripts\ に配布される前提） ---
 if ($ProjectPath) {
-    $target = (Resolve-Path $ProjectPath).Path
+    $target = (Resolve-Path -LiteralPath $ProjectPath).Path
 } else {
-    $target = (Resolve-Path (Join-UappPath $PSScriptRoot "..\..")).Path
+    $target = (Resolve-Path -LiteralPath (Join-UappPath $PSScriptRoot "..\..")).Path
 }
-if (-not ((Test-Path (Join-UappPath $target "Assets")) -and (Test-Path (Join-UappPath $target "ProjectSettings")))) {
+if (-not ((Test-Path -LiteralPath (Join-UappPath $target "Assets")) -and (Test-Path -LiteralPath (Join-UappPath $target "ProjectSettings")))) {
     throw "Unity プロジェクトではありません（Assets/ProjectSettings が見つからない）: $target"
 }
 $kit = Join-UappPath $target "uapp_e2e"
-if (-not ((Test-Path $kit) -or (Test-Path (Join-UappPath $target "Assets\uapp_e2e")))) {
+if (-not ((Test-Path -LiteralPath $kit) -or (Test-Path -LiteralPath (Join-UappPath $target "Assets\uapp_e2e")))) {
     throw "キットが導入されていません（uapp_e2e\ も Assets\uapp_e2e\ も無い）: $target"
 }
 
@@ -34,21 +34,25 @@ Write-Host "アンインストール対象: $target"
 Write-Host ("モード: " + $(if ($Purge) { "-Purge（uapp_e2e\ 全体と未編集のルート AGENTS.md も削除）" }
                            else { "既定（キット所有のみ。設定・自作テスト・記録は残す）" }))
 
+# **ディレクトリの削除と空判定は Remove-UappTree / Test-UappDirEmpty で行う**。
+# `Remove-Item -Recurse` と `Get-ChildItem` は**大小文字だけ違う別ディレクトリ**を掴むことが
+# あり（PowerShell の既知不具合。詳細と一次情報は helper のヘルプ）、ここは
+# **導入先のツリーを消す経路**なので取り違えの影響が大きい
 function Remove-Reported($path, $label) {
-    if (Test-Path $path) {
-        Remove-Item $path -Recurse -Force
+    if (Test-Path -LiteralPath $path) {
+        Remove-UappTree $path
         Write-Host "  [削除] $label"
     }
 }
 function Remove-IfEmpty($path) {
-    if ((Test-Path $path) -and ($null -eq (Get-ChildItem $path -Force))) { Remove-Item $path -Force }
+    if (Test-UappDirEmpty $path) { Remove-UappTree $path }
 }
 
 # --- 1. 計装SDK（キット所有は E2EBridge のみ。Assets\uapp_e2e\ 直下のユーザー独自アセットは消さない） ---
 Remove-Reported (Join-UappPath $target "Assets\uapp_e2e\E2EBridge") "Assets\uapp_e2e\E2EBridge\（計装SDK）"
 Remove-Reported (Join-UappPath $target "Assets\uapp_e2e\E2EBridge.meta") "Assets\uapp_e2e\E2EBridge.meta"
 Remove-IfEmpty (Join-UappPath $target "Assets\uapp_e2e")
-if (-not (Test-Path (Join-UappPath $target "Assets\uapp_e2e"))) {
+if (-not (Test-Path -LiteralPath (Join-UappPath $target "Assets\uapp_e2e"))) {
     Remove-Reported (Join-UappPath $target "Assets\uapp_e2e.meta") "Assets\uapp_e2e.meta"
 }
 
@@ -67,8 +71,8 @@ if ($Purge) {
     # ルート AGENTS.md を installer が作成した記録（kit-manifest.json のメタ記録）を、削除前に読んでおく
     $rootAgentsByInstaller = $false
     $manifestPath = Join-UappPath $kit "kit-manifest.json"
-    if (Test-Path $manifestPath) {
-        try { $rootAgentsByInstaller = [bool]((Get-Content $manifestPath -Raw | ConvertFrom-Json)."__rootAgentsMdByInstaller") } catch {}
+    if (Test-Path -LiteralPath $manifestPath) {
+        try { $rootAgentsByInstaller = [bool]((Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json)."__rootAgentsMdByInstaller") } catch {}
     }
     Remove-Reported $kit "uapp_e2e\（全体。ジャーニー記録・更新バックアップ含む）"
 } else {
@@ -78,8 +82,9 @@ if ($Purge) {
     # 生成物＝プロジェクト所有（installer の manifest も除外している）。既定ではキット所有分だけ
     # 消し、DerivedData が無ければディレクトリごと消える（-Purge は uapp_e2e\ 全体を消すので対象外）
     $oslayerDir = Join-UappPath $kit "oslayer"
-    if (Test-Path $oslayerDir) {
-        $hasDerived = @(Get-ChildItem $oslayerDir -Recurse -Directory -Filter "DerivedData").Count -gt 0
+    if (Test-Path -LiteralPath $oslayerDir) {
+        $hasDerived = @(Get-UappTreeDirectory $oslayerDir |
+                        Where-Object { (Split-Path $_ -Leaf) -eq "DerivedData" }).Count -gt 0
         if ($hasDerived) {
             # 判定は oslayer からの**相対パスのセグメント一致**で行う（フルパスへの部分一致だと、
             # 祖先ディレクトリ名に DerivedData を含む環境で全ファイルが除外され、削除が空振りする）
@@ -87,12 +92,12 @@ if ($Purge) {
                 param($fullName)
                 (($fullName.Substring($oslayerDir.Length).TrimStart('\', '/')) -split '[\\/]') -contains 'DerivedData'
             }
-            Get-ChildItem $oslayerDir -Recurse -File |
-                Where-Object { -not (& $inDerived $_.FullName) } |
-                ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force }
-            Get-ChildItem $oslayerDir -Recurse -Directory | Sort-Object FullName -Descending |
-                Where-Object { -not (& $inDerived $_.FullName) -and $_.Name -ne 'DerivedData' } |
-                ForEach-Object { Remove-IfEmpty $_.FullName }
+            Get-UappTreeFile $oslayerDir |
+                Where-Object { -not (& $inDerived $_) } |
+                ForEach-Object { Remove-UappTree $_ }
+            Get-UappTreeDirectory $oslayerDir | Sort-Object -Descending |
+                Where-Object { -not (& $inDerived $_) -and (Split-Path $_ -Leaf) -ne 'DerivedData' } |
+                ForEach-Object { Remove-IfEmpty $_ }
             Write-Host "  [削除] uapp_e2e\oslayer（キット所有分。DerivedData=ビルドキャッシュは保持）"
         } else {
             Remove-Reported $oslayerDir "uapp_e2e\oslayer"
@@ -103,15 +108,19 @@ if ($Purge) {
                        "driver\pytest.ini", "driver\requirements.txt",
                        "driver\tests\test_journey_unit.py", "driver\tests\test_adb_ui.py",
                        "driver\tests\test_client_unit.py", "driver\tests\test_bridge_smoke.py",
-                       "config\local.sample.json", "config\e2e-config.sample.json")) {
+                       "config\local.sample.json", "config\e2e-config.sample.json",
+                       # scripts-local は README だけキット所有。**ディレクトリは消さない**
+                       # （中身は導入先の自作スクリプト＝プロジェクト所有。上の一覧に
+                       # ディレクトリを入れず、下の Remove-IfEmpty で空のときだけ消す）
+                       "scripts-local\README.md")) {
         Remove-Reported (Join-UappPath $kit $rel) "uapp_e2e\$rel"
     }
     foreach ($rel in @("driver\tests\__pycache__", "driver\.pytest_cache")) {
-        if (Test-Path (Join-UappPath $kit $rel)) { Remove-Item (Join-UappPath $kit $rel) -Recurse -Force }
+        Remove-UappTree (Join-UappPath $kit $rel)
     }
-    foreach ($d in @("driver\tests", "driver", "config")) { Remove-IfEmpty (Join-UappPath $kit $d) }
+    foreach ($d in @("driver\tests", "driver", "config", "scripts-local")) { Remove-IfEmpty (Join-UappPath $kit $d) }
     Remove-IfEmpty $kit
-    if (Test-Path $kit) {
+    if (Test-Path -LiteralPath $kit) {
         Write-Host "  [保持] uapp_e2e\（e2e-config.json・自作テスト・local.json・Builds\ 等のプロジェクト所有物。"
         Write-Host "         installer 再実行で設定ごと復帰できる。すべて消す場合は -Purge で再実行）"
     }
@@ -120,9 +129,9 @@ if ($Purge) {
 # --- 4. ルート AGENTS.md（-Purge 時のみ・「installer が作成した記録あり」かつ「生成時から未編集」の場合に限り削除） ---
 if ($Purge) {
     $rootAgentsPath = Join-UappPath $target "AGENTS.md"
-    if ((Test-Path $rootAgentsPath) -and -not $rootAgentsByInstaller) {
+    if ((Test-Path -LiteralPath $rootAgentsPath) -and -not $rootAgentsByInstaller) {
         Write-Host "  [保持] AGENTS.md（installer が作成した記録が無いため触らない。不要なら手動で削除）"
-    } elseif (Test-Path $rootAgentsPath) {
+    } elseif (Test-Path -LiteralPath $rootAgentsPath) {
         # install-to-project.ps1 の 2.8 が生成する内容（変更したら両方を同期すること）
         $rootAgentsSnippet = @"
 ## uapp_e2e（E2Eテスト基盤・導入済み）
@@ -138,7 +147,7 @@ E2Eテストの作成・実行・デバッグ、計装SDK（``Assets/uapp_e2e/E2
         $expected = ("# AGENTS.md`n`n" + ($rootAgentsSnippet -replace "`r`n", "`n") + "`n")
         $actual = [System.IO.File]::ReadAllText($rootAgentsPath) -replace "`r`n", "`n"  # BOM は読込時に除去される
         if ($actual -eq $expected) {
-            Remove-Item $rootAgentsPath -Force
+            Remove-Item -LiteralPath $rootAgentsPath -Force
             Write-Host "  [削除] AGENTS.md（installer が生成したまま未編集のため）"
         } else {
             Write-Host "  [保持] AGENTS.md（installer 生成時から変更されているため触らない。不要なら手動で削除）"
@@ -150,7 +159,7 @@ E2Eテストの作成・実行・デバッグ、計装SDK（``Assets/uapp_e2e/E2
 Write-Host ""
 Write-Host "=== 残りの手動手順（自動では変更しない） ==="
 $projSettings = Join-UappPath $target "ProjectSettings\ProjectSettings.asset"
-$defineFound = (Test-Path $projSettings) -and
+$defineFound = (Test-Path -LiteralPath $projSettings) -and
     (Select-String -Path $projSettings -Pattern '(^|[^A-Za-z0-9_])UAPP_E2E_BRIDGE($|[^A-Za-z0-9_])' -Quiet)
 if ($defineFound) {
     Write-Host "1. [残] Scripting Define Symbols から UAPP_E2E_BRIDGE を除去（Player Settings。自前ビルドスクリプトに組み込んだ場合はそちらも）"

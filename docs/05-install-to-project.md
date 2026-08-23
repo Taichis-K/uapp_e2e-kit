@@ -305,14 +305,31 @@ AVDとエディタ、複数エディタの同時運用のポート設計は [doc
   （キット所有ファイルのハッシュ）を記録し、次回更新時に照合して「前回導入後に改変された
   キット所有ファイル」（例: 導入先AIが独自改修した viewer.html）を **[警告] として列挙**する。
   警告が出たら、上書き後にバックアップzipと差分を取り、必要な改変を再適用またはキットへ還元する
+- **いつでも自分で照合できる**: `install-to-project.ps1 -ProjectPath <対象> -VerifyManifest`
+  （導入はせず照合だけ）。終了コードは 改変・不在なし=0 / あり=1 / manifest が無い=2。
+  判定は更新時の警告とまったく同じ関数を使う（表示と警告で数え方が違わない）
+- **manifest のハッシュはテキストの改行を LF に正規化してから取っている**。
+  Windows で導入・記録 → commit → mac で LF チェックアウト → 更新、の経路で
+  編集していないファイルが一斉に「改変された」になるのを防ぐため。
+  **素の `Get-FileHash` / `sha256sum` の値と直接比べても、CRLF を含むファイルは一致しない** —
+  自前で突き合わせると「ほぼ全件が不一致」に見えるので、照合は上の `-VerifyManifest` で行うこと
+  （導入先で実際にこの誤読が起きた。installer 側は生ハッシュとの一致も未改変として扱うので、
+  旧版の記録が残っていても警告は誤発火しない）
 
 マージ作業は不要になるよう、ファイルの所有権を次のように分けている:
 
 | 区分 | 対象 | 更新時の挙動 |
 |---|---|---|
 | **キット所有** | `Assets/uapp_e2e/E2EBridge/`・`uapp_e2e/driver/e2e_driver/`・`uapp_e2e/scripts/`・`uapp_e2e/docs/`・`uapp_e2e/CLAUDE.md`/`AGENTS.md`/`SETUP.md`/`VERSION`・`.claude/skills/e2e-*`・`.agents/skills/e2e-*`・`.claude/rules/uapp-e2e.md`・`uapp_e2e/driver/tests/test_journey_unit.py`/`test_adb_ui.py`/`test_client_unit.py`/`test_bridge_smoke.py` | **上書き更新**（手を入れない前提。変更したい場合はキット側へ還元する） |
-| **プロジェクト所有** | `uapp_e2e/e2e-config.json`・`uapp_e2e/driver/tests/` の自作テスト・`uapp_e2e/config/local.json`・`uapp_e2e/Builds/`（ジャーニー記録含む）・ルート `AGENTS.md`（`-RootAgentsMd` で作成した場合も以後は触らない） | **触らない** |
+| **プロジェクト所有** | `uapp_e2e/e2e-config.json`・`uapp_e2e/driver/tests/` の自作テスト・**`uapp_e2e/scripts-local/` の自作運用スクリプト**・`uapp_e2e/config/local.json`・`uapp_e2e/Builds/`（ジャーニー記録含む）・ルート `AGENTS.md`（`-RootAgentsMd` で作成した場合も以後は触らない） | **触らない** |
 | **初回のみ生成** | `uapp_e2e/driver/tests/conftest.py`（キット取り込みの1行＋プロジェクト追記領域） | 既存があれば**保持**（フィクスチャの実体は `e2e_driver` パッケージ側にあるため、conftest を更新しなくてもキットの新機能が届く） |
+
+**自作の運用スクリプトは `uapp_e2e/scripts-local/` へ置く**（installer が README つきで作る）。
+`uapp_e2e/scripts/` はキット所有で、**更新で上書きされ、`uninstall.ps1` はディレクトリごと削除する** —
+そこへ自作分を置くとアンインストールで消える（導入先で実際に起きた）。`scripts-local/` は
+所有権が `driver/tests/` の自作テストと同じで、**更新でも既定の `uninstall.ps1` でも触らない**
+（README のみキット所有）。ただし `uninstall.ps1 -Purge` は `uapp_e2e/` 全体を消すので、
+そこには含まれる（自作テストや `Builds/` と同じ扱い）。
 
 更新後の確認（AI向けランブック）:
 
@@ -325,6 +342,48 @@ AVDとエディタ、複数エディタの同時運用のポート設計は [doc
 
 `Assets/uapp_e2e/E2EBridge` はプロトコル互換（`ping.bridge` のバージョン、後方互換の追加のみ）を
 保って更新されるため、計装入りビルドの再ビルドは「ブリッジに新機能が必要になったとき」だけでよい。
+
+## 注入モード（1 つのキットを多数の clone で使い回す）
+
+同一プロダクトの clone が多数あり、E2E を回す対象が日替わりで変わる場合、clone ごとの
+フル導入は割に合わない（更新に追随できない・`editorBridgePort` が全 clone で同じ既定値に
+なり誤接続する・対象のワーキングツリーに常時差分が載る）。
+
+**キットは 1 か所（ハブ）に置き、対象へは一時的に注入して、終わったら撤去する**:
+
+```powershell
+.\scripts\inject-to-project.ps1 -TargetProject <clone>              # 注入
+.\scripts\run-e2e.ps1 -Editor -ProjectPath <clone> -NoProjectTests  # 実行（テストはハブ側）
+.\scripts\close-editor.ps1 -ProjectPath <clone>                     # 閉じる
+.\scripts\inject-to-project.ps1 -TargetProject <clone> -Eject       # 撤去
+.\scripts\inject-to-project.ps1 -List                               # 台帳を見る
+```
+
+| 項目 | フル導入（install-to-project） | 注入（inject-to-project） |
+|---|---|---|
+| 対象へ置くもの | 計装・ドライバ・テスト・スクリプト・文書一式 | **計装・define・pipeline 参照・`e2e-config.json` だけ** |
+| テストの置き場 | 対象の `uapp_e2e/driver/tests/` | **ハブ側**（対象には置かない） |
+| ポート | 対象の `e2e-config.json` を人が決める | **台帳が対象ごとに自動割り当て** |
+| 撤去 | `uninstall.ps1`（キット所有を削除） | **記録ベース**（入れた物だけを戻す） |
+| 想定 | その プロジェクトで継続的に E2E を回す | 対象が日替わりで変わる・対象を汚したくない |
+
+- **ポート台帳** `config/targets.json`（ハブ側・git 管理外）が `editorBridgePort = 13343 + slot` /
+  `devicePort = 13333 + slot` を割り当て、読み書きはホスト全体で排他する。
+  重複は「別プロジェクトのエディタを操作する」事故に直結するため、**台帳と
+  ドライバ側の接続先検査（`UAPP_E2E_EDITOR=1` の platform + project 照合）の両方**で守る
+- **撤去は記録ベース**。注入時に対象の `uapp_e2e-inject.json` へ「入れた物」を逐次記録し、
+  撤去はそれだけを戻す。**記録が無い対象を推測で消すことはしない**（既存差分を壊さないため）。
+  途中で失敗しても記録は残るので、原因を解消して `-Eject` をやり直せる
+- 注入は **フル導入済み・既に `Assets/uapp_e2e/E2EBridge` がある・非 Unity プロジェクト**を
+  **常に拒否する**（`-Force` でも通さない。所有関係が壊れて撤去できなくなるため）。
+  `-Force` で警告に落とせるのは**対象のエディタが開いている**場合と、
+  **既存の `e2e-config.json` がある**場合（退避して撤去時に戻す）
+- 生成する `e2e-config.json` の `uiType` / `orientation` は `-UiType` / `-Orientation` で指定する
+  （既定は `ugui-nis` / `portrait`。NGUI 対象で既定のままだと設定が嘘になる）
+- **パスに `[` `]` を含む対象は現状サポートしない**（`unity-editor-status.ps1` が扱えず、
+  注入は「エディタ状態を判定できない」として安全に中断する。`-Force` で進めることは可能）
+- 撤去後、`Packages/packages-lock.json` に `com.unity.pipeline` の行が残ることがある
+  （Unity が次回起動時に整理する）
 
 ## アンインストール
 

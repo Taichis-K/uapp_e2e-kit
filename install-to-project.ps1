@@ -20,7 +20,11 @@ param(
     # 必須扱いにする。恒久 define は不要（BuildEntry が一時付与・復元する）
     [ValidateSet("editor", "device", "both", "ios")][string]$Mode = "both",
     [switch]$IncludeSampleTests,
-    [switch]$RootAgentsMd
+    [switch]$RootAgentsMd,
+    # 導入は行わず、kit-manifest.json とファイル実体の照合だけを行って終了する。
+    # 導入先が「自分が改変したのか、更新の副作用か」をその場で切り分けるための確認口
+    # （issue #33。導入先が素の SHA256 で自前照合し、全件不一致に見えて混乱した）
+    [switch]$VerifyManifest
 )
 
 $ErrorActionPreference = "Stop"
@@ -70,6 +74,36 @@ function Get-KitFileHash([string]$Path) {
     } finally { $sha.Dispose() }
 }
 
+# manifest の 1 エントリと実体の照合。**判定はここだけに置く**（更新時の警告と
+# -VerifyManifest の表示が違う根拠で数えると、どちらを信じるか分からなくなる）。
+# **生バイト一致でも改行正規化一致でも「未改変」とみなす** — 記録側は正規化値で書くが、
+# 旧版の記録は生ハッシュなので、これが無いと版を上げた直後の 1 回だけ全件が改変扱いになる。
+function Test-KitFileUnchanged([string]$Full, [string]$Recorded) {
+    if (-not (Test-Path -LiteralPath $Full)) { return $false }
+    return ((Get-KitFileHash $Full) -eq $Recorded) -or
+           ((Get-FileHash -LiteralPath $Full -Algorithm SHA256).Hash -eq $Recorded)
+}
+
+# manifest 全体の照合結果を返す（@{ Manifest; Modified; Missing; Checked }）。
+# Modified / Missing は相対パスの配列。manifest が無ければ $null。
+function Get-KitManifestStatus([string]$Target) {
+    $manifestPath = Join-UappPath (Join-UappPath $Target "uapp_e2e") "kit-manifest.json"
+    if (-not (Test-Path -LiteralPath $manifestPath)) { return $null }
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    $modified = @(); $missing = @(); $checked = 0
+    foreach ($entry in $manifest.PSObject.Properties) {
+        if ($entry.Name -like "__*") { continue }  # ファイルでないメタ記録
+        $checked++
+        # キーは記録した OS の区切りで入る（Windows なら `\`）。Join-UappPath は
+        # どちらの区切りも解釈するので、別 OS で作られたマニフェストでも読める
+        $full = Join-UappPath $Target $entry.Name
+        if (-not (Test-Path -LiteralPath $full)) { $missing += $entry.Name; continue }
+        if (-not (Test-KitFileUnchanged $full $entry.Value)) { $modified += $entry.Name }
+    }
+    return @{ Manifest = $manifest; Modified = $modified; Missing = $missing; Checked = $checked;
+              Path = $manifestPath }
+}
+
 # キット所有ファイル（=上書き更新の対象）の列挙。改変検知マニフェストとバックアップで共用する。
 # プロジェクト所有（e2e-config.json / conftest.py / 自作テスト / config\local.json / Builds\）は含めない。
 function Get-KitOwnedFiles($target) {
@@ -89,16 +123,17 @@ function Get-KitOwnedFiles($target) {
                         (Join-UappPath $kit "docs"),
                         # iOS の OS レイヤーエージェント（0.1.9 で同梱）
                         (Join-UappPath $kit "oslayer")) + $skillDirs)) {
-        if (Test-Path $dir) {
+        if (Test-Path -LiteralPath $dir) {
             # DerivedData は oslayer を導入先でビルドしたキャッシュ＝プロジェクト側の生成物なので
             # 所有に含めない（含めると毎回「ローカル改変」警告になる）。
             # **判定は列挙起点からの相対パスのセグメント一致**で行う（フルパスへの部分一致だと、
             # 導入先の祖先ディレクトリ名に DerivedData を含むだけで全ファイルが所有から脱落し、
             # 改変検知が丸ごと無効になる ― 外部レビュー指摘）
-            $paths += Get-ChildItem $dir -Recurse -File | Where-Object {
-                $segments = ($_.FullName.Substring($dir.Length).TrimStart('\', '/')) -split '[\\/]'
+            $dirFull = Resolve-UappFsPath $dir
+            $paths += Get-UappTreeFile $dir | Where-Object {
+                $segments = ($_.Substring($dirFull.Length).TrimStart('\', '/')) -split '[\\/]'
                 -not (($segments -contains '__pycache__') -or ($segments -contains 'DerivedData'))
-            } | ForEach-Object { $_.FullName }
+            }
         }
     }
     foreach ($f in @((Join-UappPath $target "Assets\uapp_e2e\E2EBridge.meta"),
@@ -110,12 +145,15 @@ function Get-KitOwnedFiles($target) {
                      (Join-UappPath $kit "driver\tests\test_bridge_smoke.py"),
                      (Join-UappPath $kit "config\local.sample.json"),
                      (Join-UappPath $kit "config\e2e-config.sample.json"),
+                     # scripts-local は**中身がプロジェクト所有**。README だけキットが管理する
+                     # （ディレクトリごと列挙すると自作スクリプトが上書き・削除の対象になる）
+                     (Join-UappPath $kit "scripts-local\README.md"),
                      (Join-UappPath $kit "CLAUDE.md"),
                      (Join-UappPath $kit "AGENTS.md"),
                      (Join-UappPath $kit "SETUP.md"),
                      (Join-UappPath $kit "VERSION"),
                      (Join-UappPath $target ".claude\rules\uapp-e2e.md"))) {
-        if (Test-Path $f) { $paths += $f }
+        if (Test-Path -LiteralPath $f) { $paths += $f }
     }
     $paths
 }
@@ -123,7 +161,7 @@ function Get-KitOwnedFiles($target) {
 # --- 実行元レイアウトの自動判定 ---
 #   配布キット:     <kit>\install-to-project.ps1（自己完結。bridge\E2EBridge が同階層にある）
 #   開発リポジトリ: scripts\install-to-project.ps1（計装マスターは unity-nis）
-if (Test-Path (Join-UappPath $PSScriptRoot "bridge\E2EBridge")) {
+if (Test-Path -LiteralPath (Join-UappPath $PSScriptRoot "bridge\E2EBridge")) {
     $root = $PSScriptRoot
     $src = @{
         Bridge      = Join-UappPath $root "bridge\E2EBridge"
@@ -146,8 +184,8 @@ if (Test-Path (Join-UappPath $PSScriptRoot "bridge\E2EBridge")) {
     }
     Write-Host "実行元: 配布キット ($root)"
 }
-elseif (Test-Path (Join-UappPath $PSScriptRoot "..\unity-nis\Assets\uapp_e2e\E2EBridge")) {
-    $root = (Resolve-Path (Join-UappPath $PSScriptRoot "..")).Path
+elseif (Test-Path -LiteralPath (Join-UappPath $PSScriptRoot "..\unity-nis\Assets\uapp_e2e\E2EBridge")) {
+    $root = (Resolve-Path -LiteralPath (Join-UappPath $PSScriptRoot "..")).Path
     $src = @{
         Bridge      = Join-UappPath $root "unity-nis\Assets\uapp_e2e\E2EBridge"
         BridgeMeta  = Join-UappPath $root "unity-nis\Assets\uapp_e2e\E2EBridge.meta"
@@ -173,14 +211,48 @@ else {
     throw "実行元レイアウトを判定できません（bridge\E2EBridge も ..\unity-nis も見つからない）: $PSScriptRoot"
 }
 
-$target = (Resolve-Path $ProjectPath).Path
+$target = (Resolve-Path -LiteralPath $ProjectPath).Path
 
 # Unity プロジェクトであることの検証
-if (-not ((Test-Path (Join-UappPath $target "Assets")) -and (Test-Path (Join-UappPath $target "ProjectSettings")))) {
+if (-not ((Test-Path -LiteralPath (Join-UappPath $target "Assets")) -and (Test-Path -LiteralPath (Join-UappPath $target "ProjectSettings")))) {
     throw "Unity プロジェクトではありません（Assets/ProjectSettings が見つからない）: $target"
 }
 
 Write-Host "導入先: $target"
+
+# --- -VerifyManifest: 照合だけして終了（導入は行わない。issue #33） ---
+# 導入先が「キット所有ファイルを自分が改変したのか、更新の副作用か」を切り分けるための口。
+# **判定は更新時の警告と同じ関数**（Get-KitManifestStatus）を使う ― 表示と警告で
+# 数え方が違うと、どちらを信じるか分からなくなる。
+if ($VerifyManifest) {
+    $status = Get-KitManifestStatus $target
+    if (-not $status) {
+        Write-Host ""
+        Write-Host "kit-manifest.json がありません（未導入か、旧版の導入で記録が無い）:"
+        Write-Host "  $(Join-UappPath (Join-UappPath $target 'uapp_e2e') 'kit-manifest.json')"
+        Write-Host "この状態では改変検知は働きません。installer を実行し直すと記録が作られます"
+        exit 2
+    }
+    Write-Host ""
+    Write-Host "kit-manifest.json との照合: $($status.Path)"
+    Write-Host "  対象 $($status.Checked) 件 / 改変 $($status.Modified.Count) 件 / 不在 $($status.Missing.Count) 件"
+    foreach ($m in $status.Modified) { Write-Host "  [改変] $m" }
+    foreach ($m in $status.Missing)  { Write-Host "  [不在] $m" }
+    Write-Host ""
+    # **自前照合との食い違いを先回りで説明する**（この案内が無いと、素の SHA256 で
+    # 突き合わせた導入先が「全件壊れている」と誤読する ― 実際にそう報告された）
+    Write-Host "注意: manifest のハッシュは**テキストの改行を LF に正規化してから**取っている"
+    Write-Host "      （Windows で記録 → mac でチェックアウト、で全件誤発火するのを防ぐため）。"
+    Write-Host "      素の Get-FileHash / sha256sum の値と直接比べても CRLF のファイルは一致しない。"
+    Write-Host "      照合はこのコマンドで行うこと（installer 本体の警告と同じ判定を使う）"
+    if ($status.Modified.Count -gt 0 -or $status.Missing.Count -gt 0) {
+        Write-Host ""
+        Write-Host "改変・不在があるので終了コード 1 を返す（キット所有ファイルへの変更は次回更新で上書きされる）"
+        exit 1
+    }
+    Write-Host "すべて記録どおり（ローカル改変なし）"
+    exit 0
+}
 
 # --- 0. 更新時バックアップ（既導入の場合のみ） ---
 # 上書き対象（キット所有領域）を uapp_e2e\Builds\update-backup-<日時>.zip へ退避する。
@@ -188,13 +260,13 @@ Write-Host "導入先: $target"
 $kit = Join-UappPath $target "uapp_e2e"
 # 前回導入時にキットが所有していたファイル一覧（新規導入では $null のまま）
 $prevOwned = $null
-if (Test-Path $kit) {
-    $backupPaths = @(Get-ChildItem $kit -Exclude "Builds" | ForEach-Object { $_.FullName })
+if (Test-Path -LiteralPath $kit) {
+    $backupPaths = @(Get-UappTreeEntry $kit | Where-Object { (Split-Path $_ -Leaf) -ne "Builds" })
     foreach ($p in @((Join-UappPath $target "Assets\uapp_e2e"),
                      (Join-UappPath $target ".claude\skills"),
                      (Join-UappPath $target ".agents\skills"),
                      (Join-UappPath $target ".claude\rules\uapp-e2e.md"))) {
-        if (Test-Path $p) { $backupPaths += $p }
+        if (Test-Path -LiteralPath $p) { $backupPaths += $p }
     }
     if ($backupPaths.Count -gt 0) {
         # ミリ秒まで含める（同一秒内の連続実行で名前が衝突して圧縮が失敗するため）
@@ -210,7 +282,7 @@ if (Test-Path $kit) {
             foreach ($p in $backupPaths) {
                 $dest = Join-UappPath $backupStage $p.Substring($target.Length + 1)
                 New-Item -ItemType Directory -Force (Split-Path $dest) | Out-Null
-                if ((Get-Item $p) -is [System.IO.DirectoryInfo]) {
+                if (Test-Path -LiteralPath $p -PathType Container) {
                     # oslayer\DerivedData（Xcode のビルドキャッシュ。数百 MB 級・再生成可能）を
                     # バックアップへ入れない — 毎回の更新で複製・圧縮すると極端に遅くなる。
                     # Copy-UappTree の -ExcludeDirectory は名前単位なので、他の場所の
@@ -218,12 +290,12 @@ if (Test-Path $kit) {
                     # ビルドキャッシュの慣用名であり実害より安全側と判断
                     Copy-UappTree -Source $p -Destination $dest -ExcludeDirectory @("DerivedData")
                 } else {
-                    Copy-Item $p $dest
+                    Copy-Item -LiteralPath $p $dest
                 }
             }
             [System.IO.Compression.ZipFile]::CreateFromDirectory($backupStage, $backupZip)
         } finally {
-            if (Test-Path $backupStage) { Remove-Item $backupStage -Recurse -Force }
+            Remove-UappTree $backupStage
         }
         Write-Host "  [OK] 更新前バックアップ: $backupZip"
     }
@@ -231,9 +303,9 @@ if (Test-Path $kit) {
     # --- 0.5 ローカル改変の検知 ---
     # 前回導入時に記録したハッシュ（kit-manifest.json）と現状を照合し、
     # 導入先で独自改修されたキット所有ファイル（例: viewer.html のカスタマイズ）を警告する。
-    $manifestPath = Join-UappPath $kit "kit-manifest.json"
-    if (Test-Path $manifestPath) {
-        $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
+    $status = Get-KitManifestStatus $target
+    if ($status) {
+        $manifest = $status.Manifest
         # 「前回の導入でキットが所有していたファイル」の一覧。
         # キットが新しく所有し始めた名前と、導入先の自作ファイルとの衝突判定に使う
         # **区切りを `/` に正規化して持つ**。マニフェストのキーは記録した OS の区切りで入るため、
@@ -243,20 +315,7 @@ if (Test-Path $kit) {
         # **配布対象から外れたスクリプトの掃除に使う**（下の「除外対象の掃除」）。
         # 前回こちらが置いたものだけを消すため、記録そのものを保持しておく
         $script:prevManifest = $manifest
-        $modified = @()
-        foreach ($entry in $manifest.PSObject.Properties) {
-            if ($entry.Name -like "__*") { continue }  # ファイルでないメタ記録（__rootAgentsMdByInstaller 等）
-            # キーは記録した OS の区切りで入る（Windows なら `\`）。Join-UappPath は
-            # どちらの区切りも解釈するので、別 OS で作られたマニフェストでも読める
-            $full = Join-UappPath $target $entry.Name
-            if (-not (Test-Path $full)) { $modified += "$($entry.Name)（削除されている）"; continue }
-            # **生バイト一致でも改行正規化一致でも「未改変」とみなす**。
-            # 旧版の記録は生バイトのハッシュなので、これが無いと**版を上げた直後の 1 回だけ
-            # 全件が改変扱い**になる（記録側は正規化値で書き直すので、次回以降は揃う）
-            $matched = ((Get-KitFileHash $full) -eq $entry.Value) -or
-                       ((Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash -eq $entry.Value)
-            if (-not $matched) { $modified += $entry.Name }
-        }
+        $modified = @($status.Modified) + @($status.Missing | ForEach-Object { "$_（削除されている）" })
         if ($modified.Count -gt 0) {
             Write-Host ""
             Write-Host "  [警告] 前回導入後にローカル改変されたキット所有ファイルを検知（このまま上書き更新します）:"
@@ -270,7 +329,7 @@ if (Test-Path $kit) {
 # --- 1. 計装 SDK（ベンダー名前空間付き: Assets\uapp_e2e\E2EBridge） ---
 $bridgeDest = Join-UappPath $target "Assets\uapp_e2e\E2EBridge"
 Copy-UappTree -Source $src.Bridge -Destination $bridgeDest
-Copy-Item $src.BridgeMeta (Join-UappPath $target "Assets\uapp_e2e\E2EBridge.meta") -ErrorAction SilentlyContinue
+Copy-Item -LiteralPath $src.BridgeMeta (Join-UappPath $target "Assets\uapp_e2e\E2EBridge.meta") -ErrorAction SilentlyContinue
 Write-Host "  [OK] Assets\uapp_e2e\E2EBridge（計装SDK）"
 
 # --- 2. E2E キット（scripts / driver / config テンプレ） ---
@@ -282,6 +341,25 @@ foreach ($dir in @("scripts", "config")) {
 # **無いと pytest の `--basetemp ..\Builds\pytest-tmp`（SETUP.md がサンドボックス環境向けに
 # 案内している回避策）が「親が無い」で落ちる**。gitignore 対象なので作っても追跡はされない
 New-Item -ItemType Directory -Force (Join-UappPath $kit "Builds") | Out-Null
+# **導入先が自作する運用スクリプトの置き場**（issue #35-D）。`scripts\` はキット所有で
+# uninstall がディレクトリごと消すため、そこへ自作分を置くと消える（導入先で実際に踏まれた）。
+# ここはプロジェクト所有＝更新でも uninstall でも触らない。README だけキットが管理する
+$scriptsLocal = Join-UappPath $kit "scripts-local"
+New-Item -ItemType Directory -Force $scriptsLocal | Out-Null
+# **非展開ヒアドキュメント（@'…'@）で書く**。展開版だと本文中の `` `u `` が
+# PowerShell の Unicode エスケープとして解釈され、スクリプト全体が字句解析に失敗する
+Set-Content -LiteralPath (Join-UappPath $scriptsLocal "README.md") -Encoding utf8 -Value @'
+# scripts-local（プロジェクト所有）
+
+このプロジェクト専用の運用スクリプト（通し実行の walker・注入や撤去の補助など）はここへ置く。
+
+- **キットの更新でも既定の uninstall でも触られない**（この README を除く）。
+  ただし `uninstall.ps1 -Purge` は uapp_e2e\ 全体を消すので、そこには含まれる
+- 逆に `uapp_e2e\scripts\` はキット所有で、**更新で上書き・uninstall で丸ごと削除**される。
+  自作分をそこへ置かないこと
+- 自作テストの置き場は `uapp_e2e\driver	ests\`（同じくプロジェクト所有）
+'@
+Write-Host "  [OK] uapp_e2e\scripts-local（導入先の自作スクリプト置き場・更新と削除の対象外）"
 # **配るスクリプトを列挙しない**。v0.1.6 で追加した unity-editor-status.ps1 が
 # この列挙から漏れ、キットの CLAUDE.md が案内するコマンドが導入先に存在しない状態になった
 # （エラーにならず静かに欠けるので、AI が実行して「ファイルが無い」で初めて気づく）。
@@ -293,7 +371,7 @@ New-Item -ItemType Directory -Force (Join-UappPath $kit "Builds") | Out-Null
 $devOnlyScripts = Get-UappDevOnlyScript
 foreach ($script in (Get-ChildItem (Join-UappPath $src.Scripts "*.ps1") |
                      Where-Object { $devOnlyScripts -notcontains $_.Name })) {
-    Copy-Item $script.FullName (Join-UappPath $kit "scripts\$($script.Name)") -Force
+    Copy-Item -LiteralPath $script.FullName (Join-UappPath $kit "scripts\$($script.Name)") -Force
 }
 # **除外対象の掃除**。コピーしないだけでは、以前配ってしまったものが導入先に残り続ける
 # （しかも下の Get-KitOwnedFiles が scripts\ を丸ごと列挙するので、新しい manifest へ
@@ -301,7 +379,7 @@ foreach ($script in (Get-ChildItem (Join-UappPath $src.Scripts "*.ps1") |
 # 導入先が自分で置いた同名ファイルを消さないため。改変されていたら消さずに警告する
 foreach ($name in $devOnlyScripts) {
     $stale = Join-UappPath $kit "scripts\$name"
-    if (-not (Test-Path $stale)) { continue }
+    if (-not (Test-Path -LiteralPath $stale)) { continue }
     $key = ConvertTo-UappPathKey ($stale.Substring($target.Length + 1))
     $recorded = $null
     if ($script:prevManifest) {
@@ -323,14 +401,14 @@ foreach ($name in $devOnlyScripts) {
     }
 }
 Copy-UappTree -Source (Join-UappPath $src.Driver "e2e_driver") -Destination (Join-UappPath $kit "driver\e2e_driver") -ExcludeDirectory @("__pycache__")
-Copy-Item (Join-UappPath $src.Driver "pytest.ini") (Join-UappPath $kit "driver\pytest.ini") -Force
-Copy-Item (Join-UappPath $src.Driver "requirements.txt") (Join-UappPath $kit "driver\requirements.txt") -Force
+Copy-Item -LiteralPath (Join-UappPath $src.Driver "pytest.ini") (Join-UappPath $kit "driver\pytest.ini") -Force
+Copy-Item -LiteralPath (Join-UappPath $src.Driver "requirements.txt") (Join-UappPath $kit "driver\requirements.txt") -Force
 New-Item -ItemType Directory -Force (Join-UappPath $kit "driver\tests") | Out-Null
 # conftest.py は初回のみ生成（プロジェクトが拡張し得るため上書きしない。
 # キット機能の更新は driver\e2e_driver\ の差し替えで届く。docs\07 の更新ランブック参照）
 $conftestDest = Join-UappPath $kit "driver\tests\conftest.py"
-if (-not (Test-Path $conftestDest)) {
-    Copy-Item (Join-UappPath $src.Driver "tests\conftest.py") $conftestDest
+if (-not (Test-Path -LiteralPath $conftestDest)) {
+    Copy-Item -LiteralPath (Join-UappPath $src.Driver "tests\conftest.py") $conftestDest
 } else {
     Write-Host "  [SKIP] driver\tests\conftest.py（既存を維持）"
 }
@@ -343,10 +421,10 @@ if (-not (Test-Path $conftestDest)) {
 $testNameConflicts = @()
 foreach ($t in @("test_journey_unit.py", "test_adb_ui.py", "test_client_unit.py", "test_bridge_smoke.py")) {
     $testDest = Join-UappPath $kit "driver\tests\$t"
-    if ((Test-Path $testDest) -and (($null -eq $prevOwned) -or ($prevOwned -notcontains (ConvertTo-UappPathKey "uapp_e2e\driver\tests\$t")))) {
+    if ((Test-Path -LiteralPath $testDest) -and (($null -eq $prevOwned) -or ($prevOwned -notcontains (ConvertTo-UappPathKey "uapp_e2e\driver\tests\$t")))) {
         $testNameConflicts += $t
     }
-    Copy-Item (Join-UappPath $src.Driver "tests\$t") $testDest -Force
+    Copy-Item -LiteralPath (Join-UappPath $src.Driver "tests\$t") $testDest -Force
 }
 if ($testNameConflicts.Count -gt 0) {
     Write-Host ""
@@ -360,21 +438,21 @@ if ($IncludeSampleTests) {
     # サンプルテストは「コピペして育てる」起点なので初回のみ生成（プロジェクトの改修を上書きしない）
     foreach ($t in @("test_smoke.py", "test_ngui_nis.py", "test_ngui_legacy.py")) {
         $sampleDest = Join-UappPath $kit "driver\tests\$t"
-        if (-not (Test-Path $sampleDest)) {
-            Copy-Item (Join-UappPath $src.SampleTests $t) $sampleDest
+        if (-not (Test-Path -LiteralPath $sampleDest)) {
+            Copy-Item -LiteralPath (Join-UappPath $src.SampleTests $t) $sampleDest
         } else {
             Write-Host "  [SKIP] driver\tests\$t（既存を維持）"
         }
     }
 }
-Copy-Item (Join-UappPath $src.Config "local.sample.json") (Join-UappPath $kit "config\local.sample.json") -Force
+Copy-Item -LiteralPath (Join-UappPath $src.Config "local.sample.json") (Join-UappPath $kit "config\local.sample.json") -Force
 # iOS の OS レイヤーエージェント（run-ios-e2e.ps1 -OsAgent が導入先でビルドする。macOS 専用だが
 # 配布はどの OS からでも行う — 導入先リポジトリを mac で開いたときに使えるように）。
 # **今回からキット所有になった領域**なので、前回の所有記録が無いのに実在する場合は
 # 「利用者が自分で置いたものかもしれない」＝上書きしたことを警告する（テスト移行ガードと同型。
 # 上書き前の内容は 0. の更新バックアップに入っている）
 $oslayerDest = Join-UappPath $kit "oslayer"
-$oslayerConflict = (Test-Path $oslayerDest) -and
+$oslayerConflict = (Test-Path -LiteralPath $oslayerDest) -and
                    (($null -eq $prevOwned) -or
                     -not ($prevOwned | Where-Object { $_ -like "uapp_e2e/oslayer/*" }))
 Copy-UappTree -Source $src.OsLayer -Destination $oslayerDest -ExcludeDirectory @("DerivedData")
@@ -389,17 +467,17 @@ Write-Host "  [OK] uapp_e2e\（scripts / driver / config テンプレ / oslayer�
 
 # --- 2.5 ドキュメントと AI 向け運用ガイド ---
 New-Item -ItemType Directory -Force (Join-UappPath $kit "docs") | Out-Null
-Copy-Item $src.Doc02 (Join-UappPath $kit "docs\02-protocol.md") -Force
-Copy-Item $src.Doc05 (Join-UappPath $kit "docs\05-install-to-project.md") -Force
-Copy-Item $src.Doc07 (Join-UappPath $kit "docs\07-viewer.md") -Force
-Copy-Item $src.AiLoop (Join-UappPath $kit "docs\ai-loop.md") -Force
-Copy-Item $src.ClaudeMd (Join-UappPath $kit "CLAUDE.md") -Force
+Copy-Item -LiteralPath $src.Doc02 (Join-UappPath $kit "docs\02-protocol.md") -Force
+Copy-Item -LiteralPath $src.Doc05 (Join-UappPath $kit "docs\05-install-to-project.md") -Force
+Copy-Item -LiteralPath $src.Doc07 (Join-UappPath $kit "docs\07-viewer.md") -Force
+Copy-Item -LiteralPath $src.AiLoop (Join-UappPath $kit "docs\ai-loop.md") -Force
+Copy-Item -LiteralPath $src.ClaudeMd (Join-UappPath $kit "CLAUDE.md") -Force
 if ($installCodex) {
-    Copy-Item $src.AgentsMd (Join-UappPath $kit "AGENTS.md") -Force
+    Copy-Item -LiteralPath $src.AgentsMd (Join-UappPath $kit "AGENTS.md") -Force
 }
-Copy-Item $src.SetupMd (Join-UappPath $kit "SETUP.md") -Force
-Copy-Item $src.Version (Join-UappPath $kit "VERSION") -Force
-$installedVersion = (Get-Content (Join-UappPath $kit "VERSION") -TotalCount 1).Trim()
+Copy-Item -LiteralPath $src.SetupMd (Join-UappPath $kit "SETUP.md") -Force
+Copy-Item -LiteralPath $src.Version (Join-UappPath $kit "VERSION") -Force
+$installedVersion = (Get-Content -LiteralPath (Join-UappPath $kit "VERSION") -TotalCount 1).Trim()
 Write-Host "  [OK] uapp_e2e\docs\ + CLAUDE.md（AI向け運用ガイド）$(if ($installCodex) { " + AGENTS.md（Codex等向けポインタ）" }) + VERSION=$installedVersion"
 
 # --- 2.6 AIスキル（Claude Code: .claude\skills / Codex v0.94.0+: .agents\skills。内容は同一） ---
@@ -419,7 +497,7 @@ Write-Host "  [OK] $($skillsLabel -join " + ")（e2e-setup / e2e-run / e2e-write
 if ($installClaude) {
     $rulesDest = Join-UappPath $target ".claude\rules"
     New-Item -ItemType Directory -Force $rulesDest | Out-Null
-    Copy-Item (Join-UappPath $src.Rules "uapp-e2e.md") (Join-UappPath $rulesDest "uapp-e2e.md") -Force
+    Copy-Item -LiteralPath (Join-UappPath $src.Rules "uapp-e2e.md") (Join-UappPath $rulesDest "uapp-e2e.md") -Force
     Write-Host "  [OK] .claude\rules\uapp-e2e.md（uapp_e2e\CLAUDE.md への参照ルール）"
 }
 
@@ -441,7 +519,7 @@ E2Eテストの作成・実行・デバッグ、計装SDK（``Assets/uapp_e2e/E2
 セットアップ・修復の入口は ``uapp_e2e/SETUP.md``。
 定型作業は ``.agents/skills/e2e-*`` スキル（setup / run / write-test / dump）にある。
 "@
-$rootAgentsExists = Test-Path $rootAgentsPath
+$rootAgentsExists = Test-Path -LiteralPath $rootAgentsPath
 $rootAgentsCreated = $false
 if ($installCodex -and $RootAgentsMd -and -not $rootAgentsExists) {
     # BOM付きUTF-8で直接書く（Set-Content の -Encoding utf8BOM は PowerShell 5.1 に無く、
@@ -456,9 +534,9 @@ if ($installCodex -and $RootAgentsMd -and -not $rootAgentsExists) {
 
 # --- 3. e2e-config.json（無ければテンプレから生成） ---
 $configDest = Join-UappPath $kit "e2e-config.json"
-$configExisted = Test-Path $configDest
+$configExisted = Test-Path -LiteralPath $configDest
 if (-not $configExisted) {
-    Copy-Item (Join-UappPath $src.Config "e2e-config.sample.json") $configDest
+    Copy-Item -LiteralPath (Join-UappPath $src.Config "e2e-config.sample.json") $configDest
     Write-Host "  [OK] e2e-config.json（テンプレから生成 → package 等を編集してください）"
 } else {
     Write-Host "  [SKIP] e2e-config.json（既存を維持）"
@@ -469,18 +547,18 @@ if (-not $configExisted) {
 # 判定に使う。ユーザーが元々置いていた同内容ファイルを誤って消さないため）。再実行時は引き継ぐ
 $manifestPath = Join-UappPath $kit "kit-manifest.json"
 $prevRootAgentsMarker = $false
-if (-not $rootAgentsCreated -and (Test-Path $manifestPath)) {
-    try { $prevRootAgentsMarker = [bool]((Get-Content $manifestPath -Raw | ConvertFrom-Json)."__rootAgentsMdByInstaller") } catch {}
+if (-not $rootAgentsCreated -and (Test-Path -LiteralPath $manifestPath)) {
+    try { $prevRootAgentsMarker = [bool]((Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json)."__rootAgentsMdByInstaller") } catch {}
 }
 $manifestEntries = [ordered]@{}
-if (($rootAgentsCreated -or $prevRootAgentsMarker) -and (Test-Path $rootAgentsPath)) {
+if (($rootAgentsCreated -or $prevRootAgentsMarker) -and (Test-Path -LiteralPath $rootAgentsPath)) {
     $manifestEntries["__rootAgentsMdByInstaller"] = $true
 }
 foreach ($f in (Get-KitOwnedFiles $target | Sort-Object)) {
     $rel = $f.Substring($target.Length + 1)
     $manifestEntries[$rel] = Get-KitFileHash $f   # テキストは改行を正規化して記録（OS 間で揃える）
 }
-$manifestEntries | ConvertTo-Json | Set-Content $manifestPath -Encoding utf8
+$manifestEntries | ConvertTo-Json | Set-Content -LiteralPath $manifestPath -Encoding utf8
 Write-Host "  [OK] uapp_e2e\kit-manifest.json（次回更新時のローカル改変検知用）"
 
 # --- 4.5 ドキュメントが案内するスクリプトが実在するかの検査 ---
@@ -503,9 +581,10 @@ foreach ($skillsRoot in @(".claude\skills", ".agents\skills")) {
 }
 $docFiles = @()
 foreach ($docRoot in $docRoots) {
-    if (-not (Test-Path $docRoot)) { continue }
-    if (Test-Path $docRoot -PathType Container) {
-        $docFiles += @(Get-ChildItem $docRoot -Recurse -Filter "*.md" -File | ForEach-Object { $_.FullName })
+    if (-not (Test-Path -LiteralPath $docRoot)) { continue }
+    if (Test-Path -LiteralPath $docRoot -PathType Container) {
+        $docFiles += @(Get-UappTreeFile $docRoot |
+                       Where-Object { [System.IO.Path]::GetExtension($_) -ieq ".md" })
     } else {
         $docFiles += $docRoot
     }
@@ -515,7 +594,7 @@ foreach ($doc in ($docFiles | Select-Object -Unique)) {
     # **空ファイルで落とさない**。`Get-Content -Raw` は $null を返し、[regex]::Matches が
     # 例外になる（$ErrorActionPreference=Stop なので、ここまでのコピーを済ませた状態で
     # installer 全体が中断する）。検査は付加価値であって、導入を止める理由にしない
-    $raw = Get-Content $doc -Raw -ErrorAction SilentlyContinue
+    $raw = Get-Content -LiteralPath $doc -Raw -ErrorAction SilentlyContinue
     if ([string]::IsNullOrEmpty($raw)) { continue }
     foreach ($m in [regex]::Matches($raw, 'scripts[\\/]([A-Za-z0-9._-]+\.ps1)')) {
         $docScriptRefs += $m.Groups[1].Value
@@ -525,7 +604,7 @@ foreach ($doc in ($docFiles | Select-Object -Unique)) {
 # `.\scripts\install-to-project.ps1 …` にも言及するが、これは導入先に置くものではない
 $missingDocScripts = @($docScriptRefs | Select-Object -Unique |
                        Where-Object { $devOnlyScripts -notcontains $_ } |
-                       Where-Object { -not (Test-Path (Join-UappPath $kit "scripts\$_")) })
+                       Where-Object { -not (Test-Path -LiteralPath (Join-UappPath $kit "scripts\$_")) })
 if ($missingDocScripts.Count -gt 0) {
     Write-Host ""
     Write-Host "  [警告] キットの文書が案内しているのに配置されていないスクリプトがあります:"
@@ -537,8 +616,8 @@ if ($missingDocScripts.Count -gt 0) {
 # --- 5. 残りの手動手順の表示（検出できる項目は導入状況を照合して [済]/[未] を付ける） ---
 function Get-ManifestDependencyVersion($name) {
     $manifestJson = Join-UappPath $target "Packages\manifest.json"
-    if (-not (Test-Path $manifestJson)) { return $null }
-    try { (Get-Content $manifestJson -Raw | ConvertFrom-Json).dependencies.$name } catch { $null }
+    if (-not (Test-Path -LiteralPath $manifestJson)) { return $null }
+    try { (Get-Content -LiteralPath $manifestJson -Raw | ConvertFrom-Json).dependencies.$name } catch { $null }
 }
 function Mark($done) { if ($done) { "[済]" } else { "[未]" } }
 $inputSystemVer = Get-ManifestDependencyVersion "com.unity.inputsystem"
@@ -555,9 +634,9 @@ $projSettings = Join-UappPath $target "ProjectSettings\ProjectSettings.asset"
 # ブロックとみなす（同じか浅いインデントで打ち切り。後続の別ブロックの行を拾わない）。
 # シンボル名は両側語境界つきで照合（NOT_UAPP_E2E_BRIDGE / UAPP_E2E_BRIDGE_XXX に誤反応しない）
 $defineTargets = @()          # UAPP_E2E_BRIDGE が付いているビルドターゲットのキー
-if (Test-Path $projSettings) {
+if (Test-Path -LiteralPath $projSettings) {
     $keyIndent = $null
-    foreach ($line in (Get-Content $projSettings)) {
+    foreach ($line in (Get-Content -LiteralPath $projSettings)) {
         if ($null -eq $keyIndent) {
             if ($line -match '^([ \t]*)scriptingDefineSymbols:\s*$') { $keyIndent = $Matches[1].Length }
             continue
@@ -579,7 +658,7 @@ $defineFound = if ($Mode -eq "editor") { $defineTargets.Count -gt 0 } else { $an
 # iOS ターゲット（新形式 iPhone / 旧形式 4→iOS）への**恒久付与は逆に警告対象**:
 # BuildEntry の一時付与と重複するだけでなく、**本番の iOS ビルドに計装が混入する**
 $iosDefineLeak = @($defineTargets | Where-Object { $_ -in @("iPhone", "iOS") }).Count -gt 0
-$localJsonDone = Test-Path (Join-UappPath $kit "config\local.json")
+$localJsonDone = Test-Path -LiteralPath (Join-UappPath $kit "config\local.json")
 # 行単位で照合（コメント行や uapp_e2e/Builds-old のような別パスに誤反応しない。
 # 区切りは / のみ受理: gitignore のバックスラッシュはパス区切りでなくエスケープなので無効な記述。
 # 行頭空白もパターンの一部として扱われるため許容しない。末尾空白は Git が無視するので許容）。
@@ -587,7 +666,7 @@ $localJsonDone = Test-Path (Join-UappPath $kit "config\local.json")
 # 除外はプロジェクト直下でなく上位の .gitignore や .git\info\exclude に書かれるため、
 # .git が見つかるまで上位も照合する（上位では相対プレフィックス付きのパターンを要求する）
 function Test-GitignoreEntries([string]$file, [string]$relPrefix) {
-    if (-not (Test-Path $file -PathType Leaf)) { return $false }
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { return $false }
     $p = [regex]::Escape($relPrefix)
     ((Select-String -Path $file -Pattern "^/?${p}uapp_e2e/config/local\.json\s*$" -Quiet) -and
      (Select-String -Path $file -Pattern "^/?${p}uapp_e2e/Builds/?\s*$" -Quiet))
@@ -597,7 +676,7 @@ $gitignoreProbe = $target
 $gitignoreRel = ""
 while ($true) {
     if (Test-GitignoreEntries (Join-UappPath $gitignoreProbe ".gitignore") $gitignoreRel) { $gitignoreDone = $true; break }
-    if (Test-Path (Join-UappPath $gitignoreProbe ".git")) {
+    if (Test-Path -LiteralPath (Join-UappPath $gitignoreProbe ".git")) {
         # git ルートに到達。ローカル除外（.git\info\exclude）も同じ書式で照合する
         #（.git がファイルの worktree / submodule 構成では exclude の実体が別階層にあり、ここでは追わない）
         $gitignoreDone = Test-GitignoreEntries (Join-UappPath $gitignoreProbe ".git\info\exclude") $gitignoreRel
@@ -625,11 +704,11 @@ $testsStale = $null
 $iosBundleMismatch = $null
 if ($configExisted) {
     try {
-        $cfg = Get-Content $configDest -Raw | ConvertFrom-Json
+        $cfg = Get-Content -LiteralPath $configDest -Raw | ConvertFrom-Json
         $testsPath = if ($cfg.tests) { Join-UappPath $kit "driver\$($cfg.tests)" } else { $null }
         $packageOk = ($Mode -eq "editor") -or ($cfg.package -and ($cfg.package -ne "com.yourcompany.yourapp"))
-        $configEdited = $packageOk -and $testsPath -and (Test-Path $testsPath)
-        if ($testsPath -and -not (Test-Path $testsPath)) { $testsStale = $cfg.tests }
+        $configEdited = $packageOk -and $testsPath -and (Test-Path -LiteralPath $testsPath)
+        if ($testsPath -and -not (Test-Path -LiteralPath $testsPath)) { $testsStale = $cfg.tests }
         # -Mode ios では package を bundle id として使う。ProjectSettings の iOS 側
         # applicationIdentifier と食い違っていると、build-ios（-AppId 未指定）は
         # プロジェクト設定のままビルドし、run-ios-e2e が .app との不一致で停止する
@@ -638,9 +717,9 @@ if ($configExisted) {
         # -AppId や BuildEntry で上書きする運用もあるため、一致だけを正とはしない
         if ($Mode -eq "ios" -and $packageOk) {
             $projSettingsPath = Join-UappPath $target "ProjectSettings\ProjectSettings.asset"
-            if (Test-Path $projSettingsPath) {
+            if (Test-Path -LiteralPath $projSettingsPath) {
                 $inAppId = $false
-                foreach ($line in (Get-Content $projSettingsPath)) {
+                foreach ($line in (Get-Content -LiteralPath $projSettingsPath)) {
                     if ($line -match '^\s*applicationIdentifier:') { $inAppId = $true; continue }
                     if ($inAppId) {
                         if ($line -match '^\s*iPhone:\s*(\S+)\s*$') {
@@ -667,7 +746,7 @@ if ($configExisted) {
 # **並行実行に限らない**: forward は実行後も残るので、順番に回すだけで踏む（issue #25）
 $portNote = $null
 $iosPortMissing = $false    # iOS 案内（macOS のみ表示）で使う。欠落は衝突ではないのでここでは [未] にしない
-if (Test-Path $configDest) {     # 既存・新規生成のどちらでも見る（雛形の値のままでも重なりは重なり）
+if (Test-Path -LiteralPath $configDest) {     # 既存・新規生成のどちらでも見る（雛形の値のままでも重なりは重なり）
     # **型変換はすべてこのヘルパで行い、不正は $portNote に積む**。`[int]` キャストの例外は
     # 外側の catch に握り潰され、ポート検査全体が黙って死んで [済] が偽の緑になる
     # （外部レビュー指摘。`(if …)` の握り潰しと同じ型）。値域は 1〜65535（実行系と同じ）
@@ -679,7 +758,7 @@ if (Test-Path $configDest) {     # 既存・新規生成のどちらでも見る
     }
     $badPorts = @()
     try {
-        $cfg = Get-Content $configDest -Raw | ConvertFrom-Json
+        $cfg = Get-Content -LiteralPath $configDest -Raw | ConvertFrom-Json
         $editor = & $parsePort $cfg.editorBridgePort
         if ($null -eq $editor) {
             $badPorts += "editorBridgePort（'$($cfg.editorBridgePort)'）"
@@ -689,9 +768,9 @@ if (Test-Path $configDest) {     # 既存・新規生成のどちらでも見る
         $hostPort = 13333
         $hostPortKnown = $false
         $localJson = Join-UappPath $kit "config\local.json"
-        if (Test-Path $localJson) {
+        if (Test-Path -LiteralPath $localJson) {
             try {
-                $lc = Get-Content $localJson -Raw | ConvertFrom-Json
+                $lc = Get-Content -LiteralPath $localJson -Raw | ConvertFrom-Json
                 if ($null -ne $lc.bridgePort) {
                     $parsedHost = & $parsePort $lc.bridgePort
                     if ($null -ne $parsedHost) { $hostPort = $parsedHost; $hostPortKnown = $true }
@@ -888,10 +967,10 @@ if ($installCodex) {
     Write-Host ""
     Write-Host "=== Codex（OpenAI Codex CLI v0.94.0 以降）で使う場合 ==="
     Write-Host "スキルは .agents\skills\ に配置済み: `$e2e-setup / `$e2e-run / `$e2e-write-test / `$e2e-dump（/skills で一覧確認）"
-    if (-not (Test-Path $rootAgentsPath)) {
+    if (-not (Test-Path -LiteralPath $rootAgentsPath)) {
         Write-Host "ルートに AGENTS.md が無いため、Codex のルート起動では E2E 導線が自動読込されません。"
         Write-Host "  -RootAgentsMd を付けて再実行するとポインタを新規作成します（既存プロジェクトファイルは変更しない）"
-    } elseif (-not ((Get-Content $rootAgentsPath -Raw) -match 'uapp_e2e')) {
+    } elseif (-not ((Get-Content -LiteralPath $rootAgentsPath -Raw) -match 'uapp_e2e')) {
         Write-Host "既存の AGENTS.md に uapp_e2e への言及がありません。以下のスニペットの統合を検討してください（自動追記はしない）:"
         Write-Host $rootAgentsSnippet
     }

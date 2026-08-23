@@ -17,22 +17,22 @@ param(
 $ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot "uapp-platform.ps1")   # OS 差分の吸収（Windows / macOS。mac は暫定・未検証）
-$root = (Resolve-Path (Join-UappPath $PSScriptRoot "..")).Path
+$root = (Resolve-Path -LiteralPath (Join-UappPath $PSScriptRoot "..")).Path
 
 # 対象プロジェクト解決: -ProjectPath（絶対/相対パス）優先。
 # 未指定時: キット親がUnityプロジェクトならそれ（実プロジェクト内 e2e/ 配置）、でなければ $root\$Project（本リポジトリ配置）
 $isSample = $false
 if ($ProjectPath) {
-    $projectPath = (Resolve-Path $ProjectPath).Path
+    $projectPath = (Resolve-Path -LiteralPath $ProjectPath).Path
 }
-elseif ((Test-Path (Join-UappPath $root "..\Assets")) -and (Test-Path (Join-UappPath $root "..\ProjectSettings"))) {
-    $projectPath = (Resolve-Path (Join-UappPath $root "..")).Path
+elseif ((Test-Path -LiteralPath (Join-UappPath $root "..\Assets")) -and (Test-Path -LiteralPath (Join-UappPath $root "..\ProjectSettings"))) {
+    $projectPath = (Resolve-Path -LiteralPath (Join-UappPath $root "..")).Path
 }
 else {
     $projectPath = Join-UappPath $root $Project
     $isSample = $true
 }
-if (-not (Test-Path $projectPath)) { throw "プロジェクトがありません: $projectPath" }
+if (-not (Test-Path -LiteralPath $projectPath)) { throw "プロジェクトがありません: $projectPath" }
 # **末尾の `\` を落とす**（run-e2e.ps1 / run-unity-tests.ps1 と同じ正規化）。
 # タブ補完は `unity-nis\` の形を作り、`Resolve-Path` はそれを保つ。付いたまま引用すると
 # 閉じ引用符が `\"` と解釈され、**後続の引数までパスに飲み込まれる**
@@ -133,8 +133,8 @@ function Assert-BridgeRegisteredInApk {
 
 # Unity バージョンは ProjectVersion.txt（Unity自身が維持する正）から読む
 $versionFile = Join-UappPath $projectPath "ProjectSettings\ProjectVersion.txt"
-if (-not (Test-Path $versionFile)) { throw "ProjectVersion.txt がありません: $versionFile" }
-$versionRaw = Get-Content $versionFile -Raw
+if (-not (Test-Path -LiteralPath $versionFile)) { throw "ProjectVersion.txt がありません: $versionFile" }
+$versionRaw = Get-Content -LiteralPath $versionFile -Raw
 if ($versionRaw -notmatch "m_EditorVersion:\s*(\S+)") { throw "ProjectVersion.txt からバージョンを読めません: $versionFile" }
 $unityVersion = $Matches[1]
 
@@ -142,7 +142,7 @@ $unityVersion = $Matches[1]
 # （-VerifyApkOnly は既存 APK の検査だけなので Unity 本体を要求しない）
 if (-not $UnityPath -and -not $VerifyApkOnly) {
     $localConfigPath = Join-UappPath $root "config\local.json"
-    $local = if (Test-Path $localConfigPath) { Get-Content $localConfigPath -Raw | ConvertFrom-Json } else { $null }
+    $local = if (Test-Path -LiteralPath $localConfigPath) { Get-Content -LiteralPath $localConfigPath -Raw | ConvertFrom-Json } else { $null }
 
     if ($local -and $local.editorOverrides.$Project) {
         $UnityPath = $local.editorOverrides.$Project
@@ -157,7 +157,7 @@ if (-not $UnityPath -and -not $VerifyApkOnly) {
         throw "Unity $unityVersion が見つかりません（config\local.json の editorRoots/editorOverrides を確認）"
     }
 }
-if (-not $VerifyApkOnly -and -not (Test-Path $UnityPath)) { throw "Unity が見つかりません: $UnityPath" }
+if (-not $VerifyApkOnly -and -not (Test-Path -LiteralPath $UnityPath)) { throw "Unity が見つかりません: $UnityPath" }
 
 $buildsDir = Join-UappPath $root "Builds"
 if (-not $Output) { $Output = Join-UappPath $buildsDir "$projectName.apk" }
@@ -239,7 +239,7 @@ elseif ($SkipBridgeCheck -and -not $Release) {
 $emitHelper = Join-UappPath $PSScriptRoot "emit-status.ps1"
 if (Test-Path -LiteralPath $emitHelper -PathType Leaf) {
     . $emitHelper
-    $apkSize = if (Test-Path -LiteralPath $Output -PathType Leaf) { (Get-Item $Output).Length } else { $null }
+    $apkSize = if (Test-Path -LiteralPath $Output -PathType Leaf) { (Get-Item -LiteralPath $Output).Length } else { $null }
     # exitCode には登録簿検査の結果まで反映する（Unity が 0 でも検査で落ちれば失敗として記録）
     $reportedExit = if ($process.ExitCode -ne 0) { $process.ExitCode }
                     elseif ($bridgeCheckFailure) { 1 }
@@ -257,7 +257,7 @@ if (Test-Path -LiteralPath $emitHelper -PathType Leaf) {
 
 if ($process.ExitCode -ne 0) {
     Write-Host "--- $logFile 末尾 ---"
-    Get-Content $logFile -Tail 60
+    Get-Content -LiteralPath $logFile -Tail 60
     throw "ビルド失敗 (exit=$($process.ExitCode))。ログ全体: $logFile"
 }
 if ($bridgeCheckFailure) { throw $bridgeCheckFailure }

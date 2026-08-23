@@ -30,7 +30,7 @@ $ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot "uapp-platform.ps1")   # OS 差分の吸収
 
-$root = (Resolve-Path (Join-UappPath $PSScriptRoot "..")).Path
+$root = (Resolve-Path -LiteralPath (Join-UappPath $PSScriptRoot "..")).Path
 
 # xcodebuild の解決が macOS 専用ガードを兼ねる（Windows には存在しないので、ここで明示的に止まる）
 $xcodebuild = Get-UappCommandPath "xcodebuild"
@@ -50,18 +50,18 @@ if ($isDevice) { $Arch = "arm64" }   # 実機は arm64 のみ（DerivedData の�
 # --------------------------------------------------------------- プロジェクト解決
 $isSample = $false
 if ($ProjectPath) {
-    $projectPath = (Resolve-Path $ProjectPath).Path
+    $projectPath = (Resolve-Path -LiteralPath $ProjectPath).Path
 }
-elseif ((Test-Path (Join-UappPath $root "..\Assets")) -and (Test-Path (Join-UappPath $root "..\ProjectSettings"))) {
+elseif ((Test-Path -LiteralPath (Join-UappPath $root "..\Assets")) -and (Test-Path -LiteralPath (Join-UappPath $root "..\ProjectSettings"))) {
     # 導入先レイアウト: uapp_e2e\ の親が Unity プロジェクト（run-e2e.ps1 と同じ規則）。
     # これが無いと、導入先で -ProjectPath を省いた実行が $root\unity-nis（存在しない）を探して必ず落ちる
-    $projectPath = (Resolve-Path (Join-UappPath $root "..")).Path
+    $projectPath = (Resolve-Path -LiteralPath (Join-UappPath $root "..")).Path
 }
 else {
     $projectPath = Join-UappPath $root $Project
     $isSample = $true
 }
-if (-not (Test-Path $projectPath)) { throw "プロジェクトがありません: $projectPath" }
+if (-not (Test-Path -LiteralPath $projectPath)) { throw "プロジェクトがありません: $projectPath" }
 $projectPath = Get-UappNormalizedDir $projectPath
 $projectName = Split-Path $projectPath -Leaf
 
@@ -144,13 +144,13 @@ if (-not $ExecuteMethod) {
 
 # Unity バージョンは ProjectVersion.txt（Unity 自身が維持する正）から読む
 $versionFile = Join-UappPath $projectPath "ProjectSettings\ProjectVersion.txt"
-if (-not (Test-Path $versionFile)) { throw "ProjectVersion.txt がありません: $versionFile" }
-$versionRaw = Get-Content $versionFile -Raw
+if (-not (Test-Path -LiteralPath $versionFile)) { throw "ProjectVersion.txt がありません: $versionFile" }
+$versionRaw = Get-Content -LiteralPath $versionFile -Raw
 if ($versionRaw -notmatch "m_EditorVersion:\s*(\S+)") { throw "ProjectVersion.txt からバージョンを読めません: $versionFile" }
 $unityVersion = $Matches[1]
 
 $localConfigPath = Join-UappPath $root "config\local.json"
-$local = if (Test-Path $localConfigPath) { Get-Content $localConfigPath -Raw | ConvertFrom-Json } else { $null }
+$local = if (Test-Path -LiteralPath $localConfigPath) { Get-Content -LiteralPath $localConfigPath -Raw | ConvertFrom-Json } else { $null }
 
 # 実機は署名が要る。チームと bundle id は「引数 > config/local.json > e2e-config.json の package」
 # （**チーム ID は環境ごとの固有情報**なので追跡ファイルへ書かない＝local.json 側で持つ）
@@ -166,8 +166,8 @@ if ($isDevice) {
         # 設定解決はキット内 → プロジェクト直下の順（run-e2e.ps1 と同じ規則。導入配置では
         # e2e-config.json はプロジェクト直下ではなく uapp_e2e\ 直下にある）
         $cfgPath = Join-UappPath $root "e2e-config.json"
-        if (-not (Test-Path $cfgPath)) { $cfgPath = Join-UappPath $projectPath "e2e-config.json" }
-        if (Test-Path $cfgPath) { $AppId = (Get-Content $cfgPath -Raw | ConvertFrom-Json).package }
+        if (-not (Test-Path -LiteralPath $cfgPath)) { $cfgPath = Join-UappPath $projectPath "e2e-config.json" }
+        if (Test-Path -LiteralPath $cfgPath) { $AppId = (Get-Content -LiteralPath $cfgPath -Raw | ConvertFrom-Json).package }
     }
     if (-not $AppId) { throw "実機ビルドの bundle id を決められません（-AppId か e2e-config.json の package）" }
 }
@@ -185,7 +185,7 @@ if (-not $UnityPath) {
         throw "Unity $unityVersion が見つかりません（config\local.json の editorRoots/editorOverrides を確認）"
     }
 }
-if (-not (Test-Path $UnityPath)) { throw "Unity が見つかりません: $UnityPath" }
+if (-not (Test-Path -LiteralPath $UnityPath)) { throw "Unity が見つかりません: $UnityPath" }
 
 $logFile = Join-UappPath $buildsDir "build-ios-$projectName.log"
 function Format-CliArg {
@@ -219,7 +219,7 @@ $settingsAsset = $null
 $settingsBefore = $null
 if ($isSample -and $isDevice) {
     $settingsAsset = Join-UappPath $projectPath "ProjectSettings\ProjectSettings.asset"
-    if (Test-Path $settingsAsset) { $settingsBefore = Get-Content $settingsAsset -Raw }
+    if (Test-Path -LiteralPath $settingsAsset) { $settingsBefore = Get-Content -LiteralPath $settingsAsset -Raw }
 }
 
 Write-Host "[$projectName] Unity $unityVersion で iOS $Target 向け書き出しを開始..."
@@ -227,15 +227,15 @@ $buildStarted = Get-Date
 $process = Start-Process -FilePath $UnityPath -ArgumentList $unityArgs -Wait -PassThru -NoNewWindow
 if ($process.ExitCode -ne 0) {
     Write-Host "--- $logFile 末尾 ---"
-    Get-Content $logFile -Tail 60
+    Get-Content -LiteralPath $logFile -Tail 60
     throw "Unity の書き出しに失敗 (exit=$($process.ExitCode))。ログ全体: $logFile"
 }
 
 # 実機用 bundle id の焼き付きを戻す（上の説明を参照）。**行単位で厳密に比べる** —
 # ビルドで正当に変わる項目（既定値の明示化等）まで巻き戻さないため、
 # applicationIdentifier の iPhone 行だけを対象にする
-if ($settingsBefore -and (Test-Path $settingsAsset)) {
-    $after = Get-Content $settingsAsset -Raw
+if ($settingsBefore -and (Test-Path -LiteralPath $settingsAsset)) {
+    $after = Get-Content -LiteralPath $settingsAsset -Raw
     $rx = '(?m)^(\s*applicationIdentifier:\s*\r?\n(?:\s+\w+:.*\r?\n)*?\s*iPhone:\s*)(.*)$'
     $mBefore = [regex]::Match($settingsBefore, $rx)
     $mAfter = [regex]::Match($after, $rx)
@@ -252,7 +252,7 @@ if ($settingsBefore -and (Test-Path $settingsAsset)) {
 
 # --------------------------------------------------------------- xcodebuild
 $xcodeproj = Join-UappPath $Output "Unity-iPhone.xcodeproj"
-if (-not (Test-Path $xcodeproj)) { throw "Xcode プロジェクトがありません: $xcodeproj" }
+if (-not (Test-Path -LiteralPath $xcodeproj)) { throw "Xcode プロジェクトがありません: $xcodeproj" }
 
 Write-Host "[$projectName] xcodebuild ($configName / $Arch / $sdkSuffix)..."
 $xcodeLog = Join-UappPath $buildsDir "xcodebuild-ios-$projectName.log"
@@ -271,7 +271,7 @@ $xcodeArgs = if ($isDevice) {
     -derivedDataPath $derivedData @xcodeArgs build *> $xcodeLog
 if ($LASTEXITCODE -ne 0) {
     Write-Host "--- $xcodeLog 末尾 ---"
-    Get-Content $xcodeLog -Tail 40
+    Get-Content -LiteralPath $xcodeLog -Tail 40
     throw "xcodebuild に失敗 (exit=$LASTEXITCODE)。ログ全体: $xcodeLog"
 }
 
