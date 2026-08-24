@@ -472,14 +472,24 @@ if ($Editor) {
           警告に留め、元の失敗メッセージ・戻り値をそのまま生かす（$ErrorActionPreference=Stop
           の下で裸に書くと、保存側の例外が本来の CLI エラーを置き換える）。
         #>
-        param([string]$Label, [string]$Raw)
+        param([string]$Label, [string]$Raw, [string]$Reason)
         if (-not "$Raw".Trim()) { return }
         try {
             $rawDir = Join-UappPath $root "Builds\failure"
             New-Item -ItemType Directory -Force $rawDir | Out-Null
             $rawFile = Join-UappPath $rawDir "unity-cli-raw.txt"
-            Set-Content -LiteralPath $rawFile -Value ("=== unity $Label ($(Get-Date -Format o)) ===`r`n$Raw") -Encoding utf8
-            Write-Host "[$projectName] CLI 応答を JSON にできなかったため、生の応答を保存: $rawFile"
+            $head = if ($Reason) { "=== unity $Label ($(Get-Date -Format o)) [$Reason] ===" }
+                    else         { "=== unity $Label ($(Get-Date -Format o)) ===" }
+            $body = "$head`r`n$Raw"
+            # **この実行の最初の 1 回だけ切り詰め、以後は追記**（issue #38）。
+            # 1 回の走行で**別々の呼び出し**（版差プローブ / 本コマンド / finally の editor_stop）が
+            # それぞれ記録しうるので、毎回上書きだと最後の 1 件しか残らない。
+            # 逆に追記だけにすると**前回の走行と混ざる**ので、先頭で 1 回消す。
+            # （再試行の途中経過ではない ― transient は記録せず、記録するものは再試行しない）
+            if ($script:rawEvidenceStarted) { Add-Content -LiteralPath $rawFile -Value $body -Encoding utf8 }
+            else { Set-Content -LiteralPath $rawFile -Value $body -Encoding utf8; $script:rawEvidenceStarted = $true }
+            $why = if ($Reason) { "CLI エラーを分類できなかったため" } else { "CLI 応答を JSON にできなかったため" }
+            Write-Host "[$projectName] $why、生の応答を保存: $rawFile"
         } catch {
             Write-Warning "CLI 生応答の保存に失敗（本来の失敗はこの後に出る）: $_"
         }
@@ -579,6 +589,7 @@ if ($Editor) {
         $label = ($CliArgs | Where-Object { $_ -notmatch "^-" -and $_ -ne $projectDir }) -join " "
         $wait = [System.Diagnostics.Stopwatch]::StartNew()
         $notified = $false
+        $nextLivenessCheck = 0    # 生存確認の次回時刻（秒）。初回の待機で 1 回、以後 15 秒ごと
         while ($true) {
             # **CLI の出力（UTF-8）をコンソール符号化で復号しない**（run-unity-tests.ps1 の
             # Invoke-Pipeline と同じ理由: cp932 だとマルチバイトの後続バイトが `"` を飲み込み
@@ -597,19 +608,57 @@ if ($Editor) {
                 return $parsed
             }
             $detail = if ($parsed.errors) { ($parsed.errors | ForEach-Object { $_.message }) -join " / " } else { $raw }
-            # **タイムアウト判定は構造化されたエラーだけで行う**。生出力には `--timeout` の
-            # 用法説明などが混ざるので、版差で出たヘルプを「待てば直る」と誤読すると
-            # すぐ落ちるべき失敗を延々と待つことになる
-            $isTimeout = $parsed -and $parsed.errors -and $detail -match "timed out|timeout"
-            if ($AllowFail -or -not $isTimeout -or $retrySafe -notcontains $cmdName) { break }
+            # **判定は Get-UappUnityCliErrorClass に集約する**（issue #38。版差プローブ側と
+            # 同じ関数を使う ― 以前は 2 箇所に別々の文字列一致があり、片方だけ直る形だった）。
+            # 生出力ではなく構造化されたエラーだけを見るのは従来どおり
+            $errClass = Get-UappUnityCliErrorClass -Parsed $parsed
+            # **transient 以外は原文を残してから落とす**。この型は JSON として正しく解釈できるので、
+            # 「JSON にできなかった応答を残す」経路（下の $parsed が null のとき）では捕まらない
+            # ― 導入先が issue #38 を報告できたのは失敗メッセージが読めたからで、証跡としては
+            # 残っていなかった。**$parsed が null のときは下の経路が同じ応答を残す**ので二重に書かない
+            # **`-AllowFail` の呼び出しでは書かない**。失敗を織り込んでいる呼び出し
+            # （finally の editor_stop 等）で書くと、**テストが全件緑の走行でも証跡ファイルが
+            # 生成されて「生の応答を保存」と表示される**（誤解を招く）。
+            # 失敗を throw へ変える呼び出し側（版差プローブ）は、自分で記録する
+            if ($parsed -and -not $AllowFail -and $errClass.Class -ne "transient") {
+                Save-CliRawEvidence -Label ($CliArgs -join ' ') -Raw $raw -Reason $errClass.Reason
+            }
+            if ($AllowFail -or $errClass.Class -ne "transient" -or $retrySafe -notcontains $cmdName) { break }
             if ($wait.Elapsed.TotalSeconds -ge $EditorReadyTimeoutSeconds) {
-                throw ("エディタが $([int]$wait.Elapsed.TotalSeconds) 秒たっても '$label' に応答しません: $detail。" +
+                throw ("エディタが $([int]$wait.Elapsed.TotalSeconds) 秒たっても '$label' に応答しません" +
+                       "（$($errClass.Reason)）: $detail。" +
                        "エディタ側でインポート/コンパイルが終わらない、または Console でエラーが出ていないか確認する" +
                        "（待ち時間は -EditorReadyTimeoutSeconds で延ばせる）")
             }
+            # **待つ前に、待つ相手が生きているかを確かめる**（レビュー指摘）。
+            # 接続層の transient（接続拒否・送信中の切断）は**一過性の瞬断とエディタの死亡を
+            # 区別しない**ので、生存を見ないと**死んだエディタを既定 600 秒×コマンド数ぶん待つ**
+            # ことになる（修正前は数秒で落ちていた＝退行）。
+            # **プロセスの有無で見る**のが要点 ― ドメインリロード中でもプロセスは生きているので、
+            # 「リロード（待つべき）」と「死亡（待っても無駄）」を分けられる。
+            # `unity status` はリロード中に応答しなくなるので生存判定には使わない。
+            # `Test-UnityProjectLocked` は**判定できないときに「掴んでいる」へ倒す**ので、
+            # ここでは「待ち続ける」側＝安全側に倒れる（誤って早期に落とさない）。
+            #
+            # **毎周は呼ばない**（3 秒間隔・既定 600 秒 ＝ 最大約 200 回になる）。Windows では
+            # 1 回ごとに Win32_Process の全列挙が走るうえ、**同関数は警告を出す経路を持つ**ので
+            # 同じ警告が何十回も流れる。15 秒に 1 回で、死亡の検出は十分に速い。
+            # 警告自体は**起動時に一度出ている**ので、ここでは抑止する
+            # （待機中の「閉じてから再実行してください」は文脈に合わず誤誘導になる）
+            if ($wait.Elapsed.TotalSeconds -ge $nextLivenessCheck) {
+                $nextLivenessCheck = $wait.Elapsed.TotalSeconds + 15
+                if (-not (Test-UnityProjectLocked -ProjectDir $projectDir -WarningAction SilentlyContinue)) {
+                    throw ("このプロジェクトの Unity プロセスが見つかりません" +
+                           "（'$label' は $($errClass.Reason)）。クラッシュしたか、外部から終了された" +
+                           "可能性があります: $detail")
+                }
+            }
             if (-not $notified) {
-                Write-Host ("[$projectName] エディタは接続済みだが '$label' に応答しない" +
-                            "（インポート/コンパイル中の可能性）。最大 $EditorReadyTimeoutSeconds 秒待ちます...")
+                # **観測した分類をそのまま出す**。以前は「インポート/コンパイル中の可能性」と
+                # 原因を断定していたが、接続断（`Network error` 等）のときは誤りになる。
+                # 長く待つ経路に入ったとき、人が「何を待っているか」を判断できる材料を出す
+                Write-Host ("[$projectName] '$label' が待てば直るはずのエラーで失敗（$($errClass.Reason)）。" +
+                            "最大 $EditorReadyTimeoutSeconds 秒待ちます... 詳細: $detail")
                 $notified = $true
             }
             Start-Sleep -Seconds 3
@@ -747,13 +796,34 @@ if ($Editor) {
     # コマンドごとに行うので、ここで待つ必要はない — タイムアウトは版差でなく手空きでないだけなので
     # 素通しし、後続の呼び出し（同関数が待って再試行する）に判断を委ねる
     $probe = Invoke-UnityCli @("cmd", "eval", "--code", 'return "ok";') -AllowFail
-    $probeTimedOut = $probe -and -not $probe.success -and
-                     ((($probe.errors | ForEach-Object { $_.message }) -join " / ") -match "timed out|timeout")
-    if (-not $probeTimedOut -and (-not $probe -or -not $probe.success -or $probe.data.result.result -ne "ok")) {
+    # **同じ分類器を使う**（issue #38）。ここが文字列一致のままだと、一過性の接続エラーを
+    # 「バージョンが想定と異なります」と誤診し、**原因から最も遠い場所**（CLI とパッケージの版）を
+    # 調べさせることになる。導入先の報告で実害が確認されている
+    # **応答が無い / JSON にできなかった場合も分類器へ通す**（`$probe` が $null なら unknown）。
+    # 通さないと「分類: 」が空のまま出て、次の人が「分類器が動いていないのか」で迷う（実測で確認）
+    $probeClass = if ($probe -and $probe.success) { $null } else { Get-UappUnityCliErrorClass -Parsed $probe }
+    if ($probeClass.Class -ne "transient" -and (-not $probe -or -not $probe.success -or $probe.data.result.result -ne "ok")) {
         $detail = if ($probe.errors) { ($probe.errors | ForEach-Object { $_.message }) -join " / " } else { "応答なし" }
-        throw ("Unity CLI / com.unity.pipeline のバージョンが想定と異なります（eval の疎通に失敗: $detail）。" +
-               "'unity --version' と <プロジェクト>\Packages\manifest.json の com.unity.pipeline を確認する。" +
-               "検証済みの組み合わせ: unity-cli 1.0.0-beta.3 / com.unity.pipeline 0.4.0-exp.1")
+        # **分類の答えを捨てない**（レビュー指摘）。以前はここが「何が起きても版差」と断定しており、
+        # 一過性エラーでも**原因から最も遠い場所**（CLI とパッケージの版）を調べさせていた。
+        # 版差だと言い切ってよいのは、実際に版差で観測した文言（Parameter Validation Failed）のときだけ
+        # **$probeClass が $null ＝ eval は成功したのに結果が "ok" でない**＝応答の形が違う。
+        # これは版差そのものなので、従来どおり版を疑う文面でよい
+        if ($null -eq $probeClass -or $probeClass.Class -eq "permanent") {
+            throw ("Unity CLI / com.unity.pipeline のバージョンが想定と異なります（eval の疎通に失敗: $detail）。" +
+                   "'unity --version' と <プロジェクト>\Packages\manifest.json の com.unity.pipeline を確認する。" +
+                   "検証済みの組み合わせ: unity-cli 1.0.0-beta.3 / com.unity.pipeline 0.4.0-exp.1")
+        }
+        # **ここで記録する** ― プローブは `-AllowFail` なので Invoke-UnityCli 側では書かれない
+        # （書かせると、後始末の editor_stop でも書かれて緑の走行に証跡が出てしまう）。
+        # ここは失敗を throw へ変える場所なので、原文が要る
+        if ($probeClass -and $probeClass.Class -ne "transient") {
+            Save-CliRawEvidence -Label "cmd eval（疎通プローブ）" -Raw $detail -Reason $probeClass.Reason
+        }
+        throw ("エディタへの疎通プローブ（eval）に失敗しました: $detail。" +
+               "版差の可能性もあるが断定できない（分類: $($probeClass.Reason)）。" +
+               "エディタの Console にエラーが出ていないか、'unity --version' と " +
+               "<プロジェクト>\Packages\manifest.json の com.unity.pipeline を確認する")
     }
 
     # 排他ガード: stopped 以外（playing / paused）は他タスク/他セッションが使用中とみなしてフェイルファスト

@@ -179,10 +179,17 @@ python -m e2e_driver.journey ..\Builds\journey    # → report.html 生成（詳
 5. **全テスト接続エラーなら `Builds/failure/crash.txt`**（ネイティブクラッシュはUnityタグに出ない）。
    `adb shell pidof <package>` が空ならプロセス死亡
 6. dump を再取得して期待とのUI差分を見る
-7. **エディタ直結で Unity CLI の応答が壊れる／JSON にならない**とき、run-e2e は生の応答を
-   `Builds/failure/unity-cli-raw.txt` へ自動保存する。まずそれを見る（`ConvertFrom-Json` の
-   エラーメッセージは原因と無関係な見た目になる — 文字化けで閉じ引用符が食われる・
-   版差でヘルプ文が混ざる等）
+7. **エディタ直結で Unity CLI の呼び出しが失敗した**とき、run-e2e は生の応答を
+   `Builds/failure/unity-cli-raw.txt` へ自動保存する。まずそれを見る。残るのは 2 種類:
+   - **JSON にできなかった応答**（`ConvertFrom-Json` のエラーメッセージは原因と無関係な
+     見た目になる — 文字化けで閉じ引用符が食われる・版差でヘルプ文が混ざる等）
+   - **分類できなかった CLI エラー**（`[未知のエラー文]` のタグ付き）。run-e2e は失敗を
+     「待てば直る（transient）／待っても直らない／分類できない」に分け、**分類できないものは
+     原文を残して即失敗する**。**ここに出た文言は報告してほしい** — 待つべきエラーを
+     取りこぼしていた場合、その文言を分類に足すことで直せる（issue #38 はまさにその型で、
+     `Network error:` を「待っても直らない」と誤分類していた）
+   **このファイルは 1 回の実行の先頭で切り詰められ、以後は追記される**（同じ走行の複数の
+   呼び出しが並ぶ。前回の走行とは混ざらない）
 
 **自作の PowerShell スクリプトから `unity cmd` を直接叩くときは、先頭で文字コードを明示する**。
 コンソールを持たない起動（`Start-Process -RedirectStandardOutput` 等。AI からの detached 実行が典型）

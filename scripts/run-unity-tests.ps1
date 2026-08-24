@@ -361,6 +361,18 @@ if ($Editor) {
           ポーリングの中から時間制限なしで呼ぶと外側のストップウォッチが進まず、
           「上限で中断する」という約束が守られない（無期限に黙って止まる）。
           長時間かかるのが正常な run_tests は従来どおり制限なしで呼ぶ（CLI 側の --timeout で縛る）。
+
+          **ここでは自動再試行しない**（issue #38。一度入れて撤回した）。
+          一過性の接続エラー（`Network error: ...` / `No Pipeline instance found`）は
+          run-e2e.ps1 側では待って再試行するが、**このスクリプトで再試行が効く対象は
+          `recompile` と `run_tests` の 2 つだけ**（他はすべて `-AllowFail` で、呼び出し元が
+          自前でポーリングしている）。そして**どちらも二度実行してよいコマンドではない**:
+          `run_tests` は**全テストの二重実行**になり、1 本目がまだエディタ側で走っている最中に
+          2 本目を投げうるうえ、証跡に載るのは 2 回目の結果だけになる。
+          **クライアント側のエラーは「サーバが要求を受理していない」ことを保証しない**
+          （run-e2e.ps1 の `$retrySafe` と同じ理由。あちらの一覧にもこの 2 つは入っていない）。
+          そのかわり**失敗の分類を添えて落とす** ― 一過性なら「そのまま再実行すると通ることがある」と
+          分かるので、人・AI のどちらが読んでも次の一手を選べる。
         #>
         param([string[]]$CmdArgs, [switch]$AllowFail, [int]$TimeoutSeconds = 0)
         if ($TimeoutSeconds -gt 0) {
@@ -385,7 +397,13 @@ if ($Editor) {
         $parsed = $null
         try { $parsed = $raw | ConvertFrom-Json } catch {}
         if (-not $AllowFail -and (-not $parsed -or -not $parsed.success)) {
-            throw "unity cmd $($CmdArgs -join ' ') が失敗: $raw"
+            # **分類は添えるが、再試行はしない**（上の .NOTES 参照）。
+            # 一過性だと分かれば「そのまま再実行すれば通る」と判断できる
+            $cls = Get-UappUnityCliErrorClass -Parsed $parsed
+            $hint = if ($cls.Class -eq "transient") {
+                        "（一過性の可能性: $($cls.Reason)。エディタが生きていれば、そのまま再実行すると通ることがある）"
+                    } else { "（$($cls.Reason)）" }
+            throw "unity cmd $($CmdArgs -join ' ') が失敗${hint}: $raw"
         }
         $parsed
     }

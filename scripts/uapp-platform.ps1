@@ -232,6 +232,100 @@ function Get-UappUnityCli {
     return $null
 }
 
+function Get-UappUnityCliErrorClass {
+    <#
+      .SYNOPSIS
+      Unity CLI の失敗応答を **transient（待てば直る）/ permanent（待っても直らないと分かっている）/
+      unknown（分類できない）** に分ける。@{ Class; Reason; Detail } を返す。
+
+      .NOTES
+      **issue #38。「待てば直るか」を `timeout` の文字列一致だけで判定していたため、
+      `Network error: An error occurred while sending the request.` が「即失敗」に落ちていた**
+      （導入先で 3 回連続の失敗。v0.1.11 から同じ実装で、接続が速くなって踏むようになった）。
+
+      判定は**構造化されたエラーの message だけ**で行う（`errors[].message`）。
+      生出力には `--timeout` の用法説明などが混ざるので、版差で出たヘルプを「待てば直る」と
+      誤読すると、すぐ落ちるべき失敗を延々と待つことになる。
+      `errors[].code` は**照合には使っていない** — 観測できているのが汎用の `COMMAND_FAILED`
+      だけで、message より細かい区別を与えないため。`Reason` に載せて記録には残す。
+
+      **transient 以外は即失敗させる**（fail-fast を保つ）。「待っても直らないものだけを列挙して
+      残りを待つ」逆向きの設計は採らない ― 未知のエラーで待ち時間いっぱい待つことになる。
+      **そのかわり transient 以外は必ず原文を証跡へ残す**（呼び出し側の責務）。
+      導入先が issue #38 を報告できたのは失敗メッセージに `Network error` がそのまま
+      出ていたからで、丸めていたら報告が上がってこなかった。**分類は足すが原文は捨てない**。
+      なおこの型は JSON として正しく解釈できるので、「JSON にできなかった応答を残す」
+      仕掛けだけでは捕まらない（導入先で実際に証跡が残っていなかった）。
+
+      **`permanent` は「メッセージを変えるため」だけに在る**（挙動は unknown と同じ即失敗＋証跡）。
+      レビューで **`permanent` に推測で語を足すと、実物を見ていないエラーの証跡を先回りで
+      黙らせるうえ、一過性エラーに同じ語が紛れ込むと待ちを殺す**ことが実験で示された
+      （`Pipeline package installed` という案内文が一文付くだけで transient が反転し、
+      6 秒で「版が違う」誤診に化ける A/B を確認）。よって**実際に観測した文言だけ**を入れる。
+
+      **`No Pipeline instance found` は transient**（起動直後の 26 秒間、導入先の実測で
+      329 回中 328 回これが返り、その後 成功した＝待てば直った）。**ドメインリロード中も同じ
+      応答になる**と見られ、ここを permanent にすると **`Network error` で待ちに入った直後、
+      次の 1 手で自分の分類に殺される**（レビュー指摘。#38 が想定する機序そのものを潰す）。
+      **死んだエディタを待ち続けないための歯止めは、呼び出し側のプロセス生存確認**が持つ
+      （このプロセスの有無はドメインリロードでは変わらない＝リロードと死亡を区別できる）。
+
+      **文言はローカライズされる**。実測（ja-JP / .NET 8）:
+      `対象のコンピューターによって拒否されたため、接続できませんでした。` /
+      `要求の送信中にエラーが発生しました。`。英語の `connection refused` 等は
+      その環境では空振りする。**言語に依らず効くのは Unity CLI 側の接頭辞 `Network error:` だけ**
+      なので、広すぎると分かっていて残している。取りこぼしたものは unknown として
+      原文が証跡に残るので、**見てから列挙に足す**（推測で足さない）。
+    #>
+    param($Parsed)
+
+    if (-not $Parsed -or -not $Parsed.errors) {
+        return @{ Class = "unknown"; Reason = "構造化されたエラーが無い"; Detail = "" }
+    }
+    $messages = @($Parsed.errors | ForEach-Object { "$($_.message)" })
+    $codes    = @($Parsed.errors | ForEach-Object { "$($_.code)" } | Where-Object { $_ })
+    $detail   = ($messages -join " / ")
+
+    # 過渡的（＝待てば直る）。**「起動直後だけ」を前提にしない** ―
+    # 導入先が踏んだのは接続成立後で、呼び出しの最中にドメインリロードでサーバが落ちた
+    # 経路と見られる（`An error occurred while sending the request.` は .NET の
+    # 「送信中に接続が切れた」定型文で、「まだ開いていない」ではない）。**これは推定**
+    $transient = @(
+        "timed out",
+        "timeout",
+        "An error occurred while sending the request",   # .NET HttpClient の定型文（報告された実物）
+        "response ended prematurely",                    # サーバがレスポンス途中で消えた＝リロードの症状
+        "was canceled",
+        "connection refused",
+        "actively refused",
+        "connection was closed",
+        "transport connection",
+        "No Pipeline instance found",                    # 起動直後・リロード中（上の .NOTES 参照）
+        "Network error"                                  # Unity CLI の接頭辞。**広すぎるが、
+                                                         # ローカライズされた環境で効く唯一の網**
+    )
+    foreach ($pat in $transient) {
+        if ($detail -like "*$pat*") {
+            return @{ Class = "transient"; Reason = "transient: $pat"; Detail = $detail }
+        }
+    }
+
+    # **実際に観測した文言だけ**。`Parameter Validation Failed` は
+    # pipeline 0.4 で eval の code が必須の名前付き引数になり位置引数の呼び出しが全滅した
+    # ときの実物（run-e2e.ps1 の版差プローブのコメントに記録がある）
+    $permanent = @(
+        "Parameter Validation Failed"
+    )
+    foreach ($pat in $permanent) {
+        if ($detail -like "*$pat*") {
+            return @{ Class = "permanent"; Reason = "permanent: $pat"; Detail = $detail }
+        }
+    }
+
+    $codeNote = if ($codes.Count) { "（code: $($codes -join ',')）" } else { "" }
+    return @{ Class = "unknown"; Reason = "未知のエラー文$codeNote"; Detail = $detail }
+}
+
 function Get-UappUnityCliGlobalArgs {
     <#
       .SYNOPSIS
