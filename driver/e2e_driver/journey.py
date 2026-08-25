@@ -181,6 +181,15 @@ class JourneyRecorder:
             "transitions": self._transitions,
             "tests": list(self._tests.values()),
         }
+        # **どの e2e-config.json で走ったかを残す**（issue #41）。
+        # `serve` は journey ディレクトリから祖先を遡って設定を探すが、
+        # **注入モードではジャーニーの出力先がキット側（ハブ）にある**ので、
+        # 探索すると**対象ではなくハブの設定**を拾う（uiType もポートも）。
+        # 記録した側が「実際に使った設定」を知っているので、それを残して serve へ渡す。
+        # 無ければ従来どおり探索に落ちる（旧い journey.json との互換）
+        config_path = os.environ.get("UAPP_E2E_CONFIG_PATH")
+        if config_path:
+            data["configPath"] = config_path
         path.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
         # viewer.html を file:// で直接開く用（fetch は file:// では CORS で使えないため <script src> で読む）
         (self.out_dir / "journey.js").write_text(
@@ -399,6 +408,39 @@ def _match_screen(screens: dict[str, dict], button_paths: set[str],
     return best_id if best_score >= threshold else None
 
 
+def _recorded_config(journey_dir: Path) -> Path | None:
+    """記録時に使った `e2e-config.json`（journey.json の `configPath`）。
+
+    **探索より優先する**（issue #41）。注入モードではジャーニーの出力先がキット側に
+    あるので、祖先を遡ると対象ではなくハブの設定に当たる。
+    **実在しないパスが記録されていたら無視する**（別マシンで開いた journey を
+    そのまま読める必要がある ― 記録は絶対パスなので移動すると外れる）。
+    """
+    data_path = journey_dir / "journey.json"
+    if not data_path.exists():
+        return None
+    try:
+        recorded = json.loads(data_path.read_text(encoding="utf-8")).get("configPath")
+    except Exception:
+        return None
+    if not recorded:
+        return None
+    path = Path(recorded)
+    return path if path.exists() else None
+
+
+def resolve_config_start(journey_dir: Path) -> Path:
+    """`serve` が uiType とポートを解決する起点（issue #41）。
+
+    **記録時に使った設定があればそれを最優先**。探索に頼ると、注入モードのように
+    ジャーニーの出力先と対象が別ツリーにある構成で **ハブの設定を拾い、
+    対象と違う uiType・違うポートで動く**。記録が無い（旧い journey.json）ときだけ
+    従来どおり探索する。
+    """
+    recorded = _recorded_config(journey_dir)
+    return recorded.parent if recorded else _find_config_start(journey_dir)
+
+
 def _find_config_start(journey_dir: Path) -> Path:
     """serve のポート解決に使う e2e-config.json の探索起点を決める。
 
@@ -502,9 +544,10 @@ def serve(journey_dir: str | Path, *, http_port: int = 8787,
     if not (out_dir / "journey.json").exists():
         raise FileNotFoundError(f"journey.json が見つかりません: {out_dir}")
     _deploy_viewer(out_dir)  # 最新ビューアーで配信する（既存コピーが内容違いなら退避してから）
-    # config 探索は journey ディレクトリ起点（実行場所に依存させない）。uiType とポートは
-    # 同じ e2e-config.json から解決する（開発リポジトリ配置では兄弟のサンプルプロジェクト）
-    config_start = _find_config_start(out_dir)
+    # 解決順は `resolve_config_start` に集約する（テストが**本物と同じ経路**を通れるように。
+    # ここに解決順を書くと、テストが手元で再現した順序を検査してしまい、
+    # 実装を変えても気づけない ― 実際に変異テストで素通りした）
+    config_start = resolve_config_start(out_dir)
     resolved_ui_type = ui_type or _find_ui_type(config_start)
     bridge_port = resolve_port(bridge_port, start=config_start)
 

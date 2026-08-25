@@ -270,12 +270,18 @@ function Get-UappUnityCliErrorClass {
       **死んだエディタを待ち続けないための歯止めは、呼び出し側のプロセス生存確認**が持つ
       （このプロセスの有無はドメインリロードでは変わらない＝リロードと死亡を区別できる）。
 
-      **文言はローカライズされる**。実測（ja-JP / .NET 8）:
-      `対象のコンピューターによって拒否されたため、接続できませんでした。` /
-      `要求の送信中にエラーが発生しました。`。英語の `connection refused` 等は
-      その環境では空振りする。**言語に依らず効くのは Unity CLI 側の接頭辞 `Network error:` だけ**
-      なので、広すぎると分かっていて残している。取りこぼしたものは unknown として
-      原文が証跡に残るので、**見てから列挙に足す**（推測で足さない）。
+      **文言がローカライズされるかは環境で割れる**（同じ ja-JP でも）。
+      こちらの実測では日本語になった（`要求の送信中にエラーが発生しました。` /
+      `対象のコンピューターによって拒否されたため、接続できませんでした。`）が、
+      **導入先の ja-JP Windows では `An error occurred while sending the request.` と
+      英語のまま**返っている（v0.1.13 の受け入れで実測）。
+      こちらの測定は **PowerShell 自身が投げた .NET 例外**、導入先のは
+      **Unity CLI が返した文言**という違いがある（**どちらの経路が出したかで変わる**。
+      CLI 側のカルチャ設定やサテライトアセンブリの有無が疑わしいが**未確認**）。
+      → **接頭辞 `Network error:` と .NET の定型文の両方を残す** ―
+      **片方だけならどちらかの環境で必ず落ちる**。接頭辞は広すぎると分かっていて残している。
+      取りこぼしたものは unknown として原文が証跡に残るので、**見てから列挙に足す**
+      （推測で足さない）。
     #>
     param($Parsed)
 
@@ -302,7 +308,8 @@ function Get-UappUnityCliErrorClass {
         "transport connection",
         "No Pipeline instance found",                    # 起動直後・リロード中（上の .NOTES 参照）
         "Network error"                                  # Unity CLI の接頭辞。**広すぎるが、
-                                                         # ローカライズされた環境で効く唯一の網**
+                                                         # 定型文が訳される環境ではこれだけが網**
+                                                         # （訳されるかは環境で割れる。上の .NOTES）
     )
     foreach ($pat in $transient) {
         if ($detail -like "*$pat*") {
@@ -725,6 +732,38 @@ function Get-UappDevOnlyScript {
         "install-to-project.ps1", "package-kit.ps1", "publish-kit.ps1", "verify-all.ps1",
         "check-portability.ps1", "check-kit-docs.ps1"
     )
+}
+
+function Copy-UappKitDoc05 {
+    <#
+      .SYNOPSIS
+      docs\05-install-to-project.md を「キット同梱の形」に直してコピーする
+      （開発リポジトリにしか無い文書へのリンクを、キット内で意味の通る書き方へ置き換える）。
+
+      .NOTES
+      **Get-UappDevOnlyScript と同じ理由でここに置く** ― 配布経路が 2 つあるため:
+        package-kit.ps1 …… zip を作るとき
+        install-to-project.ps1 … 開発リポジトリから直接導入するとき
+      **以前は package-kit 側にしか置換が無かった**ので、開発リポジトリ経由で導入すると
+      キットには同梱されない `06-release.md` と、キット内では `ai-loop.md` へ改名される
+      `04-ai-loop.md` を指すリンクが、そのまま導入先へ届いていた
+      （2026-08-25 に docs/06 の項目 2b＝**開発リポジトリ経由の導入も 1 回通す**、で発見。
+      **展開 zip からの検証では原理的に捕まらない向き**）。
+
+      置換は**冪等**（既に置換済みの文面は変わらない）なので、zip レイアウトから呼んでも
+      内容は変わらない ― その結果、**2 経路の kit-manifest.json のハッシュが一致する**。
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][string]$Destination
+    )
+    $text = Get-Content -LiteralPath $Source -Raw
+    $text = $text `
+        -replace '\[docs/04-ai-loop\.md\]\(04-ai-loop\.md\)', '[docs/ai-loop.md](ai-loop.md)' `
+        -replace '\[06-release\.md\]\(06-release\.md\)', '開発リポジトリの docs/06-release.md'
+    # **BOM なしで書く**（Get-Content -Raw は BOM を落とすので、開発リポジトリ側の
+    # BOM 付き .md を読んでも同じバイト列になる）。従来 package-kit が配っていた形と同じ
+    Set-Content -LiteralPath $Destination -Value $text -NoNewline -Encoding utf8NoBOM
 }
 
 function Start-UappBackgroundProcess {

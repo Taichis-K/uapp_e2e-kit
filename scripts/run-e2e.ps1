@@ -419,13 +419,83 @@ function Send-E2eEvidence {
     Send-DashEvent -Kind "evidence.e2e" -StartPath $root -Data $data
 }
 
-# 設定解決: キット内（導入配置: <project>\uapp_e2e\e2e-config.json）→ プロジェクト直下（本リポジトリのサンプル配置）
-$configPath = Join-UappPath $root "e2e-config.json"
-if (-not (Test-Path -LiteralPath $configPath)) {
-    $configPath = Join-UappPath $projectDir "e2e-config.json"
+# 設定解決。
+#
+# **`-ProjectPath` が明示されたときは、対象の配下だけを見る**（issue #39）。
+# 注入モードは「キットは 1 か所（ハブ）に置き、対象へ一時的に貸し出す」運用なので、
+# 以前は `$root\e2e-config.json`（＝ハブ）を第 1 候補にしており、**ハブがフル導入済みだと
+# 必ずヒットして、台帳が対象へ割り当てた `editorBridgePort` が無視されていた**
+# （導入先が報告・こちらでも A/B で再現）。
+#
+# **直るのはこのスクリプトが読む値だけ**（`editorBridgePort` / `devicePort` / `package` /
+# `activity` / `tests`）。`uiType` は **run-e2e が読んでいない** ― 使うのは
+# `driver/e2e_driver/journey.py` で、**探索の起点がジャーニーの出力先（キット側）**なので、
+# 注入モードでは**いまもハブの e2e-config.json を読む**（レビューで判明・別 issue）。
+# `package` / `activity` を使うのはデバイス経路だけで、注入モードが書く config では空。
+#
+# **`tests` は対象の設定から読むが、pytest はハブの `driver\` から起動する**（非対称）。
+# 注入モードは `tests = "tests"` を書くので一致するが、**フル導入済みの対象を
+# `-ProjectPath` で回すと、対象が独自に設定した `tests`（例 `tests/mytests`）が
+# ハブ側で解決される**。テスト内訳と `-RequireProjectTests` の門もハブ基準のまま
+# （こちらは従来どおりで整合）。レビューで指摘された既知の非対称。
+#
+# **キット側（`$root`）へフォールバックしない**のが要点。一度フォールバックを残したが、
+# 「対象に設定が無い」ときに**黙ってハブの設定で走る**という同じ事故が残っていた
+# （レビューが実測。`-ProjectPath` 指定時に `$root` 候補が正解になるケースは、
+# 導入先レイアウト・開発リポのサンプル・両方にある場合のいずれでも現れない）。
+# **エディタ経路では偽の緑にならない** ― `UAPP_E2E_PROJECT_PATH` を渡しており、
+# ドライバが ping の `project` と照合して `WrongBridgeTargetError` で止める（導入先が実測）。
+# **ただしこの保護は `UAPP_E2E_EDITOR=1` を宣言した接続にしか効かない**（CLAUDE.md の約束）。
+# **デバイス経路には接続先ガードが無い**ので、そこで取り違えると
+# 「`-ProjectPath` に clone と書いたのにハブのアプリを検証する」＝本物の偽の緑になる。
+# つまりデバイス経路では、**この解決順が唯一の防壁**。
+#
+# `-ProjectPath` を付けない通常実行（自プロジェクト・開発リポのサンプル）の順序は変えない。
+if ($ProjectPath) {
+    # 導入配置（<clone>\uapp_e2e\e2e-config.json）→ 注入配置・サンプル配置（<clone>\e2e-config.json）
+    $configCandidates = @((Join-UappPath $projectDir "uapp_e2e\e2e-config.json"),
+                          (Join-UappPath $projectDir "e2e-config.json"))
+} else {
+    $configCandidates = @((Join-UappPath $root "e2e-config.json"),
+                          (Join-UappPath $projectDir "e2e-config.json"))
 }
-if (-not (Test-Path -LiteralPath $configPath)) { throw "e2e-config.json がありません（$root または $projectDir 直下）" }
+$configPath = $configCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+if (-not $configPath) {
+    throw ("e2e-config.json が見つかりません。探した場所: " + ($configCandidates -join " / ") +
+           $(if ($ProjectPath) {
+               "。**-ProjectPath を指定した実行では、対象の配下だけを見る**" +
+               "（キット側の設定へは落とさない ― 落とすと対象ではなくキット側のアプリ／ポートで走る）"
+             } else { "" }))
+}
 $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
+# **どの設定を読んだかを 1 行出す**（issue #39）。注入モードでは「対象を指定したのに
+# ハブの設定で走る」ことが起こりえた ― **表示があれば読み違いの余地が無い**
+# （導入先の自作ラッパーは出していた）。接続先ポートは下で決まるのでそこでも出す
+Write-Host "[$projectName] 対象: $projectDir"
+Write-Host "[$projectName] 設定: $configPath"
+if ($Editor) {
+    # **接続先を先に出す**（issue #39）。注入モードで「対象を指定したのにハブのポートへ繋ぐ」が
+    # 起きたとき、**接続失敗のメッセージだけでは真因（設定解決順）に辿り着けなかった**。
+    # **途中で落ちても見えるよう、設定を読んだ直後に出す** ― 実際に一度、エディタ準備の
+    # あとに置いて「落ちると出ない」状態を作った。
+    #
+    # **「既定 13333」と断定しない**。設定に `editorBridgePort` が無いとき、こちらは
+    # 環境変数を立てないので、**ドライバが pytest の CWD（キット側の driver\）から
+    # 祖先を遡って e2e-config.json を探す** ― フル導入済みのハブでは**ハブの値**が使われる
+    # （レビューが実測。表示だけ 13333 と出して実際は違う、という一番避けたい形だった）。
+    # `-ProjectPath` 指定時は下で明示的に立てるので、そちらは決定値を出せる
+    $portShown = if ($env:UAPP_E2E_BRIDGE_PORT) {
+                     "$($env:UAPP_E2E_BRIDGE_PORT)（環境変数 UAPP_E2E_BRIDGE_PORT。設定より優先）"
+                 } elseif ($config.editorBridgePort) {
+                     "$($config.editorBridgePort)（上の設定の editorBridgePort）"
+                 } elseif ($ProjectPath) {
+                     "13333（上の設定に editorBridgePort が無いため既定。-ProjectPath 指定なので明示的に固定する）"
+                 } else {
+                     "未指定（設定にも環境変数にも無し → ドライバが driver\ から上位探索し、" +
+                     "見つからなければ 13333）"
+                 }
+    Write-Host "[$projectName] エディタ接続先ポート: $portShown"
+}
 $package = $config.package
 $activity = $config.activity
 # デバイス内で待ち受けるポート（e2e-config.json の devicePort、未指定は 13333）。
@@ -925,6 +995,13 @@ if ($Editor) {
     if (-not $savedBridgePort -and $config.editorBridgePort) {
         $editorPortToPass = [int]$config.editorBridgePort
     }
+    elseif (-not $savedBridgePort -and $ProjectPath) {
+        # **`-ProjectPath` 指定時は、設定に無くても必ず立てる**（issue #39）。
+        # 立てないとドライバが CWD（キット側の driver\）から上位探索し、
+        # **フル導入済みのハブの e2e-config.json を拾う**（レビューが実測）。
+        # 対象を明示した実行でキット側の値へ落ちるのは、注入運用では常に事故
+        $editorPortToPass = 13333
+    }
     Push-Location (Join-UappPath $root "driver")
     try {
         # **環境変数は try の中でだけ触る**（下の finally が必ず戻す）
@@ -945,6 +1022,10 @@ if ($Editor) {
         $env:UAPP_E2E_UNITY_CLI = $unityCli
         $env:UAPP_E2E_PROJECT_PATH = $projectDir
         if ($JourneyDir) { $env:UAPP_E2E_JOURNEY_DIR = $JourneyDir }
+        # **どの設定で走ったかをジャーニーへ残す**（issue #41）。serve は既定では
+        # journey ディレクトリから祖先を遡って設定を探すが、注入モードでは出力先が
+        # キット側なので**対象ではなくハブの設定**を拾う（uiType もポートも）
+        $env:UAPP_E2E_CONFIG_PATH = $configPath
         # @(...) で必ず配列にする: 1要素の戻り値はスカラー文字列に化け、@splat が1文字ずつ展開される
         $junitArgs = @(Enable-JunitOutput -Tag "editor")
         if ($PytestArgs) {
@@ -975,6 +1056,7 @@ if ($Editor) {
         if ($savedCliProxyEnv) { $env:UAPP_E2E_UNITY_CLI_PROXY_DISABLE = $savedCliProxyEnv }
         else { Remove-Item -LiteralPath Env:\UAPP_E2E_UNITY_CLI_PROXY_DISABLE -ErrorAction SilentlyContinue }
         Remove-Item -LiteralPath Env:\UAPP_E2E_JOURNEY_DIR -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath Env:\UAPP_E2E_CONFIG_PATH -ErrorAction SilentlyContinue
         # 設定した分は全部消す（消し漏れると、次に手で pytest を回したときに
         # 古いプロジェクトのエディタへスクリーンショットを撮りに行く）
         Remove-Item -LiteralPath Env:\UAPP_E2E_UNITY_CLI -ErrorAction SilentlyContinue
@@ -1111,6 +1193,7 @@ $env:UAPP_E2E_PACKAGE = $package
 $env:UAPP_E2E_DEVICE_PORT = $devicePort
 if ($DeviceSerial) { $env:UAPP_E2E_DEVICE_SERIAL = $DeviceSerial }
 if ($JourneyDir) { $env:UAPP_E2E_JOURNEY_DIR = $JourneyDir }
+$env:UAPP_E2E_CONFIG_PATH = $configPath   # issue #41（上と同じ理由）
 Push-Location (Join-UappPath $root "driver")
 try {
     # ターゲット（デバイス・ホスト側ポート）ごとに XML を分ける＝並行実行が互いを壊さない。
@@ -1139,6 +1222,7 @@ try {
     Remove-Item -LiteralPath Env:\UAPP_E2E_DEVICE_PORT -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath Env:\UAPP_E2E_DEVICE_SERIAL -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath Env:\UAPP_E2E_JOURNEY_DIR -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath Env:\UAPP_E2E_CONFIG_PATH -ErrorAction SilentlyContinue
 }
 
 $breakdown = Show-TestBreakdown

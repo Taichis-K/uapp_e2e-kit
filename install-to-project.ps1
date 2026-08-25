@@ -104,10 +104,66 @@ function Get-KitManifestStatus([string]$Target) {
               Path = $manifestPath }
 }
 
+function Test-KitOwnedRelativePath {
+    <#
+      .SYNOPSIS
+      「導入先のこのファイルは、キットが配ったものか」を判定する（所有判定の唯一の場所）。
+
+      .NOTES
+      **manifest / uninstall が使う所有判定と、[情報] で並べる「キットが配ったものではない
+      ファイル」の判定は、同じ規則でなければならない**。以前は同じ規則を 2 か所へ手書きしており、
+      **開発専用スクリプトと同名の自作**（例: `scripts\verify-all.ps1`）で食い違っていた:
+        所有側 …… 除外されるので manifest に載らない（正しい）
+        stray 側 … 「キット側に実在する」で所有と見なし、**一覧から落ちる**（誤り）
+      その結果、**#40 で報告された当の名前だけ退避の案内が出ない**のに、
+      `uninstall.ps1` は `uapp_e2e\scripts\` を丸ごと消す＝黙って消える側に回っていた
+      （2026-08-25 に mac セッションの独立検証が発見）。
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Dir,
+        [Parameter(Mandatory)][string]$Rel,
+        [Parameter(Mandatory)]$Source,
+        [Parameter(Mandatory)][string]$ScriptsDir
+    )
+    # 値が**ファイル名の配列**なら列挙（docs のようにコピー元がばらばらな場所）、
+    # **ディレクトリ**なら同じ相対パスの実在で判定する
+    if ($Source -is [array]) { return ($Source -contains $Rel) }
+    if (-not (Test-Path -LiteralPath (Join-UappPath $Source $Rel))) { return $false }
+    # **キット側に在っても、配らないものは所有ではない**。開発リポジトリから導入すると
+    # `$src.Scripts` には開発専用スクリプトも実在するので、**導入先が同名の自作を置いていると
+    # 「キット所有」に化け、次の更新で掃除ループが無警告で削除する**（配布 zip 経由では起きない
+    # ＝ docs/06 の zip 経由の検証では原理的に捕まらない型）
+    if ($Dir -eq $ScriptsDir -and ((Get-UappDevOnlyScript) -contains $Rel)) { return $false }
+    return $true
+}
+
 # キット所有ファイル（=上書き更新の対象）の列挙。改変検知マニフェストとバックアップで共用する。
 # プロジェクト所有（e2e-config.json / conftest.py / 自作テスト / config\local.json / Builds\）は含めない。
-function Get-KitOwnedFiles($target) {
+function Get-KitOwnedFiles($target, $sourceRoots) {
+    <#
+      .SYNOPSIS
+      導入先のうち**キットが配ったファイル**を列挙する（改変検知・uninstall の対象）。
+
+      .NOTES
+      **導入先が置いた自作ファイルを含めてはいけない**（issue #40）。
+      以前は `uapp_e2e\scripts\` などを**丸ごと走査**していたため、
+      `scripts-local\` が規定される前にそこへ置かれた導入先の自作 .ps1 が
+      「キット所有」として manifest に載り、**更新のたびに改変警告、移動すると
+      `-VerifyManifest` が不在で exit 1** になっていた（導入先が報告）。
+
+      `$sourceRoots` は「**導入先の絶対ディレクトリ → 対応するキット側のディレクトリ**」。
+      載せたディレクトリでは、**キット側に同じ相対パスのファイルが在るものだけ**を所有とする。
+
+      **呼び出し元はこの下の 1 か所だけで、必ず対応表を渡す**。
+      `$sourceRoots` が無いときの分岐は**今は到達しない**（将来 2 つ目の呼び出しが
+      増えたときに旧挙動へ落とすための保険）。
+      **`uninstall.ps1` はこの関数を呼ばない** ― あちらは固定リストで
+      `uapp_e2e\scripts\` などを**ディレクトリごと消し、manifest を参照しない**。
+      つまり **#40 で消えたのは「警告」だけで、削除される事実は変わっていない**。
+      そのため下で「キット側に無いファイル」を [情報] として並べ、移動を促す。
+    #>
     $kit = Join-UappPath $target "uapp_e2e"
+    $scriptsDir = Join-UappPath $kit "scripts"
     $paths = @()
     # スキルはキットの e2e-* の4つのみ（skills\ 全体を列挙するとユーザーの無関係スキルまで
     # 「キット所有」として改変検知の警告対象になってしまう。uninstall.ps1 の削除対象とも同期）
@@ -131,8 +187,18 @@ function Get-KitOwnedFiles($target) {
             # 改変検知が丸ごと無効になる ― 外部レビュー指摘）
             $dirFull = Resolve-UappFsPath $dir
             $paths += Get-UappTreeFile $dir | Where-Object {
-                $segments = ($_.Substring($dirFull.Length).TrimStart('\', '/')) -split '[\\/]'
-                -not (($segments -contains '__pycache__') -or ($segments -contains 'DerivedData'))
+                $rel = $_.Substring($dirFull.Length).TrimStart('\', '/')
+                $segments = $rel -split '[\\/]'
+                if (($segments -contains '__pycache__') -or ($segments -contains 'DerivedData')) { return $false }
+                # **キット側に同じファイルが在るときだけ所有**（issue #40）。
+                # 対応表が無い呼び出しでは従来どおり全部通す
+                # **`$null` かどうかで見る**。`-not` だと**空配列も真**になり、
+                # 「対応表が無い＝全部所有」へ落ちる（inject の記録が空配列で define を
+                # 全消しした事故と同じクラス。レビュー指摘）
+                if ($null -eq $sourceRoots) { return $true }
+                if (-not $sourceRoots.Contains($dir)) { return $true }
+                $source = $sourceRoots[$dir]
+                return (Test-KitOwnedRelativePath -Dir $dir -Rel $rel -Source $source -ScriptsDir $scriptsDir)
             }
         }
     }
@@ -228,6 +294,16 @@ if ($VerifyManifest) {
     $status = Get-KitManifestStatus $target
     if (-not $status) {
         Write-Host ""
+        # **注入モードの対象では installer を勧めてはいけない**（レビュー指摘）。
+        # inject 側は「フル導入済みの対象への注入」を常に拒否するので、
+        # 案内どおり installer を流すと**以後 -Eject の前提が崩れる**
+        if (Test-Path -LiteralPath (Join-UappPath $target "uapp_e2e-inject.json")) {
+            Write-Host "この対象は**注入モード**です（uapp_e2e-inject.json があります）。"
+            Write-Host "  改変検知（kit-manifest.json）はフル導入向けの機能で、注入対象には記録がありません。"
+            Write-Host "  **installer を実行しないでください** ― フル導入になると -Eject の前提が崩れます。"
+            Write-Host "  注入したものの確認は inject-to-project.ps1 -List、撤去は -Eject です。"
+            exit 2
+        }
         Write-Host "kit-manifest.json がありません（未導入か、旧版の導入で記録が無い）:"
         Write-Host "  $(Join-UappPath (Join-UappPath $target 'uapp_e2e') 'kit-manifest.json')"
         Write-Host "この状態では改変検知は働きません。installer を実行し直すと記録が作られます"
@@ -468,7 +544,9 @@ Write-Host "  [OK] uapp_e2e\（scripts / driver / config テンプレ / oslayer�
 # --- 2.5 ドキュメントと AI 向け運用ガイド ---
 New-Item -ItemType Directory -Force (Join-UappPath $kit "docs") | Out-Null
 Copy-Item -LiteralPath $src.Doc02 (Join-UappPath $kit "docs\02-protocol.md") -Force
-Copy-Item -LiteralPath $src.Doc05 (Join-UappPath $kit "docs\05-install-to-project.md") -Force
+# **docs/05 だけはリンクをキット同梱の形へ直してから配る**（package-kit と共通の Copy-UappKitDoc05）。
+# zip レイアウトでは既に置換済みで、置換は冪等なので同じバイト列になる
+Copy-UappKitDoc05 -Source $src.Doc05 -Destination (Join-UappPath $kit "docs\05-install-to-project.md")
 Copy-Item -LiteralPath $src.Doc07 (Join-UappPath $kit "docs\07-viewer.md") -Force
 Copy-Item -LiteralPath $src.AiLoop (Join-UappPath $kit "docs\ai-loop.md") -Force
 Copy-Item -LiteralPath $src.ClaudeMd (Join-UappPath $kit "CLAUDE.md") -Force
@@ -554,8 +632,170 @@ $manifestEntries = [ordered]@{}
 if (($rootAgentsCreated -or $prevRootAgentsMarker) -and (Test-Path -LiteralPath $rootAgentsPath)) {
     $manifestEntries["__rootAgentsMdByInstaller"] = $true
 }
-foreach ($f in (Get-KitOwnedFiles $target | Sort-Object)) {
+# **キット側の実体と突き合わせて所有を決める**（issue #40）。
+# 走査だけだと、導入先が `uapp_e2e\scripts\` へ置いた自作ファイルまで
+# 「キット所有」として記録され、更新のたびに改変警告 → 移動すると不在で exit 1 になっていた。
+# **キーは走査するディレクトリ、値は対応するキット側のディレクトリ**。
+# ここに載せていないディレクトリ（スキル等）は従来どおり全部所有として扱う
+# （それらはキット固有の名前で、導入先の物が混ざる余地が無い）
+$ownedSourceMap = @{
+    (Join-UappPath $target "Assets\uapp_e2e\E2EBridge") = $src.Bridge
+    (Join-UappPath $kit "scripts")                       = $src.Scripts
+    (Join-UappPath $kit "driver\e2e_driver")             = (Join-UappPath $src.Driver "e2e_driver")
+    (Join-UappPath $kit "oslayer")                       = $src.OsLayer
+    # **docs はコピー元がばらばら**（$src.Doc02 等）なのでディレクトリで対応付けられない。
+    # 配るファイル名を列挙する。**ここを更新し忘れると、そのファイルが所有から落ちて
+    # 改変検知と uninstall の照合が効かなくなる**ので、下の検査で件数を見る
+    (Join-UappPath $kit "docs") = @("02-protocol.md", "05-install-to-project.md",
+                                    "07-viewer.md", "ai-loop.md")
+}
+# **対応表が壊れていたら止める**（レビューが実測）。値を間違えると、そのディレクトリ配下が
+# **無警告で manifest から丸ごと消え**、`-VerifyManifest` は真っ緑のまま改変検知だけが死ぬ。
+# ①コピー元（ディレクトリ指定のもの）が実在するか ②配置済みの各ディレクトリから
+# 1 件以上を所有と判定できているか、の 2 つを見る
+foreach ($entry in $ownedSourceMap.GetEnumerator()) {
+    if ($entry.Value -is [array]) {
+        # **配列（ファイル名の列挙）は、その名前が実際に配置されているかを見る**。
+        # 件数も実在も見ないと、綴り違い 1 つでそのファイルが所有から落ちる
+        if (-not $entry.Value) {
+            throw "キット所有の対応表が壊れています（空の一覧）: $($entry.Key)"
+        }
+        foreach ($name in $entry.Value) {
+            if ((Test-Path -LiteralPath $entry.Key) -and
+                -not (Test-Path -LiteralPath (Join-UappPath $entry.Key $name))) {
+                throw ("キット所有の対応表が壊れています（配置されていないファイル名）: " +
+                       "$($entry.Key) の一覧に $name があるが実体が無い")
+            }
+        }
+        continue
+    }
+    if (-not (Test-Path -LiteralPath $entry.Value)) {
+        throw ("キット所有の対応表が壊れています（コピー元が見つからない）: " +
+               "$($entry.Key) → $($entry.Value)。install-to-project.ps1 の " +
+               '$ownedSourceMap を直してください（放置すると、そのディレクトリが manifest から' +
+               "無警告で落ち、改変検知と uninstall の照合が効かなくなります）")
+    }
+}
+# **キット所有でないものを [情報] で並べる**（issue #40）。
+# #40 の前は、これらが「キット所有」として記録されていたので**改変警告が出て**、
+# 結果的に「`scripts-local\` へ移せ」と気づけていた。#40 で警告は消えたが、
+# **`uninstall.ps1` は今も `uapp_e2e\scripts\` などをディレクトリごと消す**
+# （あちらは manifest を見ない）。**気づく機会だけ消して削除は残る**のは割に合わないので、
+# 移動を促す 1 行を出す。**警告ではなく情報**（正常な運用を止めない）
+$strays = @()
+foreach ($entry in $ownedSourceMap.GetEnumerator()) {
+    if (-not (Test-Path -LiteralPath $entry.Key)) { continue }
+    $keyFull = Resolve-UappFsPath $entry.Key
+    foreach ($f in (Get-UappTreeFile $entry.Key)) {
+        $rel = $f.Substring($keyFull.Length).TrimStart('\', '/')
+        $segments = $rel -split '[\\/]'
+        if (($segments -contains '__pycache__') -or ($segments -contains 'DerivedData')) { continue }
+        # **所有判定は Test-KitOwnedRelativePath に寄せる**（同じ規則を 2 か所へ書かない）。
+        # ここが所有側とずれると、キットが配っていないファイルが一覧から落ちる
+        $owned = Test-KitOwnedRelativePath -Dir $entry.Key -Rel $rel -Source $entry.Value `
+                                           -ScriptsDir (Join-UappPath $kit "scripts")
+        if (-not $owned) {
+            $strayPath = $f.Substring((Resolve-UappFsPath $target).Length).TrimStart('\', '/')
+            # **由来を 3 つに分ける**（キットが配った / 導入先が置いた / 判定できない）。
+            # 判定材料は**前回の kit-manifest.json** しかないので、記録が無い導入
+            # （手で入れた・記録を消した・注入モードの対象）では**どちらとも言えない**。
+            # 2 択へ押し込むと、どちらかの断定が必ず嘘になる（mac セッションの指摘）。
+            # **由来で案内が変わる** ― キットが配った残骸に `scripts-local\` を案内すると、
+            # **古い配布物を導入先の資産として保存させる**ことになる
+            $origin = if ($null -eq $script:prevManifest) { "unknown" }
+                      elseif ($prevOwned -contains (ConvertTo-UappPathKey $strayPath)) { "kit-stale" }
+                      else { "local" }
+            $strays += [pscustomobject]@{
+                Path   = $strayPath
+                Area   = $entry.Key
+                Origin = $origin
+            }
+        }
+    }
+}
+if ($strays) {
+    # **領域ごとに違う退避先を出す**（レビュー指摘）。一律で `scripts-local\` を案内していたが、
+    # **Assets 配下の .cs をそこへ移すとコンパイル対象から外れ、e2e_driver のモジュールは
+    # import できなくなる** ― 案内どおり動くと壊れる領域があった
+    $advice = [ordered]@{
+        (Join-UappPath $kit "scripts")           = "uapp_e2e\scripts-local\（既定の uninstall で保持されます）"
+        (Join-UappPath $kit "docs")              = "uapp_e2e\scripts-local\ など、キットが触らない場所へ"
+        (Join-UappPath $kit "driver\e2e_driver") = "driver\ の外（import 元を変える必要があります）"
+        (Join-UappPath $kit "oslayer")           = "キットが触らない場所へ"
+        (Join-UappPath $target "Assets\uapp_e2e\E2EBridge") =
+            "**Assets\ の中の別フォルダへ**（Assets の外へ出すとコンパイル対象から外れます）"
+    }
+    # 由来ごとに、見出しと「どうすればよいか」を変える。**観測したことだけを書く**
+    $strayGroups = [ordered]@{
+        "local"     = @{
+            # **「キットが配ったものではない」と断定しない。** 前回の記録に無いことから言えるのは
+            # 「**直前の導入では配っていない**」までで、もっと前のキットが配った残骸かもしれない。
+            # 記録は毎回上書きされ、キット所有でないものは載らないので、**配布対象から外れた
+            # ファイルが kit-stale と判定されるのは、外れた直後の 1 回だけ**（実測）。
+            # 2 回目以降はここへ落ちてくるため、ここで断定すると必ず嘘になる
+            Head = "[情報] いまのキットが配っていないファイルが、キットの領域にあります:"
+            Tail = ("  導入先が置いたものか、以前のキットが配った残骸かは、記録からは分かりません" +
+                    "（記録に残るのは直前の導入ぶんだけです）。" + [Environment]::NewLine +
+                    "  **uninstall.ps1 はこれらのディレクトリを丸ごと消します。** 導入先の資産だった場合の退避先:")
+            ShowAdvice = $true
+        }
+        "kit-stale" = @{
+            Head = "[情報] 以前のキットが配ったもので、いまは配布対象ではないファイルがあります:"
+            Tail = ("  キットの更新では消えません（自動で消すのは開発専用スクリプトの名前だけです）。" +
+                    [Environment]::NewLine +
+                    "  **導入先の資産ではないので、不要なら削除してよいものです。**")
+            ShowAdvice = $false
+        }
+        "unknown"   = @{
+            Head = "[情報] キットが置いたのか導入先が置いたのか判定できないファイルが、キットの領域にあります:"
+            Tail = ("  前回の所有記録（kit-manifest.json）が無い導入なので、由来を確かめられません。" +
+                    [Environment]::NewLine +
+                    "  **中身を見て決めてください。** 導入先の資産だった場合の退避先:")
+            ShowAdvice = $true
+        }
+    }
+    foreach ($originKey in $strayGroups.Keys) {
+        $group = @($strays | Where-Object { $_.Origin -eq $originKey })
+        if (-not $group) { continue }
+        $g = $strayGroups[$originKey]
+        Write-Host ""
+        Write-Host $g.Head
+        foreach ($f in ($group | Sort-Object Path | Select-Object -First 10)) { Write-Host "  $($f.Path)" }
+        if ($group.Count -gt 10) { Write-Host "  …ほか $($group.Count - 10) 件" }
+        Write-Host $g.Tail
+        if ($g.ShowAdvice) {
+            foreach ($area in ($group | Select-Object -ExpandProperty Area -Unique)) {
+                $rel = $area.Substring((Resolve-UappFsPath $target).Length).TrimStart('\', '/')
+                Write-Host "    $rel → $($advice[$area])"
+            }
+        }
+    }
+}
+
+foreach ($f in (Get-KitOwnedFiles $target $ownedSourceMap | Sort-Object)) {
     $rel = $f.Substring($target.Length + 1)
+    # **大小文字だけが違うキーは 1 つに潰れる**（`[ordered]@{}` は大小文字を区別しない）。
+    # **大小文字を区別する FS では `run-e2e.ps1` と `Run-E2E.ps1` が共存できる**ので、
+    # 後から入れた方が勝って**キット本体のエントリが manifest から黙って消える** ―
+    # その状態で `-VerifyManifest` を回すと「改変 0 件・exit 0」＝**偽の緑**になり、
+    # 改変検知だけが無効のまま気づけない（2026-08-25 に mac セッションが
+    # case-sensitive APFS で実測。**#40 の退行ではなく元からの性質**）。
+    # **Ordinal 化はしない** ― 大小文字違いのキーを 2 つ書けてしまい、読み側の
+    # `ConvertFrom-Json` が `keys with different casing` で落ちて**記録が二度と読めなくなる**
+    # （注入モードの台帳で同じ罠を踏んでいる）。**書く前に止めて、人に名前を直してもらう**
+    if ($manifestEntries.Contains($rel)) {
+        $existing = @($manifestEntries.Keys) | Where-Object { $_ -eq $rel } | Select-Object -First 1
+        throw ("大小文字だけが違うファイルがキットの領域にあります（改変検知の記録が作れません）:" + [Environment]::NewLine +
+               "  $existing" + [Environment]::NewLine +
+               "  $rel" + [Environment]::NewLine +
+               "kit-manifest.json のキーは大小文字を区別しないため、この 2 つは 1 件に潰れ、" +
+               "**キット本体のファイルが記録から消えて改変検知が無効になります**" +
+               "（-VerifyManifest が『改変 0 件』と言う偽の緑）。" +
+               "導入先の自作ファイルの名前を変える（または uapp_e2e\scripts-local\ へ移す）" +
+               "→ installer を再実行してください。" + [Environment]::NewLine +
+               "**ファイルの配置自体は完了しています。前回の kit-manifest.json はそのまま残しました**" + [Environment]::NewLine +
+               "そのため、この実行で更新されたファイルは -VerifyManifest から「改変」に見えます（記録が前回のままなので当然です）。名前を直して再実行すれば揃います")
+    }
     $manifestEntries[$rel] = Get-KitFileHash $f   # テキストは改行を正規化して記録（OS 間で揃える）
 }
 $manifestEntries | ConvertTo-Json | Set-Content -LiteralPath $manifestPath -Encoding utf8

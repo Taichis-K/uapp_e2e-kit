@@ -438,3 +438,97 @@ def test_os_agent_stop_never_raises(monkeypatch):
 
     monkeypatch.setattr(os_agent, "_post", boom)
     os_agent.stop()   # 例外にならないこと
+
+
+# ---------------------------------------------------------------------------
+# 記録した設定を serve が使う（issue #41）
+#
+# journey ディレクトリから祖先を遡って `e2e-config.json` を探す形だと、
+# **注入モードのようにジャーニーの出力先と対象が別ツリーにある構成**で
+# ハブの設定を拾い、**対象と違う uiType・違うポート**で動く。
+# 記録した側が「実際に使った設定」を知っているので、それを残して serve へ渡す。
+
+
+def _layout(tmp_path):
+    """ハブ（出力先・uGUI）と対象 clone（NGUI）を作る。"""
+    import json
+    hub_journey = tmp_path / "hub" / "uapp_e2e" / "Builds" / "journey"
+    hub_journey.mkdir(parents=True)
+    (tmp_path / "hub" / "uapp_e2e" / "e2e-config.json").write_text(
+        json.dumps({"uiType": "ugui", "editorBridgePort": 13343}), encoding="utf-8")
+    clone_config = tmp_path / "clone" / "e2e-config.json"
+    clone_config.parent.mkdir(parents=True)
+    clone_config.write_text(
+        json.dumps({"uiType": "ngui", "editorBridgePort": 13344}), encoding="utf-8")
+    return hub_journey, clone_config
+
+
+def _write_journey(out_dir, config_path=None):
+    import json
+    from e2e_driver import journey
+    data = {"format": journey.FORMAT, "screens": [], "transitions": [], "tests": []}
+    if config_path is not None:
+        data["configPath"] = str(config_path)
+    (out_dir / "journey.json").write_text(json.dumps(data), encoding="utf-8")
+
+
+def _resolved_ui_type(out_dir):
+    """**serve が使う本物の解決関数**を通して uiType を決める。
+
+    ここで解決順を再実装すると、**実装を変えてもテストが素通りする**
+    （実際に変異テストで検出できなかった）。`resolve_config_start` を呼ぶこと。
+    """
+    from e2e_driver import journey
+    return journey._find_ui_type(journey.resolve_config_start(out_dir))
+
+
+def test_recorded_config_wins_over_the_search(tmp_path):
+    """記録があれば**対象の設定**を使う（探索してハブを拾わない）。"""
+    out, clone_config = _layout(tmp_path)
+    _write_journey(out, clone_config)
+    assert _resolved_ui_type(out) == "ngui"
+
+
+def test_search_is_used_when_nothing_was_recorded(tmp_path):
+    """**対照**: 記録が無い（旧い journey.json）なら従来どおり探索する。
+
+    これが無いと、上のテストが「記録の有無」ではなく別の何かに反応していても気づけない。
+    """
+    out, _ = _layout(tmp_path)
+    _write_journey(out, None)
+    assert _resolved_ui_type(out) == "ugui"
+
+
+def test_recorded_config_that_no_longer_exists_is_ignored(tmp_path):
+    """**対照**: 実在しないパスが記録されていたら無視して探索へ落ちる。
+
+    記録は絶対パスなので、journey を別マシンへ持って行くと外れる。
+    そこで止まると、レポートが開けなくなる。
+    """
+    from e2e_driver import journey
+    out, _ = _layout(tmp_path)
+    _write_journey(out, tmp_path / "nowhere" / "e2e-config.json")
+    assert journey._recorded_config(out) is None
+    assert _resolved_ui_type(out) == "ugui"
+
+
+def test_save_records_the_config_path_from_the_environment(tmp_path, monkeypatch):
+    """`UAPP_E2E_CONFIG_PATH` があれば journey.json へ残す。"""
+    import json
+    from e2e_driver import journey
+    out, clone_config = _layout(tmp_path)
+    monkeypatch.setenv("UAPP_E2E_CONFIG_PATH", str(clone_config))
+    journey.JourneyRecorder(client=object(), out_dir=out, enabled=True).save()
+    saved = json.loads((out / "journey.json").read_text(encoding="utf-8"))
+    assert saved.get("configPath") == str(clone_config)
+
+
+def test_save_omits_the_config_path_when_unset(tmp_path, monkeypatch):
+    """**対照**: 環境変数が無ければ書かない（旧い journey.json と同じ形）。"""
+    import json
+    from e2e_driver import journey
+    out, _ = _layout(tmp_path)
+    monkeypatch.delenv("UAPP_E2E_CONFIG_PATH", raising=False)
+    journey.JourneyRecorder(client=object(), out_dir=out, enabled=True).save()
+    saved = json.loads((out / "journey.json").read_text(encoding="utf-8"))
+    assert "configPath" not in saved

@@ -184,6 +184,9 @@ adb.uninstall(pkg); adb.install(apk)                      # クリーンイン�
    2 種類が残る。後者は「待てば直るはずのエラーを取りこぼした」可能性があるので、
    **出た文言を報告する**（分類に足せば直る。issue #38 の実例）。
    ファイルは実行の先頭で切り詰められ、以後は追記される。
+7. **出力を丸ごとファイルへ残すときは `Start-Transcript` か `6>&1`**。
+   キットの進捗行は `Write-Host`（情報ストリーム）なので **`2>&1 | Tee-Object` では取れない**
+   （pytest の標準出力だけが残る）。導入先で実際に踏まれた
    なお**自作の .ps1 から `unity cmd` を直接叩く場合は、スクリプト先頭で
    `[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)` を宣言する**
    （コンソールを持たない起動では OEM に落ち、日本語を含む応答だけ JSON が壊れる）

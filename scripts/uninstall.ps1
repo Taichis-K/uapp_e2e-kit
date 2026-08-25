@@ -77,7 +77,11 @@ if ($Purge) {
     Remove-Reported $kit "uapp_e2e\（全体。ジャーニー記録・更新バックアップ含む）"
 } else {
     # キット所有のみ削除。プロジェクト所有（e2e-config.json / driver\tests\ の自作テストと conftest.py /
-    # config\local.json / Builds\）は残す。列挙は install-to-project.ps1 の Get-KitOwnedFiles と同期
+    # config\local.json / Builds\）は残す。**列挙は install-to-project.ps1 の Get-KitOwnedFiles とは別実装**
+    # （同期していない）。あちらは issue #40 で「キットが配ったファイルだけ」を manifest へ
+    # 記録する形になったが、**こちらはディレクトリごと消す**ので、導入先がここへ置いた
+    # 自作ファイルも一緒に消える。installer は実行時にそれを [情報] として並べ、
+    # scripts-local\ への移動を促す（#40 で改変警告が消えたぶんの導線）
     # oslayer はキット所有（0.1.9 で同梱）だが、中の DerivedData は導入先でビルドした
     # 生成物＝プロジェクト所有（installer の manifest も除外している）。既定ではキット所有分だけ
     # 消し、DerivedData が無ければディレクトリごと消える（-Purge は uapp_e2e\ 全体を消すので対象外）

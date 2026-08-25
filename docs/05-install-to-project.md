@@ -331,6 +331,26 @@ AVDとエディタ、複数エディタの同時運用のポート設計は [doc
 （README のみキット所有）。ただし `uninstall.ps1 -Purge` は `uapp_e2e/` 全体を消すので、
 そこには含まれる（自作テストや `Builds/` と同じ扱い）。
 
+**「キット所有」は場所ではなく、キットが実際に配ったファイルで決まる**（v0.1.14 で変更）。
+`uapp_e2e/scripts/` に導入先が置いた自作ファイルは **`kit-manifest.json` に載らない**
+＝改変検知の対象にならず、`-VerifyManifest` も 1 を返さない。
+以前は場所で決めていたため、**自作分が「キット所有」として記録され、更新のたびに改変警告、
+`scripts-local/` へ移すと今度は「不在」で `-VerifyManifest` が 1** になっていた
+（導入先で実際に起きた）。
+
+**ただし `uninstall.ps1` の削除対象は変わっていない** ― あちらは manifest を見ず、
+`uapp_e2e/scripts/`・`uapp_e2e/docs/`・`uapp_e2e/driver/e2e_driver/`・
+`Assets/uapp_e2e/E2EBridge/` を**ディレクトリごと消す**。
+そこで installer は、キットが配っていないファイルを見つけると **[情報] で列挙し、
+領域ごとの退避先を案内する**:
+
+| 領域 | 退避先 |
+|---|---|
+| `uapp_e2e/scripts/` | `uapp_e2e/scripts-local/`（既定の uninstall で保持される） |
+| `uapp_e2e/docs/` ・ `uapp_e2e/oslayer/` | キットが触らない場所へ |
+| `uapp_e2e/driver/e2e_driver/` | `driver/` の外（import 元を変える必要がある） |
+| `Assets/uapp_e2e/E2EBridge/` | **`Assets/` の中の別フォルダへ**（外へ出すとコンパイル対象から外れる） |
+
 更新後の確認（AI向けランブック）:
 
 1. `uapp_e2e/VERSION` が新しい版数になっていることを確認

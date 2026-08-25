@@ -27,6 +27,18 @@ Codex 等は `uapp_e2e/AGENTS.md`（同）から参照される。
 **自作の運用スクリプトは `scripts-local\` へ置く**（`scripts\` はキット所有で、更新の上書きと
 `uninstall.ps1` の削除対象。自作分を置くと消える）。自作テストの `driver\tests\` と同じ扱い。
 
+**`scripts\` などに自作を置いても改変警告は出ない**（v0.1.14 から。`kit-manifest.json` へは
+**キットが実際に配ったファイルだけ**が載る）。**ただし `uninstall.ps1` は今もディレクトリごと消す**
+ので、消えて困るものは移すこと。導入・更新のたびに installer が **[情報] で列挙し、
+領域ごとの退避先を案内する**:
+
+| 見つかった場所 | 退避先 |
+|---|---|
+| `uapp_e2e\scripts\` | `uapp_e2e\scripts-local\` |
+| `uapp_e2e\docs\` ・ `uapp_e2e\oslayer\` | キットが触らない場所へ |
+| `uapp_e2e\driver\e2e_driver\` | `driver\` の外（import 元を変える） |
+| `Assets\uapp_e2e\E2EBridge\` | **`Assets\` の中の別フォルダへ**（外へ出すとコンパイルされない） |
+
 **キット所有ファイルを自分が改変したか確かめるには**
 `install-to-project.ps1 -ProjectPath <このプロジェクト> -VerifyManifest`（照合のみ・導入はしない。
 改変や不在があれば終了コード 1）。**installer は導入先には無い**ので、
@@ -190,6 +202,10 @@ python -m e2e_driver.journey ..\Builds\journey    # → report.html 生成（詳
      `Network error:` を「待っても直らない」と誤分類していた）
    **このファイルは 1 回の実行の先頭で切り詰められ、以後は追記される**（同じ走行の複数の
    呼び出しが並ぶ。前回の走行とは混ざらない）
+8. **出力を丸ごとファイルへ残したいときは `Start-Transcript` か `6>&1`**。
+   キットの進捗行は `Write-Host`（情報ストリーム）なので、**`2>&1 | Tee-Object` では
+   取れない**（pytest の標準出力だけが残り、キット側の行は端末にしか出ない）。
+   導入先で実際に踏まれた。**利用者にログを送ってもらう場面で `Tee-Object` を勧めないこと**
 
 **自作の PowerShell スクリプトから `unity cmd` を直接叩くときは、先頭で文字コードを明示する**。
 コンソールを持たない起動（`Start-Process -RedirectStandardOutput` 等。AI からの detached 実行が典型）
