@@ -1,4 +1,4 @@
-# E2E キット一式をプロジェクトから取り外す（install-to-project.ps1 の対）。
+﻿# E2E キット一式をプロジェクトから取り外す（install-to-project.ps1 の対）。
 # 導入時に <プロジェクト>\uapp_e2e\scripts\uninstall.ps1 として配布され、kit zip が無くても単体で実行できる。
 # 使い方: .\uninstall.ps1 [-ProjectPath <Unityプロジェクトのパス>] [-Purge]
 #   既定:   キット所有ファイルのみ削除。プロジェクト所有（e2e-config.json / driver\tests\ の自作テストと
@@ -112,6 +112,7 @@ if ($Purge) {
                        "driver\pytest.ini", "driver\requirements.txt",
                        "driver\tests\test_journey_unit.py", "driver\tests\test_adb_ui.py",
                        "driver\tests\test_client_unit.py", "driver\tests\test_bridge_smoke.py",
+                       "driver\tests\test_metrics_unit.py",
                        "config\local.sample.json", "config\e2e-config.sample.json",
                        # scripts-local は README だけキット所有。**ディレクトリは消さない**
                        # （中身は導入先の自作スクリプト＝プロジェクト所有。上の一覧に

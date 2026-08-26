@@ -1,4 +1,4 @@
-# 指定サンプルプロジェクトの APK インストール〜アプリ起動〜pytest 実行を一括で行う。
+﻿# 指定サンプルプロジェクトの APK インストール〜アプリ起動〜pytest 実行を一括で行う。
 # プロジェクト固有設定（package/activity/tests/deviceRotation）は <Project>\e2e-config.json から読む。
 # 使い方: .\scripts\run-e2e.ps1 [-Project unity-nis|unity-ngui-nis|unity-ngui-legacy] [-SkipInstall] [-PytestArgs "-k xxx"]
 #
@@ -148,78 +148,17 @@ function Format-CliArg {
 function Test-UnityProjectLocked {
     <#
       .SYNOPSIS
-      エディタがこのプロジェクトを掴んでいるか（二重に開かないためのガード）。
+      エディタがこのプロジェクトを掴んでいるか（真偽値）。**判定できないときは `$true`**（安全側）。
 
       .NOTES
-      **単一の根拠では判定できない**（2026-07-30 に Unity 6000.3.6f1 で実測。
-      内訳の表示は `scripts\unity-editor-status.ps1`）:
-
-      1. `-projectPath <対象>` を持つ GUI の Unity.exe プロセス … 起動直後から分かる唯一の信号
-      2. `Library\EditorInstance.json` の `process_id` の生存 … **ロード完了後**にしか現れず、
-         異常終了で古い pid が残る（生存確認が必須）
-      3. `Temp\UnityLockfile` の排他オープン … **開いているのに排他オープンできてしまう状態がある**
-         （起動途中・モーダルダイアログ待ち）。存在で判定するのも誤り（残骸で永久に開いている扱い）
+      **実装は `Get-UappUnityProjectLockState`（uapp-platform.ps1）に 1 つだけ置く**（issue #51）。
+      以前はこのファイルと `run-unity-tests.ps1` に**同じロジックが複製**されていた
+      （説明文だけが分岐していて、ロジックは同一だった＝機械で確認済み）。
+      **`$true` には「占有」と「判定不能」が混ざる**ので、
+      **文面を書き分けたい呼び出し側は `Get-UappUnityProjectLockState` を直接使うこと**。
     #>
     param([Parameter(Mandatory)][string]$ProjectDir)
-
-    try {
-        $target = Get-UappNormalizedDir (Resolve-Path -LiteralPath $ProjectDir).Path
-        foreach ($p in (Get-UappUnityProcess)) {   # プロセス列挙の OS 差は uapp-platform.ps1 が吸収する
-            $cmd = $p.CommandLine
-            # **コマンドラインが取れていない Unity プロセスは「無関係」と断定できない**。
-            # 安全側（掴んでいる扱い）に倒す（Windows で CIM が権限等で失敗したときに効く）
-            if (-not $p.CommandLineAvailable) {
-                Write-Warning "Unity プロセスのコマンドラインが取得できないため、占有されている前提で扱います"
-                return $true
-            }
-            if (-not $cmd) { continue }
-            if ($cmd -match '-projectPath\s+"?([^"]+?)"?(\s+-|\s*$)') {
-                $path = $Matches[1].Trim()
-                try { $path = Get-UappNormalizedDir (Resolve-Path -LiteralPath $path).Path } catch { }
-                # **batchmode でも対象パスが一致すれば占有**（別ターミナルの batchmode は
-                # 実際にロックを握る。この判定は自分が Unity を起動する前に行うので、
-                # 自分自身を誤検出することはない）
-                if ($path -ieq $target) { return $true }
-                continue
-            }
-            # **ウィンドウタイトルは実行可否に使わない（が、黙って素通りもしない）**。
-            # これは**トレードオフで、どちらに倒しても壊れる**（外部レビューで両方向を指摘された）:
-            #   止める  … 別の場所にある同名プロジェクトを開いているだけで**実行不能**（回避策が無い）
-            #   止めない… `-projectPath` 無し＋EditorInstance.json 生成前の起動途中を見落とす
-            # 代償の小さい後者を選び、**警告だけ出して続行**する。この非対称は意図的（docs/04-ai-loop.md）
-            if ($p.MainWindowTitle -and $p.MainWindowTitle -match '^(.+?)\s+-\s' -and
-                $Matches[1] -ieq (Split-Path $target -Leaf)) {
-                Write-Warning ("同名のプロジェクトを開いている Unity があります（タイトル: $($p.MainWindowTitle)）。" +
-                               "**対象と同じものなら閉じてから再実行**してください" +
-                               "（-projectPath を持たない起動のため、同一かどうか確定できません）")
-            }
-        }
-    } catch [System.InvalidOperationException] {
-        # **列挙できない＝「掴んでいない」と断定できない**。安全側（掴んでいる扱い）に倒す。
-        # ここで false を返すと、起動途中のエディタを見落として二重に開きにいく
-        Write-Warning ("Unity プロセスを列挙できませんでした（$($_.Exception.Message)）。" +
-                       "占有されている前提で扱います")
-        return $true
-    } catch { }
-
-    $instanceFile = Join-UappPath $ProjectDir "Library\EditorInstance.json"
-    if (Test-Path -LiteralPath $instanceFile) {
-        try {
-            $editorPid = [int]((Get-Content -LiteralPath $instanceFile -Raw | ConvertFrom-Json).process_id)
-            $proc = if ($editorPid) { Get-Process -Id $editorPid -ErrorAction SilentlyContinue } else { $null }
-            if ($proc -and $proc.ProcessName -eq "Unity") { return $true }
-        } catch { }
-    }
-
-    $lock = Join-UappPath $ProjectDir "Temp\UnityLockfile"
-    if (-not (Test-Path -LiteralPath $lock)) { return $false }
-    try {
-        $stream = [System.IO.File]::Open($lock, "Open", "ReadWrite", "None")
-        $stream.Close()
-        return $false
-    } catch {
-        return $true
-    }
+    return ((Get-UappUnityProjectLockState -ProjectDir $ProjectDir).State -ne "unlocked")
 }
 $root = (Resolve-Path -LiteralPath (Join-UappPath $PSScriptRoot "..")).Path
 

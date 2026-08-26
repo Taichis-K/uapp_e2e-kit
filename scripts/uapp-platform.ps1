@@ -307,10 +307,39 @@ function Get-UappUnityCliErrorClass {
         "connection was closed",
         "transport connection",
         "No Pipeline instance found",                    # 起動直後・リロード中（上の .NOTES 参照）
+        # **Pipeline サーバー自身が「まだ受けられない」と言っている状態**（issue #52。実物）:
+        #   Pipeline server returned 503 Service Unavailable: Server Busy. The Editor is still
+        #   settling after startup (importing assets / compiling scripts), so main-thread commands
+        #   are not serviceable yet. Retry shortly, or poll /api/status until it reports 'ready'.
+        # **素の "503" では照合しない。** プロキシ配下では**プロキシが 503 を返す**（下の
+        # Get-UappUnityCliGlobalArgs の .NOTES）。あちらは `--proxy-disable` を付けるまで
+        # 直らない＝**待っても無駄**なので、503 だけを鍵にすると設定ミスを延々と待つことになる。
+        # **この 503 は下の AND 判定で見る**（ここへ足すと片方の語だけで通ってしまう）
         "Network error"                                  # Unity CLI の接頭辞。**広すぎるが、
                                                          # 定型文が訳される環境ではこれだけが網**
                                                          # （訳されるかは環境で割れる。上の .NOTES）
     )
+    # **Pipeline が「起動直後でまだ受けられない」と言っている 503**（issue #52。実物）:
+    #   Pipeline server returned 503 Service Unavailable: Server Busy. The Editor is still
+    #   settling after startup (importing assets / compiling scripts), so main-thread commands
+    #   are not serviceable yet. Retry shortly, or poll /api/status until it reports 'ready'.
+    #
+    # **2 語が「同じ 1 通の中に両方ある」ことを条件にする**（AND）。理由は 2 つ:
+    #   ①`Server Busy` は一般的な語で、**プロキシが返す恒久的な 503 にも入りうる**。
+    #     片方だけで transient にすると、`--proxy-disable` を付けるまで直らない失敗を
+    #     既定 600 秒×コマンド数ぶん待つ（この境界がこの追加の主目的）
+    #   ②下の OR 判定は**全 message を連結した文字列**を見るので、
+    #     `Parameter Validation Failed` と別メッセージの `Server Busy` が混ざると
+    #     **transient が permanent を覆う**（codex レビューの指摘。直接評価で再現）
+    # 文言が変われば unknown として原文が証跡に残るので、**見てから足す**（この関数の原則）
+    foreach ($m in $messages) {
+        if (($m -like "*Server Busy*") -and ($m -like "*still settling after startup*")) {
+            return @{ Class  = "transient"
+                      Reason = "transient: Pipeline が起動直後で受け付けない（503 Server Busy / still settling）"
+                      Detail = $detail }
+        }
+    }
+
     foreach ($pat in $transient) {
         if ($detail -like "*$pat*") {
             return @{ Class = "transient"; Reason = "transient: $pat"; Detail = $detail }
@@ -704,6 +733,97 @@ function Test-UappPathEqual {
         [Parameter(Mandatory)][string]$B
     )
     return [string]::Equals($A, $B, [System.StringComparison]::Ordinal)
+}
+
+function Get-UappUnityProjectLockState {
+    <#
+      .SYNOPSIS
+      エディタがこのプロジェクトを掴んでいるかを **locked / unlocked / unknown** で返す。
+      `@{ State; Reason }`。
+
+      .NOTES
+      **issue #51。** 従来は `Test-UnityProjectLocked` が真偽値を返し、
+      **判定できないときも安全側で `$true`** にしていた（CIM がコマンドラインを取れない /
+      プロセス列挙が例外）。**`$true` に「占有」と「判定不能」が混ざる**ので、
+      呼び出し側は正しい案内を書けない ―
+      実際に issue #50 の修正中、`$true` を根拠に「**3 信号で確認**」と書いてしまった。
+      **止めるかどうかの判断は変えない**（`unknown` は安全側で「掴んでいる扱い」）。
+      **変わるのは文面だけ。**
+
+      **単一の根拠では判定できない**（2026-07-30 に Unity 6000.3.6f1 で実測）。3 つを合成する:
+      1. `-projectPath <対象>` を持つ Unity プロセス … 起動直後から分かる唯一の信号
+      2. `Library\EditorInstance.json` の `process_id` の生存 … **ロード完了後**にしか現れず、
+         異常終了で古い pid が残る（生存確認が必須）
+      3. `Temp\UnityLockfile` の排他オープン … **開いているのに排他オープンできてしまう状態がある**
+         （起動途中・モーダルダイアログ待ち。`Enter Safe Mode?` もこれ）。
+         ファイルの存在で判定するのも誤り（残骸で永久に「開いています」と言い続ける）
+      詳しい内訳を人が見たいときは `scripts\unity-editor-status.ps1`。
+
+      **mac ではロックファイルの信号は当てにならない**（Unix の助言ロックでは
+      `FileShare.None` が他プロセスの排他を再現しない）。残る 2 信号で判定する。
+
+      **`-projectPath` の照合は大小文字を区別しない**（`-match`）。
+      mac の `unity open` が起動する Unity は **`-projectpath`（小文字 p）** なので、
+      **`-cmatch` へ変えると mac で検出が丸ごと抜ける**（mac セッションの指摘）。
+    #>
+    param([Parameter(Mandatory)][string]$ProjectDir)
+
+    try {
+        $target = Get-UappNormalizedDir (Resolve-Path -LiteralPath $ProjectDir).Path
+        foreach ($p in (Get-UappUnityProcess)) {   # プロセス列挙の OS 差は uapp-platform.ps1 が吸収する
+            $cmd = $p.CommandLine
+            # **コマンドラインが取れていない Unity プロセスは「無関係」と断定できない**
+            if (-not $p.CommandLineAvailable) {
+                return @{ State  = "unknown"
+                          Reason = "Unity プロセスのコマンドラインを取得できなかった（権限等）" }
+            }
+            if (-not $cmd) { continue }
+            if ($cmd -match '-projectPath\s+"?([^"]+?)"?(\s+-|\s*$)') {
+                $path = $Matches[1].Trim()
+                try { $path = Get-UappNormalizedDir (Resolve-Path -LiteralPath $path).Path } catch { }
+                # **batchmode でも対象パスが一致すれば占有**
+                if ($path -ieq $target) {
+                    return @{ State = "locked"; Reason = "-projectPath が対象と一致する Unity プロセスがある" }
+                }
+                continue
+            }
+            # **ウィンドウタイトルは実行可否に使わない（が、黙って素通りもしない）**。
+            # 止めると同名の別プロジェクトで実行不能になり、止めないと起動途中を見落とす。
+            # 代償の小さい後者を選び、**警告だけ出して続行**する（意図的な非対称。docs/04-ai-loop.md）
+            if ($p.MainWindowTitle -and $p.MainWindowTitle -match '^(.+?)\s+-\s' -and
+                $Matches[1] -ieq (Split-Path $target -Leaf)) {
+                Write-Warning ("同名のプロジェクトを開いている Unity があります（タイトル: $($p.MainWindowTitle)）。" +
+                               "**対象と同じものなら閉じてから再実行**してください" +
+                               "（-projectPath を持たない起動のため、同一かどうか確定できません）")
+            }
+        }
+    } catch [System.InvalidOperationException] {
+        return @{ State  = "unknown"
+                  Reason = "Unity プロセスを列挙できなかった（$($_.Exception.Message)）" }
+    } catch { }
+
+    $instanceFile = Join-UappPath $ProjectDir "Library\EditorInstance.json"
+    if (Test-Path -LiteralPath $instanceFile) {
+        try {
+            $editorPid = [int]((Get-Content -LiteralPath $instanceFile -Raw | ConvertFrom-Json).process_id)
+            $proc = if ($editorPid) { Get-Process -Id $editorPid -ErrorAction SilentlyContinue } else { $null }
+            if ($proc -and $proc.ProcessName -eq "Unity") {
+                return @{ State = "locked"; Reason = "EditorInstance.json の process_id が生存している" }
+            }
+        } catch { }
+    }
+
+    $lock = Join-UappPath $ProjectDir "Temp\UnityLockfile"
+    if (-not (Test-Path -LiteralPath $lock)) {
+        return @{ State = "unlocked"; Reason = "3 信号のどれにも掛からなかった" }
+    }
+    try {
+        $stream = [System.IO.File]::Open($lock, "Open", "ReadWrite", "None")
+        $stream.Close()
+        return @{ State = "unlocked"; Reason = "ロックファイルを排他オープンできた" }
+    } catch {
+        return @{ State = "locked"; Reason = "Temp\UnityLockfile を排他オープンできない" }
+    }
 }
 
 function Get-UappDevOnlyScript {

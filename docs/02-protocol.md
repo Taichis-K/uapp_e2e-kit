@@ -1,4 +1,4 @@
-# E2EBridge プロトコル仕様 v1.0
+﻿# E2EBridge プロトコル仕様 v1.0
 
 ## トランスポート
 
@@ -179,6 +179,12 @@ UI 階層をツリー JSON で返す。AI がテストを書くための「地�
   常駐オブジェクトのノードには `"dontDestroyOnLoad": true` が付く
 - `path`: 指定するとそのサブツリーのみ
 - `probe`: hittable 判定の対象。`"selectable"`（Button等のみ、既定）| `"all"` | `"none"`
+- `activeOnly`: `true` で**非アクティブな枝を丸ごと省く**（既定 `false`）。
+  `dump` は `childCount` へ無条件に再帰するので、**画面に出ていない枝も JSON 化**される。
+  導入先の実機実測では同じ画面で **Debug ビルド 1,618ms / Release 86ms**、
+  しかも **`probe="none"` でも 1,507ms** ＝ **当たり判定ではなく走査と JSON 化が重い**。
+  **既定を `true` にしない**のは、「ダイアログは存在するがまだ非アクティブ」を確認する
+  使い方を黙って壊すため。押せる要素だけが要るなら `hittables` のほうが安い
 
 ノード形式:
 ```json
@@ -190,6 +196,38 @@ UI 階層をツリー JSON で返す。AI がテストを書くための「地�
  "children": [ ... ]}
 ```
 トップレベルは `{"screen": {...}, "scene": "SampleScene", "nodes": [...]}`。
+
+### hittables
+**いま押せる要素だけ**を、階層走査なしで返す。
+```json
+→ {"cmd": "hittables"}
+← {"screen": {"w": 1080, "h": 2340}, "scene": "SampleScene",
+   "items": [{"path": "Canvas/StartButton", "center": {"x": 390, "y": 230},
+              "interactable": true, "text": "はじめる"}]}
+```
+- **`dump(probe="all")` の hittable 集合と一致する**のが仕様（判定は同じ経路を通す）。
+  同梱の `test_hittables_matches_dump` が**集合の一致**で検証する（件数ではないので、
+  取りこぼしも余計な混入も落ちる）
+- **重い画面ほど効き、軽い画面では往復ぶん不利**。導入先の実機実測では、重い画面で
+  `dump()` 390ms に対して **107ms**、軽い画面では 53ms 対 64ms。
+  **`dump` の置き換えではなく、押せる要素だけが要るときの別口**
+- 読み込み済みの全シーン（`DontDestroyOnLoad` 含む）を見る。`scope` は取らない
+
+**列挙元は「スクリーン矩形を持てるもの」**で、**押せそうなものに絞ってはいけない**:
+
+| | 列挙元 | 絞ると落ちるもの |
+|---|---|---|
+| uGUI | `RectTransform` | `Selectable` だけ → Selectable を持たない `Image`／`Graphic` だけ → **自分は絵を持たず子が持つ容器** |
+| NGUI | `UIWidget` ∪ `Collider`/`Collider2D` | コライダーだけ → **ボタンの中の `UIWidget`**（NGUI の判定は「当たったものの子孫」も hittable とするため） |
+
+**コライダーの `enabled` では弾かない。** `dump` 側（`TryGetScreenRect`）が
+**`collider.bounds` を `enabled` を見ずに使う**ので、dump は無効コライダーのノードにも
+矩形を与えて probe し、**祖先・子孫へのヒットで hittable になりうる**。
+ここで弾くと**その分だけ取りこぼし、集合が一致しない**。
+（`FindObjectsInactive.Exclude` が外すのは**非アクティブな GameObject** で、
+**無効化されたコンポーネントは返ってくる**＝EditMode で実測。
+**その事実は正しいが、「だから自前で弾く」は誤り**だった。
+弾く/弾かないは **dump 側の実装に合わせる**話）。
 
 ### resolve
 単一オブジェクトの位置と到達可能性。
@@ -230,6 +268,18 @@ UI 階層をツリー JSON で返す。AI がテストを書くための「地�
 値の型: プリミティブ/string はそのまま、enum は文字列、Vector2/3・Color はオブジェクト、
 その他は `ToString()`。コンポーネントが無い場合はエラーメッセージに搭載コンポーネント一覧を含む。
 
+
+**計測用途では、表示テキストのパースより `get` のほうが堅い**（issue #49）。
+`dump` の `text` は `1.08K` のような省略表記や `24 / 50` のような複合表記になることがあり、
+**パースは表示仕様の変更で静かに壊れる**。値そのものを持つコンポーネントから直接読む:
+
+```json
+→ {"cmd": "get", "args": {"path": "Canvas/HUD/Coin", "component": "CoinPresenter", "property": "Amount"}}
+← {"value": 1080}
+```
+
+型名は**短い名前でも完全修飾名でも受け付ける**（`CoinPresenter` / `MyGame.UI.CoinPresenter`）。
+記録の残し方は `docs/ai-loop.md` の「計測と受け入れ判定の作法」を参照。
 ### pointer_down / pointer_move / pointer_up
 マルチタッチプリミティブ。`pointerId`（クライアント任意の整数）ごとに 1 本の指を表す。
 ```json

@@ -19,6 +19,7 @@ from . import adb
 from .client import BridgeClient
 from .gestures import Gestures
 from .journey import JourneyRecorder
+from .metrics import MetricsRecorder
 
 __all__ = ["pytest_addoption", "pytest_runtest_makereport",
            "client", "g", "journey", "_journey_test_context"]
@@ -96,6 +97,11 @@ def pytest_addoption(parser):
         help="ジャーニー記録（画面・遷移・カバレッジ）の出力先ディレクトリ。"
              "未指定時は環境変数 UAPP_E2E_JOURNEY_DIR、それも無ければ記録しない")
     parser.addoption(
+        "--metrics", metavar="DIR", default=None,
+        help="計測記録（issue #49）の出力先ディレクトリ。未指定時は環境変数 UAPP_E2E_METRICS_DIR、"
+             "それも無ければ記録しない。journey（画面と遷移）とは別の層で、"
+             "**その回の目的と設定を先頭行に書く**ことで後から比較してよいかを判断できる")
+    parser.addoption(
         "--runbootstrap", action="store_true", default=False,
         help="クリーンインストールを伴うブートストラップ（アプリ削除→導入→アカウント作成→"
              "ワールド到達）を実行する。未指定だと該当テストはスキップされる")
@@ -107,6 +113,25 @@ def journey(request, client):
     out_dir = request.config.getoption("--journey") or os.environ.get("UAPP_E2E_JOURNEY_DIR")
     recorder = JourneyRecorder(client, out_dir, enabled=bool(out_dir))
     request.config._uapp_e2e_journey = recorder
+    yield recorder
+    recorder.save()
+
+
+@pytest.fixture(scope="session")
+def metrics(request):
+    """計測レコーダー（issue #49）。**既定は無効**で、`--metrics <DIR>` か
+    環境変数 `UAPP_E2E_METRICS_DIR` を渡したときだけ書く。
+
+    使い方は「**最初に目的と設定を宣言してから測る**」:
+
+        metrics.begin("ステージ1の所要時間", build="Release", debugAssist=False)
+        metrics.record("stage1_seconds", 42.5)
+
+    **合否は判定しない**（記録するだけ）。「回復しうる値の減少」で成功を判定しない、
+    という規約は `docs/ai-loop.md` を参照。
+    """
+    out_dir = request.config.getoption("--metrics") or os.environ.get("UAPP_E2E_METRICS_DIR")
+    recorder = MetricsRecorder(out_dir, enabled=bool(out_dir))
     yield recorder
     recorder.save()
 

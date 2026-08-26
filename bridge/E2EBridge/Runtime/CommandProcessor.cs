@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using UnityEngine;
@@ -60,6 +60,7 @@ namespace E2EBridge
                 {
                     case "ping":          result = Ping(); break;
                     case "dump":          result = HierarchyDumper.Dump(args); break;
+                    case "hittables":     result = HierarchyDumper.Hittables(args); break;
                     case "resolve":       result = HierarchyDumper.Resolve(args); break;
                     case "get":           result = HierarchyDumper.GetProperty(args); break;
                     case "pointer_down":  result = TouchInjector.Down(args); break;

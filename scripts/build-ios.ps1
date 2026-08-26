@@ -4,6 +4,24 @@
 #         ./scripts/build-ios.ps1 -Project unity-nis -VerifyAppOnly   # 既存 .app の登録簿検査だけ
 # **macOS 専用**（xcodebuild が必要。Windows で実行すると xcodebuild 未検出の明示エラーで止まる）。
 #
+# **ビルドは各プロジェクトのやり方で行うこと。** このスクリプトが面倒を見るのは
+# **Unity が書き出した `Unity-iPhone.xcodeproj` を `-project` でそのままビルドする**構成だけで、
+# **`Unity-iPhone.xcworkspace` を要求する構成は対象外**（CocoaPods ―
+# EDM4U が `Podfile` を書き出すプロジェクトが典型）。対象外の構成でこれを走らせると、
+# **Xcode 自身のメッセージ**（例: `Unable to resolve module dependency: '<依存名>'`）で止まる。
+# **ただしメッセージで決めないこと** — 同じ文言は別の原因でも出る。**判定材料は
+# 「書き出し先に `Podfile` か `Unity-iPhone.xcworkspace` が在るか」**で、在るならこの構成、
+# 無いなら別の原因（通常どおり調べる）。
+#
+# その場合の**分担点は「Unity 書き出し」と「xcodebuild」の間**に置く。**Unity 書き出しは
+# このスクリプトに任せる**のが安全で（`-executeMethod` の既定が
+# `E2EBridge.Editor.BuildEntry.BuildIos*` ＝ **`UAPP_E2E_BRIDGE` を一時付与する側**）、
+# 書き出された workspace を自分の手順でビルドする。**書き出しから自前でやるなら
+# define を自分で付けること** — 付けないと**ビルドは通るのに計装が入らず E2E が接続に失敗する**
+# （`-Mode ios` の「恒久 define は不要」は BuildEntry を通す前提の話）。
+# 出来た `.app` は `run-ios-e2e.ps1 -App <パス>` へ渡せるが、**`-App` は計装を検査しない**ので、
+# `.app` の `Data/RuntimeInitializeOnLoads.json` に `BridgeBootstrap.Init` があるかは自分で見ること。
+#
 # -Target device（実機）で増える前提: 署名（Apple Development 証明書）と、チーム配下で登録できる
 # bundle id。**bundle id は Unity 側（-appId）で設定する** — xcodebuild へ
 # PRODUCT_BUNDLE_IDENTIFIER を渡すと**全ターゲットに適用されて** UnityFramework まで同じ id になり、

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
@@ -24,6 +24,11 @@ namespace E2EBridge
             var scope = (string)args["scope"] ?? "ui";
             var probe = (string)args["probe"] ?? "selectable"; // none | selectable | all
             var rootPath = (string)args["path"];
+            // **非アクティブな枝を丸ごと省く**（issue #45）。既定は false ―
+            // 「ダイアログは存在するがまだ非アクティブ」を確認する使い方があり、
+            // 既定を変えると**それを黙って壊す**。実機では走査と JSON 化が支配的で、
+            // 導入先の実測では Debug ビルドの dump が 1,618ms（`probe="none"` でも 1,507ms）
+            var activeOnly = (bool?)args["activeOnly"] ?? false;
 
             var roots = new List<Transform>();
             if (!string.IsNullOrEmpty(rootPath))
@@ -51,7 +56,10 @@ namespace E2EBridge
 
             var nodes = new JArray();
             foreach (var root in roots)
-                nodes.Add(DumpNode(root, probe));
+            {
+                if (activeOnly && !root.gameObject.activeInHierarchy) continue;
+                nodes.Add(DumpNode(root, probe, activeOnly));
+            }
 
             return new JObject
             {
@@ -61,7 +69,7 @@ namespace E2EBridge
             };
         }
 
-        private static JToken DumpNode(Transform t, string probe)
+        private static JToken DumpNode(Transform t, string probe, bool activeOnly = false)
         {
             var go = t.gameObject;
             var node = new JObject
@@ -131,8 +139,13 @@ namespace E2EBridge
             {
                 var children = new JArray();
                 for (var i = 0; i < t.childCount; i++)
-                    children.Add(DumpNode(t.GetChild(i), probe));
-                node["children"] = children;
+                {
+                    var child = t.GetChild(i);
+                    // **activeOnly は枝ごと落とす**（ノードだけ残しても走査コストは消えない）
+                    if (activeOnly && !child.gameObject.activeInHierarchy) continue;
+                    children.Add(DumpNode(child, probe, activeOnly));
+                }
+                if (children.Count > 0) node["children"] = children;
             }
 
             return node;
@@ -156,6 +169,78 @@ namespace E2EBridge
         }
 
         // ------------------------------------------------------------- resolve
+
+        /// <summary>
+        /// **いま押せる要素だけ**を、階層走査なしで返す（issue #45）。
+        ///
+        /// `dump` は `childCount` へ無条件に再帰するため、**画面に出ていない枝も JSON 化**する。
+        /// 導入先の実機実測では、同じ画面で `dump()` 390ms に対して**この形は 107ms**
+        /// （Debug ビルドでは `dump()` が 1,618ms）。**重い画面ほど効き、軽い画面では往復ぶん不利**
+        /// なので `dump` の置き換えではなく別コマンドにしてある。
+        ///
+        /// 列挙元は「**スクリーン矩形を持てるもの**」＝ `ScreenRect` / `TryGetScreenRect` が
+        /// 答えられるもの。**押せるものだけに絞ってはいけない**:
+        ///   uGUI … `Selectable` だけだと Selectable を持たない Image が落ち、
+        ///           `Graphic` だけだと**自分は絵を持たず子が持つ容器**が落ちる（導入先が実測）。
+        ///           だから `RectTransform`
+        ///   NGUI … コライダーだけだと**ボタンの中の UIWidget が落ちる**。
+        ///           NGUI の判定は「当たったものの**子孫**」も hittable とするため（NguiAdapter.Probe）。
+        ///           だから `UIWidget` ∪ 有効な `Collider`/`Collider2D`
+        /// </summary>
+        public static JToken Hittables(JObject args)
+        {
+            var items = new JArray();
+            var seen = new HashSet<int>();
+
+            foreach (var rt in FindAllActive<RectTransform>())
+                AddIfHittable(rt.gameObject, ScreenRect(rt), false, seen, items);
+
+            if (NguiAdapter.Available)
+            {
+                foreach (var go in NguiAdapter.HittableCandidates())
+                {
+                    if (go == null || seen.Contains(go.GetInstanceID())) continue;
+                    if (NguiAdapter.TryGetScreenRect(go, out var rect))
+                        AddIfHittable(go, rect, true, seen, items);
+                }
+            }
+
+            return new JObject
+            {
+                ["screen"] = new JObject { ["w"] = Screen.width, ["h"] = Screen.height },
+                ["scene"] = SceneManager.GetActiveScene().name,
+                ["items"] = items
+            };
+        }
+
+        /// <summary>`hittables` の 1 件ぶん。**判定は dump と同じ経路を通す**（食い違わせない）。</summary>
+        private static void AddIfHittable(GameObject go, Rect rect, bool isNgui, HashSet<int> seen, JArray items)
+        {
+            var id = go.GetInstanceID();
+            if (!seen.Add(id)) return;
+
+            var (hittable, _, _) = isNgui
+                ? NguiAdapter.Probe(go, rect.center)
+                : RaycastProbe.Probe(go, rect.center);
+            if (!hittable) return;
+
+            var item = new JObject
+            {
+                ["path"] = GetPath(go.transform),
+                ["center"] = new JObject { ["x"] = rect.center.x, ["y"] = rect.center.y }
+            };
+            if (isNgui) item["ui"] = "ngui";
+
+            var interactable = isNgui
+                ? NguiAdapter.Interactable(go)
+                : go.GetComponent<Selectable>()?.interactable;
+            if (interactable.HasValue) item["interactable"] = interactable.Value;
+
+            var text = ExtractText(go);
+            if (text != null) item["text"] = text;
+
+            items.Add(item);
+        }
 
         public static JToken Resolve(JObject args)
         {
@@ -241,8 +326,15 @@ namespace E2EBridge
                                ?? throw new BridgeException(ErrorCodes.BadRequest, "'property' is required");
 
             var go = Require(path);
+            // **短い型名と完全修飾名の両方を受ける**（issue #45 と同じ導入先の報告 ― #48）。
+            // 以前は `GetType().Name` だけで、`UappE2E.Local.E2EGameState` のような
+            // **名前空間付きは素通りして NOT_FOUND** になっていた。
+            // **受け入れる側に倒すのが安全** ― 完全修飾名は短い名前より条件が厳しいので、
+            // 曖昧さは増えない（同じ短い名前の別型が同居していても、FullName なら一意）
             var component = go.GetComponents<Component>()
-                .FirstOrDefault(c => c != null && c.GetType().Name == componentName);
+                .FirstOrDefault(c => c != null &&
+                                     (c.GetType().Name == componentName ||
+                                      c.GetType().FullName == componentName));
             if (component == null)
                 throw new BridgeException(ErrorCodes.NotFound,
                     $"component '{componentName}' not found on '{path}'. available: " +
@@ -383,6 +475,21 @@ namespace E2EBridge
         }
 
         /// <summary>非アクティブ含む全シーンオブジェクト検索（Unityバージョン差の吸収）。</summary>
+        /// <summary>
+        /// **アクティブなものだけ**を列挙する（issue #45 の `hittables` 用）。
+        /// `FindObjectsInactive.Exclude` が外すのは**非アクティブな GameObject** であって、
+        /// **無効化されたコンポーネントは別軸**（`enabled=false` のコライダーは返る。EditMode で実測）。
+        /// 呼び出し側で `enabled` を見ること。
+        /// </summary>
+        private static T[] FindAllActive<T>() where T : UnityEngine.Object
+        {
+#if UNITY_2023_1_OR_NEWER
+            return UnityEngine.Object.FindObjectsByType<T>(FindObjectsInactive.Exclude, FindObjectsSortMode.None);
+#else
+            return UnityEngine.Object.FindObjectsOfType<T>(false);
+#endif
+        }
+
         private static T[] FindAll<T>() where T : UnityEngine.Object
         {
 #if UNITY_2023_1_OR_NEWER

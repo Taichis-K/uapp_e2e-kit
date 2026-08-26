@@ -89,6 +89,25 @@ Homebrew は Microsoft のサポート対象外（公式は「Alternate ways」�
 
 **iOS の実行経路は 0.1.9 からこのキットに含まれている**（シミュレータ・実機とも）。
 前提: macOS ＋ Xcode ＋ Unity の iOS Support モジュール。**Windows では動かない**。
+**ビルドは各プロジェクトのやり方で行うこと** ― `build-ios.ps1` が面倒を見るのは
+**Unity が書き出した `Unity-iPhone.xcodeproj` をそのままビルドする**構成だけで、
+**`Unity-iPhone.xcworkspace` を要求する構成は対象外**（CocoaPods ＝ EDM4U が `Podfile` を
+書き出すプロジェクトが典型）。対象外の構成で走らせると **Xcode 自身のメッセージ**
+（例: `Unable to resolve module dependency: '<依存名>'`）で止まる。
+**ただしメッセージで決めないこと** ― 同じ文言は別の原因でも出る。
+**判定材料は「Unity の書き出し先に `Podfile` か `Unity-iPhone.xcworkspace` が在るか」**で、
+在るならこの構成（＝キットの対象外）、無いなら別の原因なので通常どおり調べる。
+その場合の**分担点は「Unity 書き出し」と「xcodebuild」の間**に置く:
+
+- **Unity 書き出しはキットに任せる**のが安全（`build-ios.ps1` は
+  `E2EBridge.Editor.BuildEntry.BuildIos*` を呼び、**そこが `UAPP_E2E_BRIDGE` を一時付与する**）。
+  書き出された Xcode プロジェクト／workspace を、自分の手順でビルドする
+- **Unity 書き出しから自分のパイプラインでやるなら、`UAPP_E2E_BRIDGE` define を自分で付ける**
+  （docs/05 のスニペット）。**付けないと計装が入らず、ビルドは通るのに E2E が接続に失敗する**。
+  `-Mode ios` の「恒久 define は不要」は**BuildEntry を通す前提**の話なので、ここで食い違う
+- 出来た `.app` は `run-ios-e2e.ps1 -App <.app のパス>` へ渡せる。**ただし `-App` は計装の有無を
+  検査しない**ので、`.app` の中の `Data/RuntimeInitializeOnLoads.json` に
+  `BridgeBootstrap.Init` があることを自分で確かめること
 **iOS だけで回す構成なら installer に `-Mode ios` を渡す**（Android の define・AVD・activity を
 要求せず、`iosSimulatorPort` と package＝bundle id を必須として検査する。恒久 define は不要）。
 
@@ -129,7 +148,7 @@ bundle id ならそのままでよい）。
 | **アプリの外は、計装だけでは操作できない** | 計装（E2EBridge）は Unity アプリの中で動くので、**外部ブラウザ・システムダイアログ・他アプリは `dump` にも `tap` にも現れない**。**Android にはこのキットの中に逃げ道がある**（`adb` の uiautomator 経由で `ui_tap` / `ui_type`。外部ブラウザでの認証も自動化できる）。**iOS 側の同梱手段は `-OsAgent`（XCUITest ベースの OS レイヤーエージェント）**で、座標タップ・スクショは実機で実測済み。ただし**文字入力・アラート・スワイプは実装のみ・実利用未検証**（`simctl` 自体にはタップ注入の公開 API が無い） |
 | **→ 設計への影響** | **iOS の E2E は「アプリ内で完結する導線」を基本に組む**。アプリ外は `-OsAgent` で広げられるが、検証済みなのは座標タップとスクショまでで、**外部ブラウザでの認証フローの自動化は Android の `ui_type` 相当まで検証されていない**。テスト用にアプリ内 WebView やモック認証へ切り替えられるビルド構成を用意しておくと、後で困らない |
 | **画面の記録** | Android は `adb screencap` で**画面に出ているものをそのまま**残せる。iOS シミュレータは `simctl` で同じことができる。**iOS 実機は経路が端末で分かれ、2 つの条件は別物**: `-OsAgent`（XCUITest ベース）が使えるかは**次の行の `pairingState`** で決まる（使えれば OS 合成後の画面を撮れる。実機で実測済み。端末側の UI オートメーション有効化が前提）。一方 **`idevicescreenshot` の自動試行は同梱実装では iOS の主版 ≤16 のときだけ**（実測は iOS 16 の 1 台。iOS 17 以降は Apple が経路を変えたため試行しない）。下の行の計装スクショは Unity の描画のみで代替にならない |
-| **端末によって使える手段が入れ替わる** | **`-OsAgent`（XCUITest）の可否は `pairingState` で判定する**（`xcrun devicectl list devices` の `pairingState` が `paired` でない端末は XCUITest の宛先にならない。`run-ios-e2e.ps1 -OsAgent` の事前ガードもこれを見る）。`idevicescreenshot` の自動試行条件は前の行のとおり iOS の主版 ≤16（実測では CoreDevice 非対応の iOS 16 端末で使え、対応端末では使えなかった — 各 1 台の実測で、一般化の裏は取れていない）。いずれにせよ**手段が端末で切り替わる前提で組む** |
+| **端末によって使える手段が入れ替わる** | **`-OsAgent`（XCUITest）の可否は `pairingState` で判定する**（`xcrun devicectl list devices` の `pairingState` が `paired` でない端末は XCUITest の宛先にならない。`run-ios-e2e.ps1 -OsAgent` の事前ガードもこれを見る）。`idevicescreenshot` の自動試行条件は前の行のとおり iOS の主版 ≤16（実測では CoreDevice 非対応の iOS 16 端末で使え、対応端末では使えなかった — 各 1 台の実測で、一般化の裏は取れていない）。いずれにせよ**手段が端末で切り替わる前提で組む**。**`pairingState` で止められた端末（表示は `unsupported` とは限らず、CoreDevice が担当しない端末では `pairingState=未登録` になる）でも、go-ios を自分で用意すれば OS エージェントを動かせる** — 手順は同梱の [docs/09-ios16-osagent.md](docs/09-ios16-osagent.md)（iPhone 8 / iOS 16.7.16 で実測。**go-ios はキットに同梱しないので各自で用意する**。**ガードは正しいので外さないこと** — `-showdestinations` に出るようになっても `xcodebuild test` は同じ文言で落ちる、を実測している） |
 | **実機で XCUITest を使うなら端末側の設定が要る** | 「設定 → プライバシーとセキュリティ → デベロッパモード」を有効にしたうえで、**「設定 → デベロッパ → UI オートメーションを有効」も ON にする**。**これが無いときの症状が原因を全く示さない** — アプリの install も起動も通り、ランナーも起動して「Automation Running」まで表示されるのに、約 8 秒で `The connection was invalidated` になり、クラッシュレポートすら残らない（2026-08-06 に実測。**即終了する対照テストでも同じように落ちるので、そこで切り分けられる**）。**設定が ON の表示でも同じ症状が出ることがある**（2026-08-07 実測。端末の再起動後に再現し、対照テストすら落ちた）。そのときの**復旧手順は「USB を抜く → 端末を再起動 → ロック解除 → UI オートメーションを OFF→ON → USB を挿す」**（トグルを入れ直すとパスコードを求められる＝表示と実体が食い違いうる。**各手順の寄与は分離できていない**ので、確実に戻すための一続きの手順として実行する） |
 | **実機で症状が出たときの切り分け** | ①**対照テスト** `xcodebuild test -only-testing:UappOsAgentRunner/UappOsAgent/testTrivial`（落ちれば端末側の前提が欠けている）②**ジェスチャ単体のプローブ** — 環境変数 `TEST_RUNNER_UAPP_OS_AGENT_GESTURE_PROBE=direct`（テストのスレッドから直接）または `=dispatch`（別キューから `main.sync`＝常駐時と同じ経路）を付けて `-only-testing:UappOsAgentRunner/UappOsAgent/testRunAgent` を実行し、ログの `gesture probe: sending / returned / survived` の**どこで途切れるか**を見る（`…_PROBE_GESTURE=tap\|swipe` / `…_PROBE_SECONDS` で調整）③常駐エージェント＋トンネルで単発のコマンド。**①の通過は常駐エージェントの生存を保証しない**（すぐ終わるので短い窓に掛からない）。**ケーブルを挿したまま端末を再起動した直後は症状が再現した**ので、まず上の復旧手順を試すのが早い |
 | **ブリッジのスクショの限界** | 計装自身に撮らせる `screenshot` コマンドは全プラットフォームで使えるが、**Unity の描画しか写らない** — WebView・ネイティブダイアログ・ソフトキーボード・広告 SDK のビューは欠ける。**撮る瞬間だけアプリのフレームにコストがかかる**ため既定は無効（`UAPP_E2E_BRIDGE_SCREENSHOT=1` で有効化）。**OS 層のキャプチャが使えないときの代替**であって上位互換ではない |

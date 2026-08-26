@@ -589,6 +589,46 @@ function Invoke-Inject([string]$Target) {
 }
 
 # --- 撤去 --------------------------------------------------------------------
+function Show-EjectGitStatus([string]$TargetDir) {
+    <#
+      .SYNOPSIS
+      撤去した対象の git 状態を出す（issue #47）。**git 管理下でなければ黙って省く**。
+
+      .NOTES
+      導入先は自作の eject が最後に出す `git status --porcelain` を見て
+      「完全に戻った」と確認していた。標準の eject へ移行してから、
+      **確認手段が手順書側の「自分で git status を打つ」に退化していた**（実行者から報告）。
+
+      **表示するだけ。何も変更しない。**（この issue のもう 1 件が
+      「終了メッセージが破壊的な git 操作を促していた」なので、ここで操作を足さない）
+    #>
+    $git = Get-UappCommandPath "git"
+    if (-not $git) { return }   # git が無い環境では黙って省く
+    # **対象が git 管理下か**を先に見る（管理外で "not a git repository" を出さない）
+    $inside = & $git -C $TargetDir rev-parse --is-inside-work-tree 2>$null
+    if ($LASTEXITCODE -ne 0 -or "$inside".Trim() -ne "true") { return }
+
+    $changes = @(& $git -C $TargetDir status --porcelain 2>$null)
+    $statusExit = $LASTEXITCODE
+    Write-Host ""
+    # **失敗を「差分なし」と読ませない**（codex 指摘）。stderr を捨てているので、
+    # 終了コードを見ないと **`git status` がこけても空配列＝差分なし**になる
+    # （`rev-parse=0 / status=128 / changesCount=0` を実測で再現）。
+    # 導入先はこの表示で「完全に戻った」を確認するので、
+    # **確認できていないのに「戻りました」と言うのがいちばん悪い**
+    if ($statusExit -ne 0) {
+        Write-Warning ("git status が失敗したため、撤去後の差分を確認できませんでした" +
+                       "（終了コード $statusExit）: $TargetDir。手で `git status` を確認してください")
+    } elseif ($changes.Count -eq 0) {
+        Write-Host "  [OK] git 差分なし（対象は撤去前の状態に戻っています）"
+    } else {
+        Write-Host "  対象の git 差分（$($changes.Count) 件）:"
+        foreach ($line in ($changes | Select-Object -First 20)) { Write-Host "    $line" }
+        if ($changes.Count -gt 20) { Write-Host "    …ほか $($changes.Count - 20) 件" }
+        Write-Host "  （$PIPELINE_PKG の行が残るのは既知です。**手当ては不要**）"
+    }
+}
+
 function Invoke-Eject([string]$Target) {
     $record = Read-Record $Target
     if (-not $record) {
@@ -745,7 +785,18 @@ function Invoke-Eject([string]$Target) {
     Write-Host "  [OK] 記録と台帳の割り当てを削除"
     Write-Host ""
     Write-Host "撤去しました。**Packages/packages-lock.json に $PIPELINE_PKG の行が残ることがあります**"
-    Write-Host "（Unity が次回起動時に整理します。気になる場合は git で戻してください）"
+    # **破壊的な git 操作を促さない**（issue #47）。「git で戻してください」は
+    # **AI エージェントに `git checkout --` を実行させうる**（導入先は手順書側で
+    # 「エージェントは破棄しない・報告だけする」と明示して打ち消していた）。
+    # **手当てが不要**なら、そう言い切るほうが安全
+    Write-Host "（Unity が次回起動時に整理するので、**手当ては不要です**。"
+    Write-Host "  どうしても今戻したい場合は、**人が判断して** git で戻してください）"
+
+    # **撤去後の git 状態を出す**（issue #47）。導入先は自作の eject が最後に出す
+    # `git status --porcelain` を見て「完全に戻った」と確認していた。標準の eject へ
+    # 移行してから、**確認手段が手順書側の「自分で git status を打つ」に退化していた**。
+    # **対象が git 管理下でなければ黙って省く**（無関係な警告を増やさない）
+    Show-EjectGitStatus -TargetDir $Target
 }
 
 # --- 台帳の表示 --------------------------------------------------------------

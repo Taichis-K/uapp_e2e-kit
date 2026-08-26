@@ -249,6 +249,10 @@ $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
   同梱の OS レイヤーエージェント（`run-ios-e2e.ps1 -OsAgent`）でも座標タップとスクショまでしか
   検証されていない**（Android は同梱の `adb` uiautomator 経由で文字入力まで可能）。
   **外部ブラウザ認証を含む導線は iOS では検証が止まりうる**前提で設計する
+- **`run-ios-e2e.ps1 -OsAgent` が `pairingState=…` で止まったら [docs/09-ios16-osagent.md](docs/09-ios16-osagent.md)**。
+  CoreDevice が担当しない実機（表示は `unsupported` ではなく **`未登録`** になることがある）でも、
+  go-ios を自分で用意すれば OS エージェントを動かせる（**go-ios は同梱していない**）。
+  **ガードは外さない** — 宛先に出るようになっても `xcodebuild test` は同じ文言で落ちる
 - **計装が撮るスクショ（`client.screenshot()`）は Unity の描画しか写らない**。
   WebView・ネイティブダイアログ・ソフトキーボード・広告 SDK のビューは欠ける。
   **画面に出ているものを忠実に残すなら OS 層**（Android は `adb screencap`。ジャーニー記録は

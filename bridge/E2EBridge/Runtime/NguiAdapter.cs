@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Reflection;
 using Newtonsoft.Json.Linq;
@@ -89,6 +89,64 @@ namespace E2EBridge
                 var root = _uiRoot != null ? comp.transform : comp.transform.root;
                 if (seen.Add(root)) yield return root;
             }
+        }
+
+        /// <summary>
+        /// `hittables`（issue #45）の候補＝**スクリーン矩形を持てる NGUI ノード**を、
+        /// **アクティブなものだけ**列挙する。
+        ///
+        /// **コライダーだけでは足りない。** `Probe` の判定は
+        /// `hit == target || hit.IsChildOf(target) || target.IsChildOf(hit)` の 3 通りで、
+        /// **3 つ目があるため、コライダーを持つボタンの中の `UIWidget` も hittable になる**。
+        /// コライダーだけを列挙すると、その層が丸ごと落ちる
+        /// （uGUI で `Selectable` だけに絞って hittable 0 件になったのと同じ失敗）。
+        ///
+        /// **コライダーの `enabled` では弾かない。** 仕様は `dump(probe="all")` との一致で、
+        /// **`TryGetScreenRect` は `collider.bounds` を `enabled` を見ずに使う**＝
+        /// dump は無効コライダーのノードにも矩形を与えて probe する。しかも `Probe` は
+        /// **祖先・子孫へのヒットも成功**とするので、**無効コライダーのノードでも hittable になりうる**。
+        /// ここで弾くと**その分だけ取りこぼし、集合が一致しない**（codex レビューの指摘）。
+        ///
+        /// なお `FindObjectsInactive.Exclude` が外すのは**非アクティブな GameObject** であって、
+        /// **無効化されたコンポーネントは返ってくる**（EditMode で実測）。
+        /// **その事実は正しいが、「だから自前で弾く」は誤り**だった ―
+        /// 弾く/弾かないは dump 側の実装に合わせる話で、列挙の性質の話ではない。
+        /// </summary>
+        public static IEnumerable<GameObject> HittableCandidates()
+        {
+            if (!Available) yield break;
+            var seen = new HashSet<int>();
+
+            if (_uiWidget != null)
+            {
+                foreach (var obj in FindAllActive(_uiWidget))
+                {
+                    if (!(obj is Component comp)) continue;
+                    if (seen.Add(comp.gameObject.GetInstanceID())) yield return comp.gameObject;
+                }
+            }
+
+            // **`enabled` で弾かない**（上の .NOTES）。dump と同じ土俵に揃える
+            foreach (var col in FindAllActive(typeof(Collider)))
+            {
+                if (!(col is Collider c)) continue;
+                if (seen.Add(c.gameObject.GetInstanceID())) yield return c.gameObject;
+            }
+            foreach (var col in FindAllActive(typeof(Collider2D)))
+            {
+                if (!(col is Collider2D c)) continue;
+                if (seen.Add(c.gameObject.GetInstanceID())) yield return c.gameObject;
+            }
+        }
+
+        /// <summary>**アクティブなものだけ**を列挙する（`FindAll` は非アクティブも含む）。</summary>
+        private static UnityEngine.Object[] FindAllActive(Type type)
+        {
+#if UNITY_2023_1_OR_NEWER
+            return UnityEngine.Object.FindObjectsByType(type, FindObjectsInactive.Exclude, FindObjectsSortMode.None);
+#else
+            return UnityEngine.Object.FindObjectsOfType(type, false);
+#endif
         }
 
         public static bool HasCollider(GameObject go) =>

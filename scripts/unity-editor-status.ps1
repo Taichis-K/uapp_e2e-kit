@@ -283,8 +283,25 @@ switch ($state) {
     default  {
         Write-Host "  このプロジェクトのエディタ: **起動途中か、ダイアログ待ちで止まっている**"
         Write-Host "    → batchmode も -Editor も失敗する。エディタの画面を見て（ダイアログを閉じて）から再実行する"
+        # **候補を挙げる（断定しない）**。この状態を作るモーダルは 1 種類ではない
+        Write-Host "    この状態になる例: プロジェクトにコンパイルエラーがあると **Enter Safe Mode? のモーダル**が出て止まる"
+        Write-Host "      （2026-08-26 に Windows / macOS の両方で実測。Editor.log はコンパイルエラーの直後で更新が止まり、"
+        Write-Host "        EditorInstance.json は書かれず、ロックだけ握った状態になる。Recovering Scene Backups でも同じ状態）"
+        Write-Host "      復旧: 画面でダイアログを閉じる。閉じられなければプロセス終了 → <プロジェクト>\Temp 削除 → 再起動"
         foreach ($p in $targetProcs) {
-            if ($p.hasWindow) { Write-Host ("    ウィンドウタイトル: " + (Get-Process -Id $p.pid -ErrorAction SilentlyContinue).MainWindowTitle) }
+            # **この分岐は実質 Windows 専用**。mac 側の列挙は MainWindowTitle を $null で埋めるので
+            # hasWindow が常に false になり、ここへは来ない（mac セッションの指摘）。
+            # 肝心の 3 行（Safe Mode の候補・機序・復旧）はループの外なので、mac でも出る
+            if ($p.hasWindow) {
+                $title = (Get-Process -Id $p.pid -ErrorAction SilentlyContinue).MainWindowTitle
+                if ([string]::IsNullOrWhiteSpace($title)) {
+                    # **タイトルが空でも「ダイアログが無い」ではない**。モーダルは別ウィンドウで、
+                    # MainWindowTitle には出ない（Safe Mode の実測時も空だった）
+                    Write-Host "    ウィンドウタイトル: （空。モーダルは別ウィンドウのことがあり、ここには出ない）"
+                } else {
+                    Write-Host ("    ウィンドウタイトル: " + $title)
+                }
+            }
         }
     }
 }

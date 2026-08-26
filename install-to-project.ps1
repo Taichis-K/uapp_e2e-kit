@@ -1,4 +1,4 @@
-# E2EBridge と E2E キット一式を既存の Unity プロジェクトへ導入する。
+﻿# E2EBridge と E2E キット一式を既存の Unity プロジェクトへ導入する。
 # 使い方: .\install-to-project.ps1 -ProjectPath <Unityプロジェクトのパス> [-Agents claude|codex|both] [-IncludeSampleTests] [-RootAgentsMd]
 # 実行元は 配布キット（package-kit.ps1 が生成した zip の展開先）/ 開発リポジトリ のどちらでもよい（自動判定）。
 # -Agents: 配置する AI エージェント導線の選択（既定 both）。
@@ -209,6 +209,7 @@ function Get-KitOwnedFiles($target, $sourceRoots) {
                      (Join-UappPath $kit "driver\tests\test_adb_ui.py"),
                      (Join-UappPath $kit "driver\tests\test_client_unit.py"),
                      (Join-UappPath $kit "driver\tests\test_bridge_smoke.py"),
+                     (Join-UappPath $kit "driver\tests\test_metrics_unit.py"),
                      (Join-UappPath $kit "config\local.sample.json"),
                      (Join-UappPath $kit "config\e2e-config.sample.json"),
                      # scripts-local は**中身がプロジェクト所有**。README だけキットが管理する
@@ -239,6 +240,7 @@ if (Test-Path -LiteralPath (Join-UappPath $PSScriptRoot "bridge\E2EBridge")) {
         Doc02       = Join-UappPath $root "docs\02-protocol.md"
         Doc05       = Join-UappPath $root "docs\05-install-to-project.md"
         Doc07       = Join-UappPath $root "docs\07-viewer.md"
+        Doc09       = Join-UappPath $root "docs\09-ios16-osagent.md"
         AiLoop      = Join-UappPath $root "docs\ai-loop.md"
         ClaudeMd    = Join-UappPath $root "CLAUDE.md"
         AgentsMd    = Join-UappPath $root "AGENTS.md"
@@ -247,6 +249,7 @@ if (Test-Path -LiteralPath (Join-UappPath $PSScriptRoot "bridge\E2EBridge")) {
         Rules       = Join-UappPath $root "rules"
         OsLayer     = Join-UappPath $root "oslayer"
         Version     = Join-UappPath $root "VERSION"
+        Retired     = Join-UappPath $root "retired-files.json"
     }
     Write-Host "実行元: 配布キット ($root)"
 }
@@ -262,6 +265,7 @@ elseif (Test-Path -LiteralPath (Join-UappPath $PSScriptRoot "..\unity-nis\Assets
         Doc02       = Join-UappPath $root "docs\02-protocol.md"
         Doc05       = Join-UappPath $root "docs\05-install-to-project.md"
         Doc07       = Join-UappPath $root "docs\07-viewer.md"
+        Doc09       = Join-UappPath $root "docs\09-ios16-osagent.md"
         AiLoop      = Join-UappPath $root "kit\docs\ai-loop.md"
         ClaudeMd    = Join-UappPath $root "kit\CLAUDE.md"
         AgentsMd    = Join-UappPath $root "kit\AGENTS.md"
@@ -270,6 +274,7 @@ elseif (Test-Path -LiteralPath (Join-UappPath $PSScriptRoot "..\unity-nis\Assets
         Rules       = Join-UappPath $root "kit\rules"
         OsLayer     = Join-UappPath $root "oslayer"
         Version     = Join-UappPath $root "kit\VERSION"
+        Retired     = Join-UappPath $root "kit\retired-files.json"
     }
     Write-Host "実行元: 開発リポジトリ ($root)"
 }
@@ -495,7 +500,8 @@ if (-not (Test-Path -LiteralPath $conftestDest)) {
 # **前回の所有記録が無い場合（手動導入・kit-manifest.json の削除・不完全な導入）も警告する** —
 # 「所有していた証拠が無い既存ファイル」は自作テストかもしれず、黙って消してよい根拠が無い
 $testNameConflicts = @()
-foreach ($t in @("test_journey_unit.py", "test_adb_ui.py", "test_client_unit.py", "test_bridge_smoke.py")) {
+foreach ($t in @("test_journey_unit.py", "test_adb_ui.py", "test_client_unit.py", "test_bridge_smoke.py",
+                 "test_metrics_unit.py")) {
     $testDest = Join-UappPath $kit "driver\tests\$t"
     if ((Test-Path -LiteralPath $testDest) -and (($null -eq $prevOwned) -or ($prevOwned -notcontains (ConvertTo-UappPathKey "uapp_e2e\driver\tests\$t")))) {
         $testNameConflicts += $t
@@ -548,6 +554,8 @@ Copy-Item -LiteralPath $src.Doc02 (Join-UappPath $kit "docs\02-protocol.md") -Fo
 # zip レイアウトでは既に置換済みで、置換は冪等なので同じバイト列になる
 Copy-UappKitDoc05 -Source $src.Doc05 -Destination (Join-UappPath $kit "docs\05-install-to-project.md")
 Copy-Item -LiteralPath $src.Doc07 (Join-UappPath $kit "docs\07-viewer.md") -Force
+# **09 は iOS 実機の手順書**（issue #43）。踏んだときに導入先で読めないと意味がないので配る
+Copy-Item -LiteralPath $src.Doc09 (Join-UappPath $kit "docs\09-ios16-osagent.md") -Force
 Copy-Item -LiteralPath $src.AiLoop (Join-UappPath $kit "docs\ai-loop.md") -Force
 Copy-Item -LiteralPath $src.ClaudeMd (Join-UappPath $kit "CLAUDE.md") -Force
 if ($installCodex) {
@@ -647,7 +655,7 @@ $ownedSourceMap = @{
     # 配るファイル名を列挙する。**ここを更新し忘れると、そのファイルが所有から落ちて
     # 改変検知と uninstall の照合が効かなくなる**ので、下の検査で件数を見る
     (Join-UappPath $kit "docs") = @("02-protocol.md", "05-install-to-project.md",
-                                    "07-viewer.md", "ai-loop.md")
+                                    "07-viewer.md", "09-ios16-osagent.md", "ai-loop.md")
 }
 # **対応表が壊れていたら止める**（レビューが実測）。値を間違えると、そのディレクトリ配下が
 # **無警告で manifest から丸ごと消え**、`-VerifyManifest` は真っ緑のまま改変検知だけが死ぬ。
@@ -682,6 +690,20 @@ foreach ($entry in $ownedSourceMap.GetEnumerator()) {
 # **`uninstall.ps1` は今も `uapp_e2e\scripts\` などをディレクトリごと消す**
 # （あちらは manifest を見ない）。**気づく機会だけ消して削除は残る**のは割に合わないので、
 # 移動を促す 1 行を出す。**警告ではなく情報**（正常な運用を止めない）
+# **配布をやめたファイルの一覧を先に読む**（issue #42）。下の stray 判定から除外するため ―
+# 一覧に載っているものは**由来がはっきりしている**（キットが配ったと分かっている）ので、
+# 「由来が分からない」側の一覧に混ぜると**同じ事実を 2 回、しかも違う言い方で**述べることになる
+$retiredEntries = @()
+if ($src.Retired -and (Test-Path -LiteralPath $src.Retired)) {
+    try {
+        $retiredEntries = @((Get-Content -LiteralPath $src.Retired -Raw | ConvertFrom-Json).files)
+    } catch {
+        Write-Warning "配布終了ファイルの一覧を読めませんでした（$($src.Retired)）: $($_.Exception.Message)"
+    }
+}
+$retiredKeys = @($retiredEntries | Where-Object { $_.path } |
+                 ForEach-Object { ConvertTo-UappPathKey $_.path })
+
 $strays = @()
 foreach ($entry in $ownedSourceMap.GetEnumerator()) {
     if (-not (Test-Path -LiteralPath $entry.Key)) { continue }
@@ -696,6 +718,8 @@ foreach ($entry in $ownedSourceMap.GetEnumerator()) {
                                            -ScriptsDir (Join-UappPath $kit "scripts")
         if (-not $owned) {
             $strayPath = $f.Substring((Resolve-UappFsPath $target).Length).TrimStart('\', '/')
+            # **引退一覧に載っているものは下の 4.6 でまとめて報告する**（二重に言わない）
+            if ($retiredKeys -contains (ConvertTo-UappPathKey $strayPath)) { continue }
             # **由来を 3 つに分ける**（キットが配った / 導入先が置いた / 判定できない）。
             # 判定材料は**前回の kit-manifest.json** しかないので、記録が無い導入
             # （手で入れた・記録を消した・注入モードの対象）では**どちらとも言えない**。
@@ -800,6 +824,53 @@ foreach ($f in (Get-KitOwnedFiles $target $ownedSourceMap | Sort-Object)) {
 }
 $manifestEntries | ConvertTo-Json | Set-Content -LiteralPath $manifestPath -Encoding utf8
 Write-Host "  [OK] uapp_e2e\kit-manifest.json（次回更新時のローカル改変検知用）"
+
+# --- 4.6 配布をやめたファイルの報告（issue #42） ---------------------------
+# **キットは削除しない。** 導入先がそのファイルを使い続けているかを知る手段が無いので、
+# **判断材料だけ渡して、消すかどうかは導入先に決めてもらう**。
+# #40 は「消しすぎ」（導入先の自作をキット所有と誤判定して無警告削除）で起きたので、
+# **自動削除の側へは倒さない**。
+#
+# **既存の「開発専用スクリプトの掃除」（上）はそのまま**。あれは
+# **キット自身が置いたと分かっているものだけ**を対象にした狭い経路で、#40 で安全側に寄せてある。
+if ($retiredEntries.Count -gt 0) {
+    $retiredFound = @()
+    foreach ($entry in $retiredEntries) {
+        if (-not $entry.path) { continue }
+        $rel = ($entry.path -replace '/', [IO.Path]::DirectorySeparatorChar)
+        $abs = Join-UappPath $target $rel
+        if (-not (Test-Path -LiteralPath $abs)) { continue }
+        # **改変されているかは前回の記録と突き合わせる**（記録が無ければ「判定できない」）。
+        # ここでも**断定しない** ― 記録が無い導入（手動・記録の削除・注入モード）が普通にある
+        $recorded = $null
+        if ($script:prevManifest) {
+            $key = ConvertTo-UappPathKey $rel
+            foreach ($e in $script:prevManifest.PSObject.Properties) {
+                if ((ConvertTo-UappPathKey $e.Name) -eq $key) { $recorded = $e.Value; break }
+            }
+        }
+        $state = if (-not $recorded) { "前回の記録が無く、改変されているかは判定できません" }
+                 elseif ((Get-KitFileHash $abs) -eq $recorded) { "内容はキットが配ったままです" }
+                 else { "**改変されています**" }
+        $retiredFound += [pscustomobject]@{
+            Rel = $rel
+            RetiredIn = $(if ($entry.retiredIn) { $entry.retiredIn } else { "版は不明" })
+            State = $state
+            Note = $entry.note
+        }
+    }
+    if ($retiredFound.Count -gt 0) {
+        Write-Host ""
+        Write-Host "[情報] キットが配布をやめたファイルが残っています（$($retiredFound.Count) 件）:"
+        foreach ($f in ($retiredFound | Sort-Object Rel)) {
+            Write-Host "  $($f.Rel)"
+            Write-Host "    $($f.RetiredIn) で配布終了 / $($f.State)"
+            if ($f.Note) { Write-Host "    $($f.Note)" }
+        }
+        Write-Host "  **キットは削除しません。** 使っていなければ導入先の判断で削除してください"
+        Write-Host "  （使い続けるなら uapp_e2e\scripts-local\ など、キットが触らない場所へ移すと更新で消えません）"
+    }
+}
 
 # --- 4.5 ドキュメントが案内するスクリプトが実在するかの検査 ---
 # キットの文書は `.\scripts\<名前>.ps1` の形でコマンドを案内する。

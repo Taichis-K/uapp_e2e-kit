@@ -28,8 +28,33 @@
 #   後者が無いときの症状は原因を全く示さない: install も起動も通り、ランナーも起動して
 #   「Automation Running」まで出るのに、**約 8 秒で The connection was invalidated**
 #   となり、クラッシュレポートも残らない（2026-08-06 に実測）。
-#   **iOS 16 以前の実機では OS エージェント自体が使えない**（CoreDevice に載らないため。
-#   起動前に pairingState を見て明示エラーで止める）
+#   **CoreDevice に載らない実機では、この既定の経路で -OsAgent を使えない**
+#   （xcodebuild の実機の宛先が CoreDevice 由来のため。起動前に pairingState を見て明示エラーで止める）。
+#   **「端末側の自動化が使えない」という意味ではない** ― go-ios で宛先解決を迂回し、
+#   Swift Testing の依存を手で同梱すれば動く（iPhone 8 / iOS 16.7.16 で実測）。
+#   **手順は docs/09-ios16-osagent.md**（導入先では uapp_e2e\docs\ 配下）。
+#   **go-ios はキットに同梱しないので、必要な人が自分で用意する**
+#
+# -SkipInstall は **install と起動の両方**を飛ばす（「既に起動しているアプリへ繋ぐ」ためのもの）:
+#   - **Android の run-e2e.ps1 -SkipInstall とは意味が違う**。あちらは install だけを飛ばし、
+#     `am start -S` で**毎回起動し直す**（2026-08-26 に実装を読んで確認。issue #46）
+#   - **このスクリプトは待ち受けポートを起動時に渡している** — simctl は SIMCTL_CHILD_ /
+#     devicectl は DEVICECTL_CHILD_ / iOS 16 以前は idevicedebug の --env。
+#     よって `-SkipInstall` は**いま動いているアプリの状態をそのまま使う**。
+#     （ブリッジ自身は `-e2eBridgePort` CLI 引数も受け付けるが、この経路では使っていない。
+#       simctl launch の後置引数は Unity の managed 側から見えないことを 2026-08-05 に実測）
+#   - **起動まで行う形にすると、経路によってはアプリが落ちる**: devicectl は
+#     `--terminate-existing`、simctl は事前に terminate する（idevicedebug run は明示的な
+#     terminate をしていない）。手で用意した状態を保ちたい用途とは噛み合わない
+#   - **飛ばしたときの安全網はターゲットで違う（重要）**:
+#     - **シミュレータ**: ポートを待ち受けるプロセスを探し、**無ければ明示エラーで止まる**。
+#       待ち受けが指定 UDID 配下のアプリかどうかまで照合する（fail-closed）
+#     - **実機**: **その照合は無い**。確認しているのは**ホスト側の iproxy が LISTEN したこと**だけで、
+#       **端末上のアプリが待ち受けているかは pytest の前に見ていない**。
+#       アプリが起動していない場合、**接続するテストが落ちる形でしか現れない**
+#       （issue #46 の報告はこれ。`test_bridge_ping` の 1 件だけが失敗した）
+#   - **起動し直したいときは -SkipInstall を外す**（install も走る）。
+#     -Build との併用は禁止（旧ビルドを検証する偽の緑になるため、明示エラーで止まる）
 #
 # adb を直接使うテスト（logcat 断アサート等）は UAPP_E2E_IOS=1 で明示エラーになる。
 # -PytestArgs 未指定時は既知の該当テスト（現在 2 件）を除外して回す。
@@ -41,7 +66,7 @@ param(
     [ValidateSet("simulator", "device")][string]$Target = "simulator",
     [ValidateSet("arm64", "x86_64")][string]$Arch,
     [switch]$Build,                   # 先に build-ios.ps1 を実行する
-    [switch]$SkipInstall,             # インストール・再起動をスキップ（起動済みアプリへ接続）
+    [switch]$SkipInstall,             # **install と起動の両方**をスキップし、既に起動しているアプリへ接続する（ヘッダの節を参照）
     [string]$Device,                  # simulator: simctl のデバイス名（既定: config/local.json の iosSimulatorDevice → "iPhone 16"）
     [string]$Udid,                    # device: 対象実機の UDID（既定: config/local.json の iosDeviceUdid → 接続中が 1 台ならそれ）
     [int]$HostPort,                   # device: ホスト側トンネルポート（既定 iosSimulatorPort + 10）
@@ -140,6 +165,19 @@ if (-not $NoJourney) {
 # 旧ビルド（同じ bundle id）を検証して「新しいビルドが通った」ように見える＝偽の緑（レビュー指摘）
 if ($Build -and $SkipInstall) {
     throw "-Build と -SkipInstall は同時に指定できません（新ビルドを配備せず旧版を検証してしまうため）"
+}
+# **何を飛ばすのかを実行の冒頭で見せる**（issue #46）。名前からは「install だけ」と読めるが
+# **起動も行わない**ので、起動されている前提が崩れていると接続だけが失敗して原因が見えにくい
+# （導入先では test_bridge_ping の 1 件だけが落ちた）
+if ($SkipInstall) {
+    # **安全網はターゲットで違う**ので、そこも一緒に出す（実機には待ち受けの照合が無い）
+    $skipNote = if ($Target -eq "device") {
+        "**実機では待ち受けの照合をしていません** — 起動していないと、接続するテストが落ちる形でしか現れません"
+    } else {
+        "起動していない場合は、待ち受けの照合で明示エラーになります"
+    }
+    Write-Host ("[$projectName] -SkipInstall: **install と起動のどちらも行いません**（既に起動しているアプリへ接続します）。" +
+                "$skipNote。起動し直したいときは -SkipInstall を外してください")
 }
 if ($Build) {
     $buildArgs = @{ Arch = $Arch; Target = $Target }
@@ -395,6 +433,82 @@ if ($isDevice) {
         throw
     }
     Write-Host "USB トンネル: localhost:$HostPort -> device:$port (UDID $udid)"
+
+    # **トンネルが張れたことと、端末のアプリが待ち受けていることは別**（issue #53）。
+    # 実機にはシミュレータ側のような待受照合が無く、**iproxy はアプリが起動していなくても
+    # ホスト側ポートを LISTEN する**（2026-08-26 に iPhone 8 / iOS 16.7.16 で実測）。
+    # しかも **TCP の connect も send も成功し、read で初めて Connection reset になる**ので、
+    # 「繋がるか」だけの検査では素通りする ― **ping を 1 往復させて確かめる**。
+    # これが無いと、アプリが起動していない回は**接続するテストが落ちる形でしか現れない**
+    # （導入先では test_bridge_ping の 1 件だけが失敗した）
+    try {
+        $bridgeWaitSeconds = if ($SkipInstall) { 20 } else { 60 }
+        $pingDeadline = (Get-Date).AddSeconds($bridgeWaitSeconds)
+        $pingApp = $null
+        $lastPingError = "応答が無い"
+        while ((Get-Date) -lt $pingDeadline) {
+            if ($tunnelProc.HasExited) { $lastPingError = "iproxy が終了した"; break }
+            $tcp = $null
+            try {
+                $tcp = New-Object System.Net.Sockets.TcpClient
+                $tcp.Connect("127.0.0.1", $HostPort)
+                $stream = $tcp.GetStream()
+                $stream.ReadTimeout = 5000
+                $stream.WriteTimeout = 5000
+                $payload = [System.Text.Encoding]::UTF8.GetBytes('{"id":1,"cmd":"ping","args":{}}' + "`n")
+                $stream.Write($payload, 0, $payload.Length)
+                $reader = New-Object System.IO.StreamReader($stream, (New-Object System.Text.UTF8Encoding($false)))
+                $line = $reader.ReadLine()
+                if ($line) {
+                    $resp = $line | ConvertFrom-Json
+                    if ($resp.ok) { $pingApp = $resp.result.app; break }
+                    $lastPingError = "ブリッジがエラーを返した: $line"
+                } else {
+                    $lastPingError = "接続はできたが応答が返らない（相手が閉じた）"
+                }
+            } catch {
+                $lastPingError = $_.Exception.Message
+            } finally {
+                if ($tcp) { $tcp.Close() }
+            }
+            Start-Sleep -Seconds 1
+        }
+        if (-not $pingApp) {
+            # **止めるのは -SkipInstall のときだけ**。理由は非対称でよい:
+            #   -SkipInstall … 起動を飛ばしているので、**ここで見なければ誰も見ない**（issue #53 の報告そのもの）
+            #   通常経路     … 直前に install と launch をしており、pytest 側も retries=30 で待つ。
+            #                  **実機の通常経路はこの検証機の署名では実走できていない**（.app が別端末向け）ので、
+            #                  ここで止めると**測っていない退行**を作りうる。警告に留めて pytest に判断させる
+            # **原因を断定しない**（観測と候補を並べる。この repo の開発ルール）
+            $skipHint = if ($SkipInstall) { "（-SkipInstall は install と起動の両方を飛ばします）" } else { "" }
+            $bridgeMsg = ("端末のブリッジが応答しません（$bridgeWaitSeconds 秒）。" +
+                   "観測: USB トンネルは張れている（iproxy がホスト側 $HostPort を LISTEN）/ " +
+                   "ping の往復が成立しない（$lastPingError）。" +
+                   "**iproxy はアプリが起動していなくても LISTEN する**ので、" +
+                   "トンネルが張れたことはアプリが動いている証拠になりません。" +
+                   "考えられるのは ①アプリが起動していない$skipHint " +
+                   "②アプリが別のポートで待ち受けている（e2e-config.json の iosSimulatorPort と、" +
+                   "起動時に渡した DEVICECTL_CHILD_UAPP_E2E_BRIDGE_PORT / idevicedebug の --env）" +
+                   "③起動直後に落ちた、など")
+            if ($SkipInstall) {
+                throw $bridgeMsg
+            }
+            Write-Warning ($bridgeMsg + " ― 通常経路なので、このまま pytest へ進みます（接続はテスト側で再試行されます）")
+        }
+        if ($pingApp -and $pingApp -ne $package) {
+            throw ("トンネルの先で応答したのは別のアプリです（ping の app=$pingApp / " +
+                   "e2e-config.json の package=$package）。別アプリを検証する偽の緑を防ぐため停止します")
+        }
+        if ($pingApp) { Write-Host "端末のブリッジと疎通しました（ping の app=$pingApp）" }
+    }
+    catch {
+        # **この区間で落ちたら iproxy を残さない**（末尾の finally はここより後ろから有効になる。
+        # 直上のトンネル待機ループと同じ約束）。**Ctrl+C はここでは捕まらない**のも同じ性質
+        Stop-UappProcessTree -ProcessId $tunnelProc.Id
+        $tunnelProc = $null
+        throw
+    }
+
     $port = $HostPort   # 以降（pytest への受け渡し）はホスト側ポートを使う
 }
 else {
@@ -696,11 +810,14 @@ if ($OsAgent) {
         }
         if ($listed) { $pairing = $listed.connectionProperties.pairingState }
         if ($pairing -ne "paired") {
-            throw ("この端末では -OsAgent（XCUITest の OS レイヤーエージェント）を使えません" +
-                   "（CoreDevice の pairingState=$(if ($pairing) { $pairing } else { '未登録' })）。" +
+            throw ("この端末では **この既定の経路では** -OsAgent（XCUITest の OS レイヤーエージェント）を" +
+                   "使えません（CoreDevice の pairingState=$(if ($pairing) { $pairing } else { '未登録' })）。" +
                    "CoreDevice に載らない端末は xcodebuild のテスト宛先にならず、" +
                    "『Logic Testing on iOS devices is not supported』という無関係な文言で落ちます。" +
-                   "この場合はブリッジ経路で実行し、スクリーンショットは idevicescreenshot" +
+                   "**端末側の自動化が使えないという意味ではありません** ― go-ios で宛先解決を迂回すれば" +
+                   "動かせます（iPhone 8 / iOS 16.7.16 で実測）。手順は docs\09-ios16-osagent.md" +
+                   "（導入先では uapp_e2e\docs\ 配下。**go-ios は同梱していないので自分で用意する**）。" +
+                   "手組みをしないなら、ブリッジ経路で実行し、スクリーンショットは idevicescreenshot" +
                    "（iOS 16 以前で使える）に任せてください")
         }
         # **物理デバイスの列挙を待つ**。xcodebuild の既定の待ち時間は短く、USB 接続の端末が

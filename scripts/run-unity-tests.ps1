@@ -1,4 +1,4 @@
-# Unity の EditMode/PlayMode テスト（内側ループ）を実行し、結果を AI が読める要約で出力する。
+﻿# Unity の EditMode/PlayMode テスト（内側ループ）を実行し、結果を AI が読める要約で出力する。
 # E2E（外側ループ）はビルドや実機が要るため、ロジックの検証はまずこちらで回す（docs/04-ai-loop.md）。
 # 使い方: .\scripts\run-unity-tests.ps1 [-Project unity-nis] [-Mode EditMode|PlayMode] [-Filter <pattern>]
 #
@@ -48,85 +48,17 @@ $cliGlobalArgs = Get-UappUnityCliGlobalArgs -ProxyDisable:(Resolve-UappUnityCliP
 function Test-UnityProjectLocked {
     <#
       .SYNOPSIS
-      エディタがこのプロジェクトを掴んでいるか（＝batchmode が排他ロックで失敗するか）。
+      エディタがこのプロジェクトを掴んでいるか（真偽値）。**判定できないときは `$true`**（安全側）。
 
       .NOTES
-      **単一の根拠では判定できない**（2026-07-30 に Unity 6000.3.6f1 で実測）。3 つを合成する:
-
-      1. `-projectPath <対象>` を持つ GUI の Unity.exe プロセス … 起動直後から分かる唯一の信号
-      2. `Library\EditorInstance.json` の `process_id` の生存 … Unity 自身が書くが**ロード完了後**
-         にしか現れず、異常終了で古い pid が残る（生存確認が必須）
-      3. `Temp\UnityLockfile` の排他オープン … 従来ここだけを見ていたが、**開いているのに
-         排他オープンできてしまう状態を実測した**（起動途中・モーダルダイアログ待ち）。
-         ファイルの存在で判定するのも誤り（残骸で永久に「開いています」と言い続ける）
-
-      詳しい内訳を人が見たいときは `scripts\unity-editor-status.ps1`（プロジェクト単位の状態表示）。
+      **実装は `Get-UappUnityProjectLockState`（uapp-platform.ps1）に 1 つだけ置く**（issue #51）。
+      以前はこのファイルと `run-unity-tests.ps1` に**同じロジックが複製**されていた
+      （説明文だけが分岐していて、ロジックは同一だった＝機械で確認済み）。
+      **`$true` には「占有」と「判定不能」が混ざる**ので、
+      **文面を書き分けたい呼び出し側は `Get-UappUnityProjectLockState` を直接使うこと**。
     #>
     param([Parameter(Mandatory)][string]$ProjectDir)
-
-    # 1. プロセスのコマンドラインで対象プロジェクトを掴んでいる GUI エディタを探す
-    try {
-        $target = Get-UappNormalizedDir (Resolve-Path -LiteralPath $ProjectDir).Path
-        foreach ($p in (Get-UappUnityProcess)) {   # プロセス列挙の OS 差は uapp-platform.ps1 が吸収する
-            $cmd = $p.CommandLine
-            # **コマンドラインが取れていない Unity プロセスは「無関係」と断定できない**。
-            # 安全側（掴んでいる扱い）に倒す（Windows で CIM が権限等で失敗したときに効く）
-            if (-not $p.CommandLineAvailable) {
-                Write-Warning "Unity プロセスのコマンドラインが取得できないため、占有されている前提で扱います"
-                return $true
-            }
-            if (-not $cmd) { continue }
-            if ($cmd -match '-projectPath\s+"?([^"]+?)"?(\s+-|\s*$)') {
-                $path = $Matches[1].Trim()
-                try { $path = Get-UappNormalizedDir (Resolve-Path -LiteralPath $path).Path } catch { }
-                # **batchmode でも対象パスが一致すれば占有**（別ターミナルの batchmode は
-                # 実際にロックを握るので、除外すると防ぎたかった exit=6 にそのまま落ちる。
-                # この判定は自分が Unity を起動する前に行うので、自分自身は誤検出しない）
-                if ($path -ieq $target) { return $true }
-                continue
-            }
-            # **ウィンドウタイトルは実行可否に使わない（が、黙って素通りもしない）**。
-            # これは**トレードオフで、どちらに倒しても壊れる**（外部レビューで両方向を指摘された）:
-            #   止める  … 別の場所にある同名プロジェクトを開いているだけで**実行不能**（回避策が無い）
-            #   止めない… `-projectPath` 無し＋EditorInstance.json 生成前の起動途中を見落とし、exit=6
-            # 代償の小さい後者を選び、**警告だけ出して続行**する（踏んだときに理由が手元にある）。
-            # `unity-editor-status` は人に見せる側なので `evidence=windowTitle` として使う。
-            # この非対称は意図的（詳細は docs/04-ai-loop.md）
-            if ($p.MainWindowTitle -and $p.MainWindowTitle -match '^(.+?)\s+-\s' -and
-                $Matches[1] -ieq (Split-Path $target -Leaf)) {
-                Write-Warning ("同名のプロジェクトを開いている Unity があります（タイトル: $($p.MainWindowTitle)）。" +
-                               "**対象と同じものなら閉じてから再実行**してください" +
-                               "（-projectPath を持たない起動のため、同一かどうか確定できません）")
-            }
-        }
-    } catch [System.InvalidOperationException] {
-        # **列挙できない＝「掴んでいない」と断定できない**。安全側（掴んでいる扱い）に倒す
-        # （ここで false を返すと batchmode を起動して排他ロックで失敗する）
-        Write-Warning ("Unity プロセスを列挙できませんでした（$($_.Exception.Message)）。" +
-                       "占有されている前提で扱います")
-        return $true
-    } catch { }
-
-    # 2. Unity 自身が書く EditorInstance.json（pid の生存を必ず確かめる）
-    $instanceFile = Join-UappPath $ProjectDir "Library\EditorInstance.json"
-    if (Test-Path -LiteralPath $instanceFile) {
-        try {
-            $editorPid = [int]((Get-Content -LiteralPath $instanceFile -Raw | ConvertFrom-Json).process_id)
-            $proc = if ($editorPid) { Get-Process -Id $editorPid -ErrorAction SilentlyContinue } else { $null }
-            if ($proc -and $proc.ProcessName -eq "Unity") { return $true }
-        } catch { }
-    }
-
-    # 3. ロックファイルの排他オープン（掴まれていれば失敗する）
-    $lock = Join-UappPath $ProjectDir "Temp\UnityLockfile"
-    if (-not (Test-Path -LiteralPath $lock)) { return $false }
-    try {
-        $stream = [System.IO.File]::Open($lock, "Open", "ReadWrite", "None")
-        $stream.Close()
-        return $false
-    } catch {
-        return $true
-    }
+    return ((Get-UappUnityProjectLockState -ProjectDir $ProjectDir).State -ne "unlocked")
 }
 $root = (Resolve-Path -LiteralPath (Join-UappPath $PSScriptRoot "..")).Path
 
@@ -320,8 +252,16 @@ if (-not $Editor) {
     }
 }
 if ($editorHoldsProject) {
-    throw ("エディタがこのプロジェクトを開いているため batchmode テストを実行できません" +
-           "（Unity のプロジェクトロック）: $projectDir。エディタを閉じてから再実行してください。" +
+    # **「確認した」と「判定できなかった」を書き分ける**（issue #51）。
+    # 止めるかどうかは変えない（`unknown` も安全側で止める）― 変わるのは文面だけ
+    $lockState = (Get-UappUnityProjectLockState -ProjectDir $projectDir)
+    $why = if ($lockState.State -eq "locked") {
+        "エディタがこのプロジェクトを開いています（$($lockState.Reason)）"
+    } else {
+        "エディタが開いているかを判定できませんでした（$($lockState.Reason)）。安全側で止めます"
+    }
+    throw ("$why ため batchmode テストを実行できません: $projectDir。" +
+           "エディタを閉じてから再実行してください。" +
            "エディタを開いたまま回したい場合は -Editor を使う（EditMode のみ）")
 }
 
@@ -335,6 +275,85 @@ try {
 } catch {
     # 連携は補助機能。読み込みに失敗してもテスト実行は続ける
 }
+function Get-UnityNoResultHint {
+    <#
+      .SYNOPSIS
+      結果 XML が出なかったときの案内を、**観測したことだけ**で組み立てる（issue #50）。
+
+      .NOTES
+      **以前は `exit=6` を無条件に「エディタが開いている」と断定していた**。
+      2026-08-26 に、**エディタが 1 つも無い状態**（`unity-editor-status.ps1` が
+      「Unity プロセス 0 個」と回答）で、**真因はテストのコンパイルエラー**なのに
+      この案内が出た。案内どおり「エディタを閉じる」を試しても直らない
+      （閉じるエディタが無い）。
+
+      **`exit=6 = プロジェクトロック` は batchmode 経由で学んだ対応**で、
+      **Unity CLI 経路の 6 が同じ意味とは限らない**（このときの Unity 自身のログは
+      `Application will terminate with return code 1` だった＝6 を返したのは CLI 側）。
+      **経路をまたいで終了コードの意味を持ち込まない。**
+
+      順序は「①ログに真因が残っていればそれを言う ②機械で確かめられることを確かめる
+      ③どれとも決まらなければ候補を並べる」。**断定しないと、読み手は消去法を使える。**
+    #>
+    param(
+        [string]$LogPath,
+        [int]$ExitCode,
+        [string]$Via,
+        [string]$ProjectDir,
+        # **このログが今回の走行のものだと言えるか**。消せなかった場合は $false で渡す。
+        # $false のログから真因を名指しすると、前回の痕跡を今回の原因にしてしまう（レビュー指摘）
+        [bool]$LogIsFresh = $true
+    )
+
+    # ① ログの真因。**照合するのは ASCII の定型文だけ**なので、ログの文字コードに左右されない
+    $compileLines = @()
+    if ($LogIsFresh -and $LogPath -and (Test-Path -LiteralPath $LogPath)) {
+        try {
+            $compileLines = @(Get-Content -LiteralPath $LogPath -ErrorAction Stop |
+                              Where-Object { $_ -match "error CS\d+|Scripts have compiler errors" } |
+                              Select-Object -Unique -First 5)
+        } catch {
+            # ログが読めないこと自体は本流を止めない（案内が 1 段弱くなるだけ）
+        }
+    }
+    if ($compileLines.Count -gt 0) {
+        $head = ($compileLines | Select-Object -First 3) -join "; "
+        return ("**コンパイルエラーでテストが走っていません**（ログに $($compileLines.Count) 行）: $head" +
+                " / 全文: $LogPath")
+    }
+
+    # ② 機械で確かめられること。**掴んでいないと分かったらそう言う**（読み手に探させない）
+    $locked = $null
+    $lockReason = ""
+    if ($ProjectDir) {
+        try {
+            $st = Get-UappUnityProjectLockState -ProjectDir $ProjectDir
+            $lockReason = $st.Reason
+            # **unknown を `$true` に丸めない**（issue #51）。丸めると
+            # 「確認した」と書いてしまい、これは #50 で実際にやった間違い
+            $locked = switch ($st.State) { "locked" { $true } "unlocked" { $false } default { $null } }
+        } catch { $locked = $null }
+    }
+    if ($locked -eq $true) {
+        # **3 状態で受けているので、ここは「確認できた占有」だけ**（issue #51）
+        return ("エディタがこのプロジェクトを開いています（$lockReason）: $ProjectDir。" +
+                "エディタを閉じてから再実行してください")
+    }
+
+    # ③ 決まらないときは候補を並べる。**exit コードから原因を名指ししない**
+    $observed = if ($locked -eq $false) {
+        "エディタはこのプロジェクトを掴んでいません（プロセス / EditorInstance / ロックのどれにも掛からなかった）。"
+    } else {
+        "エディタの占有は判定できませんでした（$lockReason）。"
+    }
+    # **$Via は本文へ挿し込まない**。「Unity batchmode（-NoUnityCli） / タイムアウトで強制終了 …」の
+    # ように長い説明が入ることがあり、文が読めなくなる（実測）。経路と終了コードは呼び出し側が既に出す
+    return ($observed + "考えられるのは ①テストが 1 件も収集されなかった " +
+            "②Unity の起動自体に失敗した ③実行側が結果を書き出す前に落ちた、など。" +
+            "**まず Unity のログを読んでください**: $LogPath" +
+            "（占有の確認は scripts\unity-editor-status.ps1 -ProjectPath $ProjectDir）")
+}
+
 function Send-TestEvidence {
     param([hashtable]$Data)
     if (Get-Command Send-DashEvent -ErrorAction SilentlyContinue) {
@@ -653,6 +672,27 @@ if ($Editor) {
 }
 
 # --- 経路B: batchmode（Unity をもう1つ起動する）---------------------------------
+
+# **前回の走行と混ざらないよう、ログを 1 回だけ消す**（issue #50）。
+# 失敗時の案内はこのログから真因（コンパイルエラー）を読むので、**古い痕跡が残っていると
+# 今回の失敗を古い証拠で名指ししうる** ―「断定を直したつもりで、別の断定を作る」形になる
+# （`run-e2e.ps1` の `Save-CliRawEvidence` が「先頭で 1 回切り詰め、以後は追記」なのと同じ考え方）。
+# 実測では Unity CLI / batchmode とも `-logFile` は上書きだが、**truncate するのは Unity 自身**なので
+# 起動しなかった回・起動直後に死んだ回は前回のログが残る（＝案内が呼ばれるのはまさにその回）。
+# **消すのはここ** ― `-Editor` 経路はこのログへ何も書かずに終わるので、
+# **実行の先頭で消すと、内側ループを回すたびに直前の batchmode の証跡が消える**（レビュー指摘）
+$logIsFresh = $true
+if (Test-Path -LiteralPath $logFile) {
+    try {
+        Remove-Item -LiteralPath $logFile -Force
+    } catch {
+        # **消せなかったログは、真因の判定に使わない**（警告だけ出して使い続けると、
+        # 前回のコンパイルエラーを今回の真因として名指ししうる＝直したはずの穴の再導入）
+        $logIsFresh = $false
+        Write-Warning ("前回のテストログを消せませんでした（$logFile）: $($_.Exception.Message)。" +
+                       "このログは今回の走行のものと断定できないため、失敗時の案内では真因の判定に使いません")
+    }
+}
 Write-Host "[$projectName] $Mode テストを実行中（Unity の起動を含むため数分かかります）..."
 
 if ($unityCli) {
@@ -718,11 +758,10 @@ if (-not (Test-Path -LiteralPath $Output)) {
         ok = $false; exitCode = $exit; error = "結果XMLが出力されなかった（$via）"
         reportPath = $Output; logPath = $logFile
     }
-    # exit=6 は Unity のプロジェクトロック。事前検出をすり抜けた場合（pipeline 未導入の
-    # エディタが開いている等、`unity status` に出ないケース）でも、ここで意味を言う
-    $hint = if ($exit -eq 6) {
-        "エディタがこのプロジェクトを開いている可能性が高い（exit=6 は Unity のプロジェクトロック）。エディタを閉じて再実行"
-    } else { "Unity のログを確認" }
+    # **原因を断定せず、観測から組み立てる**（issue #50）。
+    # 以前はここで `exit=6` を無条件に「エディタが開いている」と言っており、
+    # **エディタが 0 個・真因はコンパイルエラー**の場合にも同じ案内を出していた
+    $hint = Get-UnityNoResultHint -LogPath $logFile -ExitCode $exit -Via $via -ProjectDir $projectDir -LogIsFresh $logIsFresh
     throw "テスト結果が出力されませんでした（$via / exit=$exit）: $Output。$hint"
 }
 $xml = [xml](Get-Content -LiteralPath $Output -Raw)

@@ -20,7 +20,9 @@ Claude Code 等の AI エージェントによる自律テスト開発を前提�
   （asmdef defineConstraints。Editor 拡張はエディタ専用アセンブリで、プレイヤービルドには元々入らない）。
   リリースビルドには混入しない
 - **UI階層で操作**: 座標ではなく要素名/パスで dump→resolve→tap。遮蔽検知（hittable / blockedBy）付きで
-  「タップできないのに成功扱い」を防ぐ
+  「タップできないのに成功扱い」を防ぐ。階層が大きいプロジェクトでは **`hittables`**（v0.1.15）で
+  いま押せるものだけを取れる（`dump` は画面に出ていない枝まで JSON にするため、実プロジェクトでは
+  秒単位になることがある）
 - **uGUI / NGUI 両対応**、Input System・レガシー Input 両対応（`e2e-config.json` の `uiType` で切替）
 - **タップ・ドラッグ・ピンチ・複数ポインタの同時操作**（press/release）のジェスチャ注入、
   `wait_until_*` による待機（sleep に頼らない）

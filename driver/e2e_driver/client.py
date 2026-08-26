@@ -451,11 +451,31 @@ class BridgeClient:
             target.write_bytes(png)
         return png
 
-    def dump(self, scope: str = "ui", probe: str = "selectable", path: str | None = None) -> dict:
+    def dump(self, scope: str = "ui", probe: str = "selectable", path: str | None = None,
+             active_only: bool = False) -> dict:
+        """階層を取る。
+
+        active_only=True で**非アクティブな枝を丸ごと省く**（issue #45）。既定は False ―
+        「ダイアログは存在するがまだ非アクティブ」を確認する使い方があり、既定を変えると
+        それを黙って壊す。実機では走査と JSON 化が支配的なので、押せる要素だけが要るなら
+        hittables() のほうが速い（導入先の実測: 同じ画面で dump 390ms / hittables 107ms）。
+        """
         args: dict[str, Any] = {"scope": scope, "probe": probe}
         if path:
             args["path"] = path
+        if active_only:
+            args["activeOnly"] = True
         return self.call("dump", **args)
+
+    def hittables(self) -> dict:
+        """**いま押せる要素だけ**を階層走査なしで返す（issue #45）。
+
+        返るのは {"screen", "scene", "items": [{"path", "center", "interactable"?, "text"?, "ui"?}]}。
+        判定は dump と同じ経路（RaycastProbe / NguiAdapter.Probe）を通すので、
+        **dump(probe="all") の hittable 集合と一致する**のが仕様。
+        重い画面ほど効き、**軽い画面では往復ぶん不利**なので dump の置き換えではない。
+        """
+        return self.call("hittables")
 
     def resolve(self, path: str) -> dict:
         return self.call("resolve", path=path)

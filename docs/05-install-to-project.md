@@ -322,6 +322,29 @@ AVDとエディタ、複数エディタの同時運用のポート設計は [doc
 |---|---|---|
 | **キット所有** | `Assets/uapp_e2e/E2EBridge/`・`uapp_e2e/driver/e2e_driver/`・`uapp_e2e/scripts/`・`uapp_e2e/docs/`・`uapp_e2e/CLAUDE.md`/`AGENTS.md`/`SETUP.md`/`VERSION`・`.claude/skills/e2e-*`・`.agents/skills/e2e-*`・`.claude/rules/uapp-e2e.md`・`uapp_e2e/driver/tests/test_journey_unit.py`/`test_adb_ui.py`/`test_client_unit.py`/`test_bridge_smoke.py` | **上書き更新**（手を入れない前提。変更したい場合はキット側へ還元する） |
 | **プロジェクト所有** | `uapp_e2e/e2e-config.json`・`uapp_e2e/driver/tests/` の自作テスト・**`uapp_e2e/scripts-local/` の自作運用スクリプト**・`uapp_e2e/config/local.json`・`uapp_e2e/Builds/`（ジャーニー記録含む）・ルート `AGENTS.md`（`-RootAgentsMd` で作成した場合も以後は触らない） | **触らない** |
+
+### キットが配布をやめたファイル（issue #42）
+
+キットは**配布をやめたファイルの一覧**（`retired-files.json`）を持っていて、
+更新のたびに導入先を照合し、**残っていれば報告します**。
+
+```
+[情報] キットが配布をやめたファイルが残っています（1 件）:
+  uapp_e2e\docs\old-guide.md
+    v0.1.12 で配布終了 / 内容はキットが配ったままです
+  **キットは削除しません。** 使っていなければ導入先の判断で削除してください
+```
+
+**キットは削除しません。** キットには「**導入先がそのファイルを使い続けているか**」を知る手段が無いためです
+（採用して運用に組み込んでいるかもしれない）。**判断材料だけ渡して、消すかどうかは導入先が決める**という分担です。
+
+- **改変されているか**も併せて出します（前回の `kit-manifest.json` と突き合わせる）。
+  **記録が無ければ「判定できません」と述べます**（手で導入した・記録を消した・注入モードの対象では普通に起こる）
+- 使い続けるなら **`uapp_e2e\scripts-local\` など、キットが触らない場所へ移す**と更新で消えません
+- **例外は開発専用スクリプト**（キットには同梱されない、開発リポジトリだけの `.ps1`）です。
+  あれは**キット自身が置いたと分かっていて、かつ未改変のときだけ**削除します
+  （配らないものが導入先に残り続けないため）
+
 | **初回のみ生成** | `uapp_e2e/driver/tests/conftest.py`（キット取り込みの1行＋プロジェクト追記領域） | 既存があれば**保持**（フィクスチャの実体は `e2e_driver` パッケージ側にあるため、conftest を更新しなくてもキットの新機能が届く） |
 
 **自作の運用スクリプトは `uapp_e2e/scripts-local/` へ置く**（installer が README つきで作る）。
