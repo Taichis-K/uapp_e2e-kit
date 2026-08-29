@@ -1,4 +1,4 @@
-﻿# Unity の EditMode/PlayMode テスト（内側ループ）を実行し、結果を AI が読める要約で出力する。
+# Unity の EditMode/PlayMode テスト（内側ループ）を実行し、結果を AI が読める要約で出力する。
 # E2E（外側ループ）はビルドや実機が要るため、ロジックの検証はまずこちらで回す（docs/04-ai-loop.md）。
 # 使い方: .\scripts\run-unity-tests.ps1 [-Project unity-nis] [-Mode EditMode|PlayMode] [-Filter <pattern>]
 #
@@ -14,6 +14,9 @@ param(
     # 開いているエディタの中でテストを回す（Unity をもう1つ起動しない）。EditMode 専用。
     # 実測: EditMode 4件が batchmode 経路 約48秒 → エディタ内 約3秒。1行直すたびに回す内側ループ向け
     [switch]$Editor,
+    # **コンパイルだけ確認して終わる**（issue #57）。`run-e2e.ps1 -Editor` が Play へ入る前に呼ぶ。
+    # `-Editor` と併用する（batchmode 経路には「開いているエディタのコンパイル」という概念が無い）
+    [switch]$RecompileOnly,
     [string]$Filter,                  # テスト名の絞り込み（例: MyNamespace.MyTests）
     [string]$Output,                  # NUnit XML の出力先（既定: Builds\test-results-<project>-<mode>.xml）
     [int]$TimeoutSeconds = 1800,      # Unity プロセスを強制終了するまでの秒数（終了ハング対策）
@@ -624,13 +627,80 @@ if ($Editor) {
     }
     $compilationBroken = $probeResult -eq "1"
     if ($compilationBroken -or $compileFailed -or $compileErrors.Count -gt 0) {
+        # **2 回目以降は原因（file:line）が取れない**、という穴をここで塞ぐ（mac が実測して報告）。
+        # `recompile` は毎回投げているが、**Unity はスクリプトが変わっていなければ再コンパイルしない**
+        # ので、`recompile_status` が `errors` を持つのは「実際にコンパイルが走った回」だけになる。
+        # 壊れたまま 2 回目を打つと `scriptCompilationFailed` は真のままなのに `errors` は空で、
+        # 「（詳細はエディタの Console を確認）」しか出ない ―
+        # **AI は Console を見に行けないので、そこで原因の糸が切れる**。
+        # `run-e2e -Editor` が毎回ここを通るようになった（issue #57）ぶん、踏む頻度も上がっている。
+        #
+        # **判定は変えない。** ここへ来る時点で「壊れている」は確定済み（`$compilationBroken`）で、
+        # これは**表示のためだけ**の取り直し。取れなくても結論は同じ（下でそのまま止める）。
+        # **公開 API だけで済ませる** ― エディタの Console を直接覗く `UnityEditor.LogEntries` は
+        # internal で版によって形が変わるうえ、型名の文字列を CLI へ渡す必要が出る。
+        # `RequestScriptCompilation()` なら**文字列リテラルなしの 1 行**で、
+        # 既存の `recompile_status` の経路にそのまま文言が戻る（実測で確認）。
+        $retakeTried = $false
+        if ($compileErrors.Count -eq 0) {
+            $retakeTried = $true
+            Write-Host "[$projectName] エラーの原因を取り直しています（再コンパイルを要求）..."
+            $retake = Invoke-Pipeline @("eval", "--code",
+                "UnityEditor.Compilation.CompilationPipeline.RequestScriptCompilation(); return 1;") `
+                -AllowFail -TimeoutSeconds 60
+            if ($retake -and $retake.success) {
+                # **取り直しに時間を使いすぎない**（すでに失敗が確定している場所なので、
+                # 待たせるほど価値は増えない）。応答が返らないまま 30 秒たったら諦める ―
+                # コンパイルが**通った**場合はドメインリロードでサーバごと落ちるが、
+                # そのときはそもそも文言が無いので待つ意味がない
+                $retakeWait = [System.Diagnostics.Stopwatch]::StartNew()
+                $lastSeen = [System.Diagnostics.Stopwatch]::StartNew()
+                while ($retakeWait.Elapsed.TotalSeconds -lt 120) {
+                    Start-Sleep -Milliseconds 700
+                    $again = Invoke-Pipeline @("recompile_status") -AllowFail -TimeoutSeconds 60
+                    if (-not $again -or -not $again.success) {
+                        if ($lastSeen.Elapsed.TotalSeconds -ge 30) { break }
+                        continue
+                    }
+                    $lastSeen.Restart()
+                    $againState = $again.data.result
+                    if ($againState -is [string]) {
+                        try { $againState = $againState | ConvertFrom-Json } catch { continue }
+                    }
+                    if (@($againState.errors).Count -gt 0) {
+                        $compileErrors = @($againState.errors)
+                        break
+                    }
+                    # 終端まで来て文言が無ければ、それ以上待っても出てこない
+                    if ("$($againState.status)$($againState.state)" -match $terminal) { break }
+                }
+            }
+        }
         Write-Host ""
         Write-Host "=== コンパイルエラー ==="
         foreach ($e in ($compileErrors | Select-Object -First 20)) { Write-Host "  $e" }
-        if ($compileErrors.Count -eq 0) { Write-Host "  （詳細はエディタの Console を確認）" }
+        if ($compileErrors.Count -eq 0) {
+            # **観測したことだけを書く。** 取り直しを試したかどうかで文面を分ける ―
+            # 試していないのに「取り直しても駄目だった」と書くと、読み手が次に何を疑えばよいか
+            # 分からなくなる
+            if ($retakeTried) {
+                Write-Host "  （取り直しても文言が得られませんでした。エディタの Console を確認してください）"
+            } else {
+                Write-Host "  （詳細はエディタの Console を確認）"
+            }
+        }
         Write-Host ""
         throw ("スクリプトのコンパイルが通っていません。テストは実行しません" +
                "（このまま走らせると古いアセンブリで緑になり、壊れたコードを通してしまう）")
+    }
+
+    if ($RecompileOnly) {
+        # **エディタ直結 E2E から呼ばれる経路**（issue #57）。`run-e2e.ps1 -Editor` は
+        # 再コンパイルしないので、E2EBridge の C# を直した直後は**古いアセンブリで走る**。
+        # 検証の緑が古い計装のものになる＝偽の緑なので、Play へ入る前にここを通す。
+        # **実装はこの 1 つだけ**（#16・#38 で 2 度焼かれた繊細な待ち方を複製しない）
+        Write-Host "[$projectName] コンパイルは最新です"
+        exit 0
     }
 
     Write-Host "[$projectName] $Mode テストを実行中（開いているエディタ内）..."

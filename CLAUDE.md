@@ -169,6 +169,10 @@ python -m e2e_driver.journey ..\Builds\journey    # → report.html 生成（詳
    （生成済みかは `virtualDevices` の `created`。注入前に `devices` を名前で引くと `KeyError` になる）。
    テスト後は `client.input_reset()`（注入に使うデバイスが無効化されたままなら再有効化する
    ＝復旧路も兼ねる。実機のキーボード・マウス・パッドには触らない）。
+   **`input_reset()` は押されたままのタッチポインタも解放する**（`releasedPointers`）。
+   **異常終了したときこそこれを打つ** ― 常駐スクリプトを kill すると押下が残り、
+   以後のタップが全部 `POINTER_ALREADY_DOWN` で落ちる。
+   **症状は「特定のボタンが効かない」に見える**ので、アプリ側を疑う前にまず解放すること。
    エディタ再生では Game view のフォーカスに注入が左右されないよう初回注入時に Input System 設定を
    自動で切り替える（再生終了時に復元。適用状態は `input_devices` の `editorFocusOverride`）。
    レガシー入力バックエンドのみの構成では `INPUT_BACKEND_LEGACY` で明示的に失敗する

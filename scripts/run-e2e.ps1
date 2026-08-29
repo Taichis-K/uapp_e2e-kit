@@ -1,4 +1,4 @@
-﻿# 指定サンプルプロジェクトの APK インストール〜アプリ起動〜pytest 実行を一括で行う。
+# 指定サンプルプロジェクトの APK インストール〜アプリ起動〜pytest 実行を一括で行う。
 # プロジェクト固有設定（package/activity/tests/deviceRotation）は <Project>\e2e-config.json から読む。
 # 使い方: .\scripts\run-e2e.ps1 [-Project unity-nis|unity-ngui-nis|unity-ngui-legacy] [-SkipInstall] [-PytestArgs "-k xxx"]
 #
@@ -17,6 +17,9 @@ param(
     [string]$JourneyDir,     # ジャーニー記録の出力先（未指定: Builds\journey。docs/07-viewer.md）
     [switch]$NoJourney,      # ジャーニー記録を無効化する
     [switch]$Editor,             # エディタ直結モード（Unity CLI で Play 制御。ヘッダコメント参照）
+    # **Play へ入る前の再コンパイル確認を飛ばす**（issue #57）。既定は確認する ―
+    # 飛ばすと、C# を直した直後に古いアセンブリで走って偽の緑になる
+    [switch]$SkipRecompile,
     [string]$Scene,              # -Editor: 開くシーン（未指定: Build Settings の先頭シーン）
     [string]$EditorResolution,   # -Editor: Game view 解像度 "幅x高さ"（未指定: orientation から 1080x2340/2340x1080）
     # -Editor: エディタが pipeline コマンドに応答するまで待つ上限（秒）。コールドスタート直後は
@@ -842,6 +845,33 @@ if ($Editor) {
     if ($playMode -ne "stopped") {
         throw ("エディタは既に Play セッション中です（playMode=$playMode。他タスク/他セッションが使用中の可能性）。" +
                "意図的に奪う場合は 'unity cmd editor_stop' 後に再実行")
+    }
+
+    # **Play へ入る前にコンパイルを最新にする**（issue #57）。
+    # ここを通さないと、E2EBridge の C# を直した直後でも**既に起動しているエディタが持つ
+    # 古いアセンブリのまま走る** ― 「直した → エディタ直結で確認 → 緑」という自然な流れで
+    # 偽の緑になる（実際にこの A/B で踏んだ。修正前へ戻したのにテストが通った）。
+    # **実装は run-unity-tests.ps1 に 1 つだけ**（#16・#38 で 2 度焼かれた繊細な待ち方を複製しない）。
+    # `-SkipRecompile` で飛ばせる（コンパイルが重いプロジェクトで、直前に確認済みのとき）
+    if (-not $SkipRecompile) {
+        # **`$LASTEXITCODE` だけを見てはいけない**（mac の指摘）。子スクリプトは
+        # コンパイルエラーを `throw` で落とすので、`$ErrorActionPreference = "Stop"` の下では
+        # **例外がそのまま親へ伝播して、次の行に到達しない** ―
+        # 中断は正しく効くのに、**`-SkipRecompile` の案内だけが利用者に届かなかった**。
+        # `try/catch` と終了コードの**両方**を見る（子が exit で落ちる経路も残っているため）
+        $recompileFailure = $null
+        try {
+            & (Join-UappPath $PSScriptRoot "run-unity-tests.ps1") -ProjectPath $projectDir `
+                -Editor -RecompileOnly -UnityCliProxyDisable:$UnityCliProxyDisable
+            if ($LASTEXITCODE -ne 0) { $recompileFailure = "exit=$LASTEXITCODE" }
+        }
+        catch { $recompileFailure = $_.Exception.Message }
+        if ($recompileFailure) {
+            throw ("コンパイルが最新であることを確認できませんでした: $recompileFailure" +
+                   [Environment]::NewLine +
+                   "古い計装のまま E2E を通すと**偽の緑**になるので中断します。" +
+                   "上のエラーを解消するか、確認済みなら -SkipRecompile を付けてください")
+        }
     }
 
     # シーン: 未指定なら Build Settings の先頭有効シーン

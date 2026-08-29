@@ -1,4 +1,4 @@
-﻿# E2EBridge と E2E キット一式を既存の Unity プロジェクトへ導入する。
+# E2EBridge と E2E キット一式を既存の Unity プロジェクトへ導入する。
 # 使い方: .\install-to-project.ps1 -ProjectPath <Unityプロジェクトのパス> [-Agents claude|codex|both] [-IncludeSampleTests] [-RootAgentsMd]
 # 実行元は 配布キット（package-kit.ps1 が生成した zip の展開先）/ 開発リポジトリ のどちらでもよい（自動判定）。
 # -Agents: 配置する AI エージェント導線の選択（既定 both）。
@@ -623,6 +623,9 @@ $configDest = Join-UappPath $kit "e2e-config.json"
 $configExisted = Test-Path -LiteralPath $configDest
 if (-not $configExisted) {
     Copy-Item -LiteralPath (Join-UappPath $src.Config "e2e-config.sample.json") $configDest
+    # **生成したファイルも LF へ**（issue #55）。導入先が編集してコミットするので、
+    # CRLF のままだとキット所有ファイルと同じ差分ノイズが出る
+    [void](Convert-UappFileToLf -Path $configDest)
     Write-Host "  [OK] e2e-config.json（テンプレから生成 → package 等を編集してください）"
 } else {
     Write-Host "  [SKIP] e2e-config.json（既存を維持）"
@@ -796,6 +799,19 @@ if ($strays) {
     }
 }
 
+# **配置したキット所有ファイルの改行を LF へ揃える**（issue #55）。
+# 配布 zip 側は package-kit が梱包の出口で揃えるが、**開発リポジトリから直接導入する経路**は
+# そこを通らない。片方だけ直すと、**そちらの経路でだけ CRLF が導入先へ届く**
+# （「同じ規約を 2 か所へ手書きしない」と同型で、実装は uapp-platform に 1 つだけ置く）。
+# 記録より**先に**揃える ― 後だと manifest が正規化前の内容で書かれ、
+# 直後の -VerifyManifest が「改変」と言う（記録側も LF 正規化するので実害は無いが、
+# 「記録した中身」と「置いた中身」が食い違うのは避ける）
+$lfChanged = 0
+foreach ($f in (Get-KitOwnedFiles $target $ownedSourceMap)) {
+    if (Convert-UappFileToLf -Path $f) { $lfChanged++ }
+}
+if ($lfChanged -gt 0) { Write-Host "  [OK] 改行を LF へ正規化: $lfChanged ファイル（BOM は保つ）" }
+
 foreach ($f in (Get-KitOwnedFiles $target $ownedSourceMap | Sort-Object)) {
     $rel = $f.Substring($target.Length + 1)
     # **大小文字だけが違うキーは 1 つに潰れる**（`[ordered]@{}` は大小文字を区別しない）。
@@ -823,6 +839,9 @@ foreach ($f in (Get-KitOwnedFiles $target $ownedSourceMap | Sort-Object)) {
     $manifestEntries[$rel] = Get-KitFileHash $f   # テキストは改行を正規化して記録（OS 間で揃える）
 }
 $manifestEntries | ConvertTo-Json | Set-Content -LiteralPath $manifestPath -Encoding utf8
+# **生成したファイルも LF へ**（issue #55）。導入先で git 管理されるので、
+# CRLF のままだとキット所有ファイルと同じ差分ノイズが出る
+[void](Convert-UappFileToLf -Path $manifestPath)
 Write-Host "  [OK] uapp_e2e\kit-manifest.json（次回更新時のローカル改変検知用）"
 
 # --- 4.6 配布をやめたファイルの報告（issue #42） ---------------------------

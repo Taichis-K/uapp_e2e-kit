@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using Newtonsoft.Json.Linq;
 using UnityEngine;
@@ -57,7 +58,13 @@ namespace E2EBridge
             var id = RequireInt(args, "pointerId");
             var pos = RequirePos(args);
             if (_pointers.ContainsKey(id))
-                throw new BridgeException(ErrorCodes.PointerAlreadyDown, $"pointerId {id} is already down");
+                // **次の一手を書く**。異常終了（walker を kill する等）で押下が残ると、
+                // 以後のタップが全部これで落ちる。症状は「特定のボタンが効かない」に見えるので、
+                // 解放手段が書かれていないと**アプリ側の不具合を探しに行く**（導入先で実際に起きた）
+                throw new BridgeException(ErrorCodes.PointerAlreadyDown,
+                    $"pointerId {id} is already down"
+                    + $" — 前の操作が異常終了して押下が残っている可能性がある。"
+                    + $"pointer_up({id}) か input_reset() で解放できる");
 
             var state = new PointerState { TouchId = NextTouchId(), Position = pos };
             _pointers[id] = state;
@@ -87,13 +94,29 @@ namespace E2EBridge
             return Ack(id, state.Position);
         }
 
-        /// <summary>テスト間クリーンアップ用: アクティブな全ポインタを解放する。</summary>
+        /// <summary>
+        /// テスト間クリーンアップ用: アクティブな全ポインタを解放する。
+        ///
+        /// <para>**台帳の破棄は必ず行う**（`finally`）。`Queue` が 1 つでも失敗すると
+        /// `_pointers` が残り、**復旧コマンドを打ったのに `POINTER_ALREADY_DOWN` のまま**になる
+        /// ― 直そうとしている状態を、復旧路の失敗が固定してしまう（codex の指摘）。
+        /// Ended を送れなかったぶんはアプリ側に押下が残りうるが、
+        /// **こちら側が「押している」と思い続けるよりは軽い**（次の `pointer_down` が通る）。</para>
+        ///
+        /// <para>1 つの失敗で残り全部を諦めないよう、**送出は 1 件ずつ切り離す**。</para>
+        /// </summary>
         public static JToken Reset()
         {
-            foreach (var kv in _pointers)
-                Queue(kv.Value.TouchId, TouchPhase.Ended, kv.Value.Position, Vector2.zero);
             var released = _pointers.Count;
-            _pointers.Clear();
+            try
+            {
+                foreach (var kv in _pointers)
+                {
+                    try { Queue(kv.Value.TouchId, TouchPhase.Ended, kv.Value.Position, Vector2.zero); }
+                    catch (Exception ex) { Debug.LogException(ex); }
+                }
+            }
+            finally { _pointers.Clear(); }
             return new JObject { ["released"] = released };
         }
 

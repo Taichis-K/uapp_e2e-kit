@@ -1,4 +1,4 @@
-﻿# E2E キット一式をプロジェクトから取り外す（install-to-project.ps1 の対）。
+# E2E キット一式をプロジェクトから取り外す（install-to-project.ps1 の対）。
 # 導入時に <プロジェクト>\uapp_e2e\scripts\uninstall.ps1 として配布され、kit zip が無くても単体で実行できる。
 # 使い方: .\uninstall.ps1 [-ProjectPath <Unityプロジェクトのパス>] [-Purge]
 #   既定:   キット所有ファイルのみ削除。プロジェクト所有（e2e-config.json / driver\tests\ の自作テストと

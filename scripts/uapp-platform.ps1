@@ -854,6 +854,82 @@ function Get-UappDevOnlyScript {
     )
 }
 
+function Test-UappBinaryFile {
+    <#
+      .SYNOPSIS
+      バイナリかどうかを NUL バイトの有無で判定する（拡張子で決めない）。
+
+      .NOTES
+      **列挙は必ず漏れる**（実際に `.html`＝viewer.html が漏れていた）。
+      NUL の有無なら、新しい種類のファイルが増えても勝手に追随する。
+      **先頭だけでなく全体を見る** ― 先頭 8000 バイトだけの判定だと、
+      NUL がもっと後ろにあるバイナリを「テキスト」と誤認する。
+      残る限界: NUL を 1 つも含まないバイナリはテキスト扱いになる。
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    for ($i = 0; $i -lt $bytes.Length; $i++) { if ($bytes[$i] -eq 0) { return $true } }
+    return $false
+}
+
+function Convert-UappTextToLf {
+    <#
+      .SYNOPSIS
+      配布ツリーのテキストファイルの改行を LF へ揃える（issue #55）。
+
+      .DESCRIPTION
+      **配布物の改行が「どの OS で梱包したか」で変わっていた**。Windows は
+      `core.autocrlf=true` で作業ツリーが CRLF になるので、そこから梱包すると
+      zip の中身が CRLF になる（mac で梱包すれば LF）。
+
+      導入先が Windows でコミットしていると blob は LF なので、
+      **mac で installer を回した瞬間にキット所有ファイルが全行差し替えに見える**
+      （導入先の実測: 通常 diff 14,504 行 / `--ignore-cr-at-eol` 1,224 行）。
+      差分レビューが成立しない。
+
+      .NOTES
+      **バイト列のまま CR を落とす**（文字コードを解釈し直すと BOM や不正なバイト列で
+      内容が変わる）。**BOM は保たれる** ― md は BOM ありが正、`.ps1` は BOM なしが正、
+      という使い分けを壊さない。
+      `kit-manifest.json` は元から LF 正規化後のハッシュを取るので、照合は影響を受けない。
+    #>
+    param([Parameter(Mandatory)][string]$Root)
+    $changed = 0
+    # **Get-UappTreeFile はフルパスの文字列を返す**（FileInfo ではない）
+    foreach ($file in (Get-UappTreeFile -Path $Root)) {
+        if (Convert-UappFileToLf -Path $file) { $changed++ }
+    }
+    return $changed
+}
+
+function Convert-UappFileToLf {
+    <#
+      .SYNOPSIS
+      1 ファイルの改行を LF へ揃える。変換したら $true、しなければ $false。
+
+      .NOTES
+      **バイト列のまま CR を落とす**（文字コードを解釈し直すと BOM や不正なバイト列で
+      内容が変わる）。バイナリは触らない。
+      **installer が生成するファイル**（`e2e-config.json` / `kit-manifest.json`）にも要る ―
+      どちらも導入先で git 管理されるので、CRLF のままだと
+      キット所有ファイルと同じ差分ノイズが出る。
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    if (Test-UappBinaryFile -Path $Path) { return $false }
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    $out = New-Object System.Collections.Generic.List[byte]
+    $hit = $false
+    for ($i = 0; $i -lt $bytes.Length; $i++) {
+        if ($bytes[$i] -eq 13 -and ($i + 1) -lt $bytes.Length -and $bytes[$i + 1] -eq 10) {
+            $hit = $true; continue
+        }
+        $out.Add($bytes[$i])
+    }
+    if ($hit) { [System.IO.File]::WriteAllBytes($Path, $out.ToArray()) }
+    return $hit
+}
+
 function Copy-UappKitDoc05 {
     <#
       .SYNOPSIS
@@ -881,9 +957,11 @@ function Copy-UappKitDoc05 {
     $text = $text `
         -replace '\[docs/04-ai-loop\.md\]\(04-ai-loop\.md\)', '[docs/ai-loop.md](ai-loop.md)' `
         -replace '\[06-release\.md\]\(06-release\.md\)', '開発リポジトリの docs/06-release.md'
-    # **BOM なしで書く**（Get-Content -Raw は BOM を落とすので、開発リポジトリ側の
-    # BOM 付き .md を読んでも同じバイト列になる）。従来 package-kit が配っていた形と同じ
-    Set-Content -LiteralPath $Destination -Value $text -NoNewline -Encoding utf8NoBOM
+    # **BOM 付きで書く**（md は BOM ありがこのリポジトリの規約）。
+    # `Get-Content -Raw` は BOM を落とすので、**明示しないと BOM なしで配られる** ―
+    # 実際そうなっていて、**配布物だけ規約から外れていた**（mac が実測して発見）。
+    # `utf8BOM` は PowerShell 7 以降。キットは pwsh 7 が前提なので使える
+    Set-Content -LiteralPath $Destination -Value $text -NoNewline -Encoding utf8BOM
 }
 
 function Start-UappBackgroundProcess {

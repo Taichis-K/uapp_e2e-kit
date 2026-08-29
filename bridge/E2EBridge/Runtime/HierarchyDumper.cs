@@ -37,11 +37,8 @@ namespace E2EBridge
             }
             else if (scope == "ui")
             {
-                roots.AddRange(FindAll<Canvas>()
-                    .Where(c => c.isRootCanvas)
-                    .OrderBy(c => c.sortingOrder)
-                    .Select(c => c.transform));
-                // NGUI ツリー（存在する場合のみ）
+                // uGUI と NGUI は**別のルート**。同時使用のときは両方が並ぶ
+                roots.AddRange(CanvasRoots());
                 roots.AddRange(NguiAdapter.FindRoots().Where(r => !roots.Contains(r)));
             }
             else // "scene" / "all"
@@ -67,6 +64,16 @@ namespace E2EBridge
                 ["scene"] = SceneManager.GetActiveScene().name,
                 ["nodes"] = nodes
             };
+        }
+
+        /// <summary>root Canvas（描画順）。uGUI の表示系はこの配下にある。</summary>
+        private static List<Transform> CanvasRoots()
+        {
+            return FindAll<Canvas>()
+                .Where(c => c.isRootCanvas)
+                .OrderBy(c => c.sortingOrder)
+                .Select(c => c.transform)
+                .ToList();
         }
 
         private static JToken DumpNode(Transform t, string probe, bool activeOnly = false)
@@ -211,6 +218,215 @@ namespace E2EBridge
                 ["scene"] = SceneManager.GetActiveScene().name,
                 ["items"] = items
             };
+        }
+
+        /// <summary>指定した型の表示テキストを**パスと本文だけ**で返す（issue #56）。</summary>
+        ///
+        /// <remarks>
+        /// <para><see cref="Hittables"/> は**押せる要素のテキストしか返さない**ので、
+        /// 見出し・残数表示・セリフのような「押せないが読みたい」テキストが取れず、
+        /// 導入先が自前の計装（`FindObjectsByType&lt;TMP_Text&gt;`）を残していた。</para>
+        ///
+        /// <para>**`types` と `scope` は呼ぶ側が決める。こちらは推測しない。**
+        /// 使う側は自分の UI がどのクラスで、どこに置かれているかを知っている。
+        /// **型から置き場所を決めつけない** ― 3D メッシュ系が Canvas の下にいることもあれば、
+        /// uGUI を独自のルートでまとめていることもある。**決め打つと必ずどこかで外す**。</para>
+        ///
+        /// <para>`scope`（既定 `"scene"`）:
+        /// <code>
+        ///   "scene"  … 読み込み済みの全体から探す（**取りこぼさない**。既定）
+        ///   "canvas" … root Canvas の配下だけ
+        ///   "ngui"   … NGUI の UIRoot の配下だけ
+        ///   "&lt;パス&gt;"  … そのオブジェクトの配下だけ（dump の `path` と同じ表記）
+        /// </code>
+        /// **`DontDestroyOnLoad` 配下も対象**（`FindObjectsByType` は読み込み済みの全オブジェクトを
+        /// 返すので、`SceneManager` の列挙と違って常駐オブジェクトが漏れない）。
+        /// 常駐しているものには `dontDestroyOnLoad: true` を付けて返す ―
+        /// **実プロジェクトの常駐 UI はここに居る**ので、印が無いと
+        /// 「シーン遷移したのに同じ文字列が出ている」を読み違える。</para>
+        /// **既定を `scene` にするのは、絞るのは速さのためであって正しさのためではない**から。
+        /// 速さが要る呼び手（毎フレーム近く叩く walker など）が、
+        /// **自分の構成を知ったうえで**絞る。</para>
+        ///
+        /// <para>**解決できなかった型は必ず返す**（`unknownTypes`）。黙って空を返すと、
+        /// 型名を打ち間違えただけなのに「テキストが無い」と読めてしまう＝**偽の緑**。</para>
+        ///
+        /// <para>`dump` の <see cref="ExtractText"/> とは**別物**（揃えない）。
+        /// dump は階層を全部見せる口なので型を絞れず、名前の部分一致で拾うのが妥当。
+        /// こちらは型指定なので照合が要らない。**用途が違うので判定も違ってよい**。</para>
+        /// </remarks>
+        public static JToken Texts(JObject args)
+        {
+            var requested = new List<string>();
+            if (args["types"] is JArray typeArg)
+                foreach (var t in typeArg) { var n = (string)t; if (!string.IsNullOrEmpty(n)) requested.Add(n); }
+            if (requested.Count == 0)
+                throw new BridgeException(ErrorCodes.BadRequest,
+                    "'types' (string[]) is required — 集めたい表示コンポーネントの型を指定してください"
+                    + "（例: UnityEngine.UI.Text / TMPro.TextMeshProUGUI / UILabel / UnityEngine.TextMesh）。"
+                    + "dump の components に出ている型名がそのまま使えます");
+
+            var scope = (string)args["scope"] ?? "scene";
+            var roots = RootsForScope(scope);
+
+            var items = new JArray();
+            var resolved = new JArray();
+            var unknown = new JArray();
+            var seen = new HashSet<int>();
+
+            foreach (var name in requested)
+            {
+                var type = FindComponentTypeByName(name);
+                if (type == null) { unknown.Add(name); continue; }
+
+                var before = items.Count;
+                foreach (var component in ComponentsIn(roots, type))
+                {
+                    var go = component.gameObject;
+                    // 同じ GameObject に複数の対象型が付いていても 1 件（例: Text と InputField）
+                    if (!seen.Add(go.GetInstanceID())) continue;
+                    var text = TextOf(component);
+                    // **空文字も落とさない**。空になっていること自体が見たい情報
+                    // （表示が消えた・まだ入っていない、の判別）
+                    if (text == null) continue;
+                    var item = new JObject { ["path"] = GetPath(go.transform), ["text"] = text };
+                    // **常駐オブジェクトであることを示す**（`dump` のノードと同じ印）。
+                    // 「このシーンだけの表示か、常駐の表示か」で読み方が変わる ―
+                    // シーン遷移をまたいで同じ文字列が出ていても、別物とは限らない
+                    if (IsDontDestroyOnLoad(go)) item["dontDestroyOnLoad"] = true;
+                    items.Add(item);
+                }
+                resolved.Add(new JObject
+                {
+                    ["type"] = type.FullName,
+                    ["count"] = items.Count - before
+                });
+            }
+
+            return new JObject
+            {
+                ["scene"] = SceneManager.GetActiveScene().name,
+                ["scope"] = scope,
+                ["items"] = items,
+                ["resolvedTypes"] = resolved,
+                ["unknownTypes"] = unknown
+            };
+        }
+
+        /// <summary>
+        /// `scope` を探索の起点へ変換する。`null` を返したらシーン全体。
+        ///
+        /// <para>**絞った結果が空でも、それは呼び手の指定どおり**（黙って全体へ広げない）。
+        /// 広げると「絞ったつもりが効いていない」ことに気づけない。</para>
+        /// </summary>
+        private static List<Transform> RootsForScope(string scope)
+        {
+            switch (scope)
+            {
+                case "scene":
+                case "all":
+                    return null;                       // シーン全体
+                case "canvas":
+                    return CanvasRoots();
+                case "ngui":
+                    return NguiAdapter.FindRoots().ToList();
+                default:
+                    // パス指定（dump の `path` と同じ表記）。見つからなければ NOT_FOUND で止まる
+                    return new List<Transform> { Require(scope).transform };
+            }
+        }
+
+        /// <summary>起点（null ならシーン全体）から、その型のアクティブなコンポーネントを集める。</summary>
+        private static IEnumerable<Component> ComponentsIn(List<Transform> roots, Type type)
+        {
+            if (roots == null)
+            {
+                foreach (var obj in FindAllActive(type))
+                    if (obj is Component c) yield return c;
+                yield break;
+            }
+            foreach (var root in roots)
+            {
+                if (root == null || !root.gameObject.activeInHierarchy) continue;
+                foreach (var component in root.GetComponentsInChildren(type, false))
+                    yield return component;
+            }
+        }
+
+        /// <summary>
+        /// 型名から **Component の** Type を引く（完全修飾名でも短い名前でも可）。無ければ null。
+        ///
+        /// <para>**Component でない型は「無い」として扱う**（`texts` が集められるのは Component だけ）。
+        /// 以前は名前が一致した型を無条件に返しており、**非 Component の同名が別アセンブリに居ると、
+        /// 列挙順で先に当たったほうを黙って返して `NullReferenceException` になっていた**。
+        /// mac の実測で `Text` が 3 件（`System.Net.Mime.MediaTypeNames+Text` /
+        /// `System.Xml.Xsl.Xslt.Text` / `UnityEngine.UI.Text`）当たり、
+        /// **非 Component が先に返って落ちた**。`Text` は `dump` の `components` に出る短い名前そのもので、
+        /// `UILabel` や `TextMesh` は通るぶん **「通ったり落ちたりする」という悪い形**だった。</para>
+        ///
+        /// <para>**短い名前で Component が複数当たったら、1 つ選ばずに止める**（`AMBIGUOUS`）。
+        /// **列挙順に依存して黙って別の型を選ぶのが一番まずい** ―
+        /// 呼び手は「なぜか集まらない」ことにしか気づけない。
+        /// 候補は完全修飾名で返すので、そのまま `types` に書き直せる。</para>
+        /// </summary>
+        private static Type FindComponentTypeByName(string name)
+        {
+            // 1) 完全修飾名。短い名前より**曖昧になりにくい**ので先に引く
+            //    （**「曖昧さが無い」とは言えない** ― 別々の asmdef が同じ名前空間＋型名を
+            //    定義すれば完全修飾名でも重複しうる。**未再現**なので候補を集める形にはしない）
+            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                var type = assembly.GetType(name);
+                if (IsComponentType(type)) return type;
+            }
+
+            // 2) 短い名前で指定されたとき（`Text` / `UILabel` など）。**Component だけを候補にする**
+            var candidates = new List<Type>();
+            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+                foreach (var type in TypesOf(assembly))
+                    if (type != null && type.Name == name && IsComponentType(type) && !candidates.Contains(type))
+                        candidates.Add(type);
+
+            if (candidates.Count == 1) return candidates[0];
+            if (candidates.Count > 1)
+                throw new BridgeException(ErrorCodes.Ambiguous,
+                    "型名 '" + name + "' は Component の型に " + candidates.Count
+                    + " 件一致します。完全修飾名で指定してください: "
+                    + string.Join(" / ", candidates.Select(c => c.FullName).ToArray()));
+            return null;
+        }
+
+        private static bool IsComponentType(Type type)
+        {
+            return type != null && typeof(Component).IsAssignableFrom(type);
+        }
+
+        /// <summary>アセンブリの型一覧。**読めない型があっても読めた分だけ使う**。
+        ///
+        /// <para>1 本のアセンブリが `ReflectionTypeLoadException` を投げると `texts` 全体が落ちる。
+        /// **この環境では再現していない**（mac の実測で 194 アセンブリ中 0 件）が、
+        /// プラグインの多い実プロジェクトでは起こりうるので、落とさない側に倒す。</para>
+        /// </summary>
+        private static IEnumerable<Type> TypesOf(Assembly assembly)
+        {
+            try { return assembly.GetTypes(); }
+            catch (ReflectionTypeLoadException e) { return e.Types.Where(x => x != null); }
+        }
+
+        private static UnityEngine.Object[] FindAllActive(Type type)
+        {
+#if UNITY_2023_1_OR_NEWER
+            return UnityEngine.Object.FindObjectsByType(type, FindObjectsInactive.Exclude, FindObjectsSortMode.None);
+#else
+            return UnityEngine.Object.FindObjectsOfType(type, false);
+#endif
+        }
+
+        /// <summary>コンポーネントの "text" プロパティ。</summary>
+        private static string TextOf(Component component)
+        {
+            var prop = component.GetType().GetProperty("text", BindingFlags.Instance | BindingFlags.Public);
+            return prop?.PropertyType == typeof(string) ? (string)prop.GetValue(component) : null;
         }
 
         /// <summary>`hittables` の 1 件ぶん。**判定は dump と同じ経路を通す**（食い違わせない）。</summary>

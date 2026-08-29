@@ -477,6 +477,34 @@ class BridgeClient:
         """
         return self.call("hittables")
 
+    def texts(self, types: list[str], scope: str = "scene") -> dict:
+        """指定した型の表示テキストを**パスと本文だけ**で返す（issue #56）。
+
+        返るのは ``{"scene", "scope", "items": [{"path", "text"}], "resolvedTypes", "unknownTypes"}``。
+
+        `hittables()` は**押せる要素のテキストしか返さない**ので、
+        見出し・残数表示・セリフのような「押せないが読みたい」ものはこちらで取る。
+
+        **`types` と `scope` は呼ぶ側が決める。ブリッジは推測しない。**
+        **型から置き場所を決めつけない** ― 3D メッシュ系が Canvas の下にいることもあれば、
+        uGUI を独自のルートでまとめていることもある。
+
+        `scope`（既定 ``"scene"``）::
+
+            "scene"  … 読み込み済みの全体から探す（取りこぼさない。既定）
+            "canvas" … root Canvas の配下だけ
+            "ngui"   … NGUI の UIRoot の配下だけ
+            "<パス>"  … そのオブジェクトの配下だけ（dump の path と同じ表記）
+
+        **既定が `scene` なのは、絞るのは速さのためであって正しさのためではない**から。
+        速さが要るとき（walker のように何度も叩くとき）に、**自分の構成を知ったうえで**絞る。
+
+        使う型名は `dump` の `components` に出ているものがそのまま使える。
+        **解決できなかった型は `unknownTypes` に返る** ― 打ち間違いを黙って飲み込むと
+        「テキストが無い」と読めてしまう（偽の緑）ので、必ず確認すること。
+        """
+        return self.call("texts", types=list(types), scope=scope)
+
     def resolve(self, path: str) -> dict:
         return self.call("resolve", path=path)
 
@@ -531,7 +559,17 @@ class BridgeClient:
         return self.call("pad_stick", stick=stick, x=x, y=y)
 
     def input_reset(self) -> dict:
-        """押しっぱなしを全部離す（テスト間で状態を持ち越さない）。"""
+        """押しっぱなしを全部離す（テスト間で状態を持ち越さない）。
+
+        **キー・マウス・パッドに加えて、押されたままのタッチポインタも解放する。**
+        異常終了（walker を kill する等）で押下が残ると、以後のタップが全部
+        `POINTER_ALREADY_DOWN` で落ちる ― 症状は「特定のボタンが効かない」に見えるので、
+        **アプリ側の不具合を探しに行く前にこれを打つ**。
+
+        返り値は由来を分けて返す（`released`＝キー/マウス/パッド、
+        `releasedPointers`＝タッチ、`reenabledDevices`＝無効化から戻したデバイス）。
+        **合算しない**のは、何が残っていたのかが消えると次に疑う先が分からなくなるため。
+        """
         return self.call("input_reset")
 
     def input_devices(self) -> dict:

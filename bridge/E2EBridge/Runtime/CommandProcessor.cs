@@ -61,6 +61,7 @@ namespace E2EBridge
                     case "ping":          result = Ping(); break;
                     case "dump":          result = HierarchyDumper.Dump(args); break;
                     case "hittables":     result = HierarchyDumper.Hittables(args); break;
+                    case "texts":         result = HierarchyDumper.Texts(args); break;
                     case "resolve":       result = HierarchyDumper.Resolve(args); break;
                     case "get":           result = HierarchyDumper.GetProperty(args); break;
                     case "pointer_down":  result = TouchInjector.Down(args); break;
@@ -77,7 +78,7 @@ namespace E2EBridge
                 case "pad_button_down":  result = DeviceInjector.PadButtonDown(args); break;
                 case "pad_button_up":    result = DeviceInjector.PadButtonUp(args); break;
                 case "pad_stick":        result = DeviceInjector.PadStick(args); break;
-                case "input_reset":      result = DeviceInjector.Reset(); break;
+                case "input_reset":      result = ResetAllInput(); break;
                 case "input_devices":    result = DeviceInjector.Devices(); break;
                     case "ngui_event":    result = NguiAdapter.HandleEvent(args); break;
                     default:
@@ -103,6 +104,41 @@ namespace E2EBridge
         }
 
         public static string InternalError(Exception ex) => Error(null, ErrorCodes.Internal, ex.ToString());
+
+        /// <summary>
+        /// `input_reset` の実体。**キー・マウス・パッドに加えてタッチのポインタも解放する**。
+        ///
+        /// <para>以前は <see cref="DeviceInjector.Reset"/> だけを呼んでいたので、
+        /// **押されたまま残ったポインタが解放されなかった**。異常終了（常駐スクリプトを kill する等）で
+        /// 押下が残ると以後のタップが全部 `POINTER_ALREADY_DOWN` で落ちるが、
+        /// `input_reset` は `released: 0` を返すだけだった ―
+        /// **「入力を初期状態に戻す」という名前と実装が食い違っていた**（導入先の報告）。</para>
+        ///
+        /// <para>件数は**由来ごとに分けて返す**。合算すると「何が残っていたのか」が消え、
+        /// 呼び手が次に何を疑えばよいか分からなくなる。</para>
+        /// </summary>
+        private static JToken ResetAllInput()
+        {
+            // **片方が失敗しても、もう片方は必ず試す**（codex の指摘）。
+            // 順番に呼ぶだけだと、デバイス側の再有効化が例外になった瞬間にタッチへ到達せず、
+            // **復旧コマンドを打ったのに `POINTER_ALREADY_DOWN` のまま**になる ―
+            // 直そうとしている状態を、復旧路の失敗が固定してしまう。
+            // **失敗そのものは握り潰さない**（両方の後に投げ直す）。黙って部分成功を返すと、
+            // 「reset は成功した」という前提で次を組み立ててしまう
+            Exception failure = null;
+            JObject devices = null;
+            try { devices = (JObject)DeviceInjector.Reset(); }
+            catch (Exception ex) { failure = ex; }
+
+            JObject pointers = null;
+            try { pointers = (JObject)TouchInjector.Reset(); }
+            catch (Exception ex) { failure = failure ?? ex; }
+
+            if (failure != null) throw failure;
+
+            devices["releasedPointers"] = pointers["released"];
+            return devices;
+        }
 
         private static string Error(JToken id, string code, string message)
         {
