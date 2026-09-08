@@ -367,21 +367,51 @@ class BridgeClient:
 
     # ------------------------------------------------------------ connection
 
-    def connect(self, retries: int = 30, interval: float = 1.0) -> "BridgeClient":
-        """アプリ起動直後を考慮してリトライしながら接続する。"""
+    def connect(self, retries: int = 30, interval: float = 1.0,
+                total_timeout: float | None = None) -> "BridgeClient":
+        """アプリ起動直後を考慮してリトライしながら接続する。
+
+        **回数だけでなく壁時計でも打ち切る**（`total_timeout` 秒）。
+        回数だけで数えると、**1 試行がソケット timeout ぶん丸ごと掛かる状況**で
+        `retries × (timeout + interval)` まで伸びる ― 既定値なら **15 分級**になる。
+        これは机上の話ではなく 2026-09-08 に実際に踏んだ:
+        **listener は生きているので TCP 接続だけ成立し、ping の応答が返らない**という状態
+        （Unity がモーダルダイアログで止まり、メインスレッドがコマンドを処理できなかった）で、
+        **14 分間まったく無言のまま**再試行し続けた。
+        `wait_for_bridge` には同じ型の対策が入っていたのに、**こちらには入っていなかった**。
+
+        1 試行のソケット timeout も残り時間で抑える（応答が返らない相手に
+        最後の 1 試行が丸ごと持っていかれるのを防ぐ）。接続できたら
+        通常の `self.timeout` へ戻す（以後の `call` は本来の余裕で待つ）。
+        """
+        # **既定は回数に追随させる**（`retries * (timeout + interval)`）。
+        # 固定値にしたら、`UAPP_E2E_CONNECT_RETRIES` を増やしても壁時計で頭打ちになり、
+        # **文書が案内している唯一の逃げ道を殺していた**（実測: retries=60 でも 120 秒で打ち切り）。
+        # 壁時計を入れる目的は「1 試行が丸ごと timeout を食う相手に無限に粘らない」ことなので、
+        # 呼び手が増やした回数はそのまま尊重してよい
+        if total_timeout is None:
+            total_timeout = retries * (self.timeout + interval)
         _check_target_declarations()
         last_error: Exception | None = None
+        deadline = time.monotonic() + total_timeout
         for _ in range(retries):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
             try:
-                self._sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
+                self._sock = socket.create_connection(
+                    (self.host, self.port), timeout=min(max(remaining, 0.05), self.timeout))
                 self._file = self._sock.makefile("r", encoding="utf-8", newline="\n")
                 info = self.ping()  # 疎通確認（結果は接続先の検証にも使う。往復は増やさない）
                 _check_editor_target(info, self.host, self.port)
                 _check_ios_target(info, self.host, self.port)
+                self._sock.settimeout(self.timeout)
                 return self
             except (OSError, BridgeError) as e:
                 last_error = e
                 self.close()
+                if deadline - time.monotonic() <= 0:
+                    break
                 time.sleep(interval)
         raise ConnectionError(
             f"E2EBridge ({self.host}:{self.port}) に接続できません。"
@@ -412,7 +442,29 @@ class BridgeClient:
         request = {"id": self._next_id, "cmd": cmd, "args": args}
         self._next_id += 1
         self._sock.sendall((json.dumps(request) + "\n").encode("utf-8"))
-        line = self._file.readline()
+        try:
+            line = self._file.readline()
+        except socket.timeout as e:
+            # **投げる前に閉じる**。`makefile` の SocketIO は一度タイムアウトすると
+            # `_timeout_occurred` が立ち、以後の読み取りが全部
+            # `OSError: cannot read from timed out object` になる（TimeoutError ですらない）。
+            # session スコープの client では**後片付けの input_reset まで落ちる** ―
+            # 押下を解放する復旧路が、まさに必要な場面で通らなくなる。
+            # 閉じておけば次の呼び出しは「not connected」という正しい説明になる
+            self.close()
+            # **接続はできているのに応答が来ない**＝ブリッジのメインスレッドがコマンドを
+            # 処理できていない。原因は断定できないので候補を並べる（実際に 2026-09-08 に
+            # モーダルダイアログで踏んでいる。listener は生きているので接続は成立する）
+            raise TimeoutError(
+                f"'{cmd}' の応答が返りません（接続は閉じました。再接続が要ります）"
+                f"（{self.host}:{self.port} への接続自体は成立しています）。"
+                "ブリッジはコマンドをメインスレッドで処理するので、"
+                "アプリ/エディタのメインスレッドが進んでいない可能性があります。候補: "
+                "①エディタが Play に入っていない ②エディタがモーダルダイアログで止まっている"
+                "（Input System の『Do you want to enable the backends?』等。"
+                "`unity-editor-status.ps1` で確認）③アプリがフリーズ/ANR "
+                "④重い処理でフレームが進んでいない"
+            ) from e
         if not line:
             raise ConnectionError("bridge closed the connection")
         response = json.loads(line)
@@ -598,6 +650,41 @@ class BridgeClient:
         到達可能性は検証しないため、通常は Gestures.ngui_tap 経由で使うこと。
         """
         return self.call("ngui_event", path=path, event=event)
+
+    def ugui_event(self, path: str | None = None, event: str = "click",
+                   pointer_id: int = 1, x: float | None = None, y: float | None = None) -> dict:
+        """uGUI向けフレームワークレベルイベント送出（click | press | move | release）。
+
+        レガシーInput構成のuGUIアプリ（Active Input Handling が Input Manager (Old)）で使う。
+        その構成では Touchscreen への注入を誰も読まないので `tap` 系が届かない。
+        EventSystem/ExecuteEvents へ直接送るので**入力バックエンドに依存しない**。
+
+        **これは実入力ではない**。保証できるのは uGUI のイベント経路より内側だけで、
+        「実際に指で触れて届くか」は adb の実タップで確かめること（ngui_event と同じ制約）。
+
+        到達可能性は検証しないため、通常は Gestures.ugui_tap 経由で使うこと
+        （検証しない代わりに、遮蔽されていれば応答の `hittable` が false・`blockedBy` に
+        遮蔽者のパスが入る。**送出そのものは行われる**ので、緑と読まないこと）。
+
+        `release` は押下中のポインタを離すので path を省略できる。
+        path と x/y の両方を省略しない限り、その位置まで動かしてから離す（drag & drop）。
+
+        **複数の指を同時に置ける**（`pointer_id` で区別。既定 1）。
+        「A を押しながら B をタップ」は uGUI の経路なら再現できる ―
+        ExecuteEvents は入力バックエンドと無関係だから。
+        **できないのは `Input.touchCount` 直読み（ピンチ実装によくある形）だけ**で、
+        そちらはレガシー Input に注入 API が無いので OS の実マルチタッチ以外に手段が無い。
+        """
+        if (x is None) != (y is None):
+            # **片方だけ渡されたら黙って捨てない**。捨てると、x を渡したのに
+            # サーバから「'path' または 'x'/'y' が要ります」と言われて原因が見えなくなる
+            raise ValueError("x と y は両方セットで指定してください（片方だけは無効）")
+        args: dict = {"event": event, "pointerId": pointer_id}
+        if path is not None:
+            args["path"] = path
+        if x is not None and y is not None:
+            args["x"], args["y"] = x, y
+        return self.call("ugui_event", **args)
 
 
 

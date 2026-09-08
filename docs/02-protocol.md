@@ -402,7 +402,7 @@ uGUI を独自のルートでまとめていることもある。だから**型�
   `KeyError: 'E2EVirtualMouse'` になる。導入先で実際に踏まれた）
 - **`input_devices` で実機の接続状況が分かる**。エディタ実行の PC には本物のキーボードやパッドが
   同時に居る。人が触れば `current` を奪われるので、原因不明の不安定さにしないために可視化する
-- **レガシー入力バックエンド（Input Manager のみ）では届かない** → `INPUT_BACKEND_LEGACY` で明示的に失敗する
+- **Input System への注入が使えない構成では届かない** → 明示的に失敗する（**未導入なら `INPUT_SYSTEM_NOT_PRESENT`、導入済みで `activeInputHandler: 0` なら `INPUT_BACKEND_LEGACY`**）
   （黙って無反応だと、AI はアプリ側のバグを疑って延々と調べる）
 - **エディタ再生では、初回注入時に Input System の設定を自動で切り替える**
   （`editorInputBehaviorInPlayMode=AllDeviceInputAlwaysGoesToGameView` /
@@ -441,6 +441,43 @@ NGUI + New Input System 構成では通常の `pointer_*` を使うこと。
 - 到達可能性は検証しない。クライアントは必ず事前に `resolve` の `hittable` を確認する
   （Python の `Gestures.ngui_tap` は検証込み）
 - NGUI が存在しないビルドでは `NGUI_NOT_PRESENT` エラー
+
+### ugui_event（uGUI・入力バックエンドに依存しない）
+`EventSystem` / `ExecuteEvents` へのイベント直接送出。
+**レガシー Input 構成の uGUI アプリ向け**（`activeInputHandler: 0` では
+Touchscreen 注入を誰も読まないため `pointer_*` が届かない）。
+uGUI + New Input System 構成では通常の `pointer_*` を使うこと（そちらが実入力に近い）。
+```json
+→ {"cmd": "ugui_event", "args": {"path": "Canvas/StartButton", "event": "click", "pointerId": 1}}
+← {"path": "Canvas/StartButton", "event": "click", "pointerId": 1,
+   "handler": "Canvas/StartButton", "hittable": true, "blockedBy": null, "clicked": true}
+```
+- `event`: `"click"`（down→up→click）| `"press"` | `"move"` | `"release"`
+- 座標は対象のスクリーン矩形の中心。`x` / `y` を渡せば上書きできる
+  （`move` は押下中のポインタを動かすので `path` でも `x`/`y` でも指定できる）
+- `release` は押下中のポインタを離すので `path` を省略できる。
+  `path` か `x`/`y` を渡すと**その位置まで動かしてから離す**（drag & drop）
+- **到達可能性は検証しない**が、遮蔽されていれば応答の `hittable` が false・
+  `blockedBy` に遮蔽者のパスが入る（**送出そのものは行われる**ので緑と読まないこと）。
+  Python の `Gestures.ugui_tap` は検証込み
+- `clicked` は「押した相手と離した相手が同じで、click が実際に発火した」かどうか。
+  ドラッグして別の場所で離せば false になる（入力モジュールと同じ判定）
+- シーンに EventSystem が無ければ `NO_EVENTSYSTEM` エラー
+- **`pointerId`（既定 1・整数・1〜1000）で複数の指を同時に置ける**。
+  「A を押しながら B をタップ」は `press(pointerId=1)` → `click(pointerId=2)` で再現できる
+  （`ExecuteEvents` は入力バックエンドと無関係なので、レガシー Input の構成でも通る）。
+  **同じ id を二重に押すと `ALREADY_PRESSED`**、押していない id を動かすと `NOT_PRESSED`。
+  範囲外・整数以外は `BAD_REQUEST`（負値は実タッチ・マウスの ID に化けるため弾く）
+- `input_reset` が全ポインタを解放し、応答の `releasedUgui` に件数が入る。
+  押下中の本数は `ping` の `activePointers` にも合算される
+- **`clicked` とドラッグ開始の判定は `StandaloneInputModule` / `PointerInputModule` に
+  合わせてあるが、同一であることを実測で確かめてはいない**
+  （合わせた先は com.unity.ugui 2.0.0 のソース。押した時点の click 受け手と離した位置の
+  click 受け手が一致したときだけ `clicked`、ドラッグ開始は `pixelDragThreshold` を超えたとき）
+
+**限界**: これは実入力ではない。入力モジュールが組み立てる `PointerEventData` を
+ブリッジ側で作って流すので、**保証できるのは uGUI のイベント経路より内側だけ**。
+「実際に指で触れて届くか」は adb の実タップで確かめること（`ngui_event` と同じ制約）。
 
 ## NGUI 対応の意味論
 
@@ -489,6 +526,11 @@ sequenceDiagram
 | `NOT_FOUND` | オブジェクト/コンポーネント/プロパティが見つからない（**コンポーネント名・プロパティ名の誤りでは message に候補を列挙する**: `available: …`） |
 | `AMBIGUOUS` | 名前検索で複数一致（message に候補パス最大10件） |
 | `POINTER_ALREADY_DOWN` / `POINTER_NOT_DOWN` | ポインタ状態の不整合 |
+| `ALREADY_PRESSED` / `NOT_PRESSED` | `ugui_event` のポインタ状態の不整合（`pointerId` ごと） |
+| `NO_EVENTSYSTEM` | `ugui_event` の送出先が無い（シーンに EventSystem が無い）。**同じ文字列が `resolve` の `blockedBy` 値としても使われる**が、そちらはエラーではなく「押せない理由」 |
+| `NGUI_NOT_PRESENT` | `ngui_event` を呼んだが NGUI がビルドに入っていない |
+| `INPUT_BACKEND_LEGACY` | Input System への注入が届かない（パッケージはあるが `activeInputHandler: 0`）。**直し方は Player Settings の変更** |
+| `INPUT_SYSTEM_NOT_PRESENT` | Input System への注入が使えない（`com.unity.inputsystem` 未導入）。**直し方はパッケージの追加**。UI 操作だけなら不要（`ugui_event` / `ngui_event` を使う） |
 | `TIMEOUT` | メインスレッド 30 秒無応答 |
 | `INTERNAL` | 予期しない例外（message にスタックトレース） |
 

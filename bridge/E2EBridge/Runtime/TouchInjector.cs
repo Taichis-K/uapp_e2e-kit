@@ -2,12 +2,15 @@ using System;
 using System.Collections.Generic;
 using Newtonsoft.Json.Linq;
 using UnityEngine;
+#if UAPP_E2E_INPUTSYSTEM && ENABLE_INPUT_SYSTEM
 using UnityEngine.InputSystem;
 using UnityEngine.InputSystem.LowLevel;
 using TouchPhase = UnityEngine.InputSystem.TouchPhase;
+#endif
 
 namespace E2EBridge
 {
+#if UAPP_E2E_INPUTSYSTEM && ENABLE_INPUT_SYSTEM
     /// <summary>
     /// New Input System の Touchscreen へ合成タッチを注入する。
     /// pointerId ごとに down/move/up を管理し、任意本数のマルチタッチを表現できる。
@@ -183,4 +186,21 @@ namespace E2EBridge
             };
         }
     }
+#else
+    /// <summary>
+    /// Input System が使えないビルド向けのスタブ（**この構成では注入が誰にも読まれない**）。
+    /// 呼ばれたら黙らずに理由を返す。Reset だけは例外で、**投げずに 0 件を返す** ―
+    /// `input_reset` は uGUI 側のポインタ解放も担うので、ここで投げると復旧路ごと塞がる。
+    /// </summary>
+    public static class TouchInjector
+    {
+        public static int ActiveCount => 0;
+
+        public static JToken Down(JObject args) => throw InputBackendUnavailable.For("タッチ注入（pointer_down）");
+        public static JToken Move(JObject args) => throw InputBackendUnavailable.For("タッチ注入（pointer_move）");
+        public static JToken Up(JObject args) => throw InputBackendUnavailable.For("タッチ注入（pointer_up）");
+
+        public static JToken Reset() => new JObject { ["released"] = 0 };
+    }
+#endif
 }

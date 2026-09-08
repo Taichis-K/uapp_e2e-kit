@@ -15,14 +15,17 @@ param(
     [string]$Project = "unity-nis",   # このリポジトリ内のサンプル名（uapp_e2e開発用）
     [string]$ProjectPath,             # 任意の場所のUnityプロジェクト（導入先ではこちら）
     [int]$TimeoutSeconds = 120,       # closed を確認するまでの上限
-    [switch]$Force                    # 未保存シーンがあっても閉じる（既定は中断する）
+    [switch]$Force,                   # 未保存シーンがあっても閉じる（既定は中断する）
+    # Unity CLI の呼び出しに `--proxy-disable` を付ける（既定オフ。他スクリプトと同じ）。
+    # **状態判定の子プロセスへも引き継ぐ** ― 渡さないと本体と判定で別の条件になる
+    [switch]$UnityCliProxyDisable
 )
 
 $ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot "uapp-platform.ps1")   # OS 差分の吸収（Windows / macOS）
 
-$cliGlobalArgs = Get-UappUnityCliGlobalArgs -ProxyDisable:(Resolve-UappUnityCliProxyDisable)
+$cliGlobalArgs = Get-UappUnityCliGlobalArgs -ProxyDisable:(Resolve-UappUnityCliProxyDisable -Switch:$UnityCliProxyDisable)
 $root = (Resolve-Path -LiteralPath (Join-UappPath $PSScriptRoot "..")).Path
 
 # プロジェクト解決は他スクリプトと同じ規則: -ProjectPath 優先 → キット親がUnityプロジェクト → $root\$Project
@@ -46,14 +49,45 @@ function Get-EditorState {
     # **状態判定は unity-editor-status.ps1 に一本化する**（ここで独自に
     # プロセスやロックファイルを見ると、同じことを別の根拠で数える経路が増える）
     $pwshExe = (Get-Process -Id $PID).Path
-    $json = & $pwshExe -NoProfile -File $statusScript -ProjectPath $projectDir -Json 2>$null | Out-String
-    try { return ($json | ConvertFrom-Json).state } catch { return $null }
+    # **CLI のグローバル引数を引き継ぐ**。渡さないと、本体と状態判定で別の条件になる
+    #（プロキシ配下で CLI が落ちる環境だと、片方だけ「繋がらない」になりうる。未実測）
+    $extra = @()
+    if (Resolve-UappUnityCliProxyDisable -Switch:$UnityCliProxyDisable) { $extra += "-UnityCliProxyDisable" }
+    $json = & $pwshExe -NoProfile -File $statusScript -ProjectPath $projectDir -Json @extra 2>$null | Out-String
+    try { return ($json | ConvertFrom-Json) } catch { return $null }
 }
 
-$state = Get-EditorState
+$status = Get-EditorState
+$state = if ($status) { $status.state } else { $null }
 if ($state -eq "closed") {
     Write-Host "[$projectName] エディタは既に閉じています"
     exit 0
+}
+
+# **pipeline が見えないならここで落とす**（2026-09-08・mac が実測）。
+# このスクリプトの終了手段は `eval "EditorApplication.Exit(0)"` ＝ **pipeline 経由**なので、
+# インスタンスが見つからない構成では**原理的に閉じられない**。
+# ここで止めないと、`-Force`（＝未保存チェックを飛ばす、という意味しか持たない）を付けた場合に
+# **3 秒で落ちていたものが 120 秒の空ポーリングに化け**、しかも失敗文言が
+# 「保存ダイアログや再インポートで止まっている可能性」＝**Exit が一度も届いていないのに
+# エディタの画面を探しに行かせる**（issue #38 と同じ「断定が探索の方向を固定する」型）。
+# **`-Force` は勧めない** ― この状況では効かないため
+# **`timedOut` は別扱いにする**（mac の観測）。`Get-CliStatus` はタイムアウト時にも
+# `instanceCount = 0` を返すので、**CLI が無言ハングしただけ**で「pipeline が未導入」と
+# 断定してしまう（この機は unity auth status が 25 秒返らないことがある）。
+# 半分は当たっている（どちらも閉じられない）が、**直し方が違う**ので文面を分ける
+if ($status -and $status.pipeline -and $status.pipeline.timedOut -eq $true) {
+    throw ("Unity CLI が時間内に応答しませんでした（認証セッションが切れている可能性があります）。" +
+           "エディタが健全かどうかもここでは判定できていません。" +
+           "unity auth status を確認するか、エディタの画面で手動で閉じてください")
+}
+if ($status -and $status.signals -and $status.signals.pipelineConnected -eq $false `
+    -and $null -ne $status.signals.pipelineInstanceCount -and $status.signals.pipelineInstanceCount -eq 0) {
+    throw ("このプロジェクトの Unity インスタンスが Unity CLI から見えません" +
+           "（com.unity.pipeline が未導入か、CLI がこのエディタを認識していない）。" +
+           "close-editor はエディタの終了に pipeline を使うので、**この構成では閉じられません**。" +
+           "エディタの画面で手動で閉じてください。**-Force を付けても閉じません**" +
+           "（-Force は『未保存シーンがあっても閉じる』という意味で、終了手段は変わりません）")
 }
 
 $unityCli = Get-UappUnityCli
@@ -167,7 +201,7 @@ Invoke-Cli @("eval", "--code", "UnityEditor.EditorApplication.Exit(0); return 0;
 
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
 while ($sw.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
-    if ((Get-EditorState) -eq "closed") {
+    if ((Get-EditorState).state -eq "closed") {
         Write-Host "[$projectName] エディタを閉じました（$([int]$sw.Elapsed.TotalSeconds) 秒）"
         exit 0
     }

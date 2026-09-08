@@ -514,7 +514,12 @@ def probe_button(out_dir: Path, screen_id: str, path: str, *,
         recorder._current_screen_test = test_name
         outcome, error, to_id = "passed", None, None
         try:
-            if ui_type == "ngui-legacy":
+            # レガシー Input の uGUI は Touchscreen 注入が届かない（またはパッケージ不在で断られる）。
+            # ここを足さないと、パッケージあり×activeInputHandler 0 の構成で
+            # **例外も出ず画面も変わらない＝偽の緑**になる
+            if ui_type == "ugui-legacy":
+                gestures.ugui_tap(path)
+            elif ui_type == "ngui-legacy":
                 gestures.ngui_tap(path)
             else:
                 gestures.tap(path)

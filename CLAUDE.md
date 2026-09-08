@@ -175,8 +175,10 @@ python -m e2e_driver.journey ..\Builds\journey    # → report.html 生成（詳
    **症状は「特定のボタンが効かない」に見える**ので、アプリ側を疑う前にまず解放すること。
    エディタ再生では Game view のフォーカスに注入が左右されないよう初回注入時に Input System 設定を
    自動で切り替える（再生終了時に復元。適用状態は `input_devices` の `editorFocusOverride`）。
-   レガシー入力バックエンドのみの構成では `INPUT_BACKEND_LEGACY` で明示的に失敗する
-5. **NGUI のレガシーInput構成では `ngui_tap / ngui_press / ngui_release`**（`pointer_*` は届かない）。
+   Input System への注入が使えない構成では明示的に失敗する（**パッケージ未導入なら `INPUT_SYSTEM_NOT_PRESENT`、導入済みで `activeInputHandler: 0` なら `INPUT_BACKEND_LEGACY`**。直し方が違うので分けてある）
+5. **レガシーInput構成（`activeInputHandler: 0`）ではフレームワーク直送の API を使う** ―
+   uGUI なら `ugui_tap / ugui_press / ugui_release / ugui_drag`、NGUI なら
+   `ngui_tap / ngui_press / ngui_release`（どちらも `pointer_*` は届かない）。
    構成は `ping` の `ngui` と、NGUI が `Input.touchCount` を直読みしているかで判断
 6. マルチタッチテストには logcat 例外アサート（`adb.clear_logcat()` → 操作 → `adb.unity_exceptions()` 空）を付ける
 7. 描画の検証は `adb.screencap()` で画像を取得して読む（エディタ直結では journey のスクリーンショットを見る）。

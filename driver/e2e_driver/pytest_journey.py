@@ -85,10 +85,20 @@ def client():
 
 @pytest.fixture()
 def g(client):
-    """ジェスチャヘルパー。テスト終了時に押しっぱなしポインタを必ず解放する。"""
+    """ジェスチャヘルパー。テスト終了時に押しっぱなしポインタを必ず解放する。
+
+    **`input_reset` を使う**（`pointer_reset` ではない）。`pointer_reset` は
+    Touchscreen 注入ぶんしか解放しないので、`ugui_press` の後にアサートが落ちると
+    押下が残り、後続が `ALREADY_PRESSED` で連鎖的に落ちる。
+    `input_reset` はキー・マウス・パッド・タッチ・uGUI をまとめて解放する。
+    """
     gestures = Gestures(client)
     yield gestures
-    client.pointer_reset()
+    try:
+        client.input_reset()
+    except Exception:
+        # 後始末で本体の失敗を上書きしない（接続が切れている場合など）
+        pass
 
 
 def pytest_addoption(parser):

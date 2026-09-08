@@ -181,7 +181,7 @@ elseif ((Test-Path -LiteralPath (Join-UappPath $root "..\Assets")) -and (Test-Pa
 }
 else {
     $projectDir = Join-UappPath $root $Project
-    $isRepoSample = $true   # 開発リポジトリのサンプル（Builds を3プロジェクトで共有する）
+    $isRepoSample = $true   # 開発リポジトリのサンプル（Builds を全サンプルで共有する）
 }
 # **末尾の `\` を落とす**。タブ補完は `unity-nis\` の形を作り、`Resolve-Path` はそれを保つ。
 # 付いたまま `"$projectDir"` と引用すると閉じ引用符が `\"` と解釈され、**後続の引数まで

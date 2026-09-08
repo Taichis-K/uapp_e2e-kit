@@ -14,7 +14,12 @@
     "defineConstraints": [
         "UAPP_E2E_BRIDGE"
     ],
-    "versionDefines": [],
+    "versionDefines": [
+        {
+            "name": "com.unity.inputsystem",
+            "expression": "",
+            "define": "UAPP_E2E_INPUTSYSTEM"
+        }
+    ],
     "noEngineReferences": false
 }
-

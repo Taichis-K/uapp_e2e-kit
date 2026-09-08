@@ -2,11 +2,14 @@ using System;
 using System.Collections.Generic;
 using Newtonsoft.Json.Linq;
 using UnityEngine;
+#if UAPP_E2E_INPUTSYSTEM && ENABLE_INPUT_SYSTEM
 using UnityEngine.InputSystem;
 using UnityEngine.InputSystem.LowLevel;
+#endif
 
 namespace E2EBridge
 {
+#if UAPP_E2E_INPUTSYSTEM && ENABLE_INPUT_SYSTEM
     /// <summary>
     /// キーボード / マウス / ゲームパッドへ合成入力を注入する（UI を経由しない入力の検証用）。
     ///
@@ -33,16 +36,6 @@ namespace E2EBridge
         private static Keyboard _keyboard;
         private static Mouse _mouse;
         private static Gamepad _gamepad;
-
-        private static void RequireNewInputBackend()
-        {
-#if !ENABLE_INPUT_SYSTEM
-            throw new BridgeException(ErrorCodes.InputBackendLegacy,
-                "この構成では Input System への注入が届きません（Player Settings の Active Input Handling が " +
-                "'Input Manager (Old)' のみ）。'Input System Package' か 'Both' に変更してください。" +
-                "変更できない場合、キー/マウス/パッドの入力は E2E からは操作できません（内側ループで検証してください）");
-#endif
-        }
 
         // **常に専用の仮想デバイスへ注入する**（実デバイスは掴まない）。
         // エディタ実行の PC には本物のキーボード・マウス・ゲームパッドが刺さっている。
@@ -120,6 +113,10 @@ namespace E2EBridge
             }
             return new JObject
             {
+                // **使えるかどうかを明示する**。以前は「このキーが無ければ使える」という
+                // 暗黙の契約だったが、スタブ側が false を返すようになったので両側で明示する
+                //（呼び手が `.get("available")` の None と False を区別せずに済む）
+                ["available"] = true,
                 ["devices"] = list,
                 // エディタで「Game view 非フォーカスでも注入が届く」設定へ切り替え済みか
                 //（初回注入時に自動適用。デバイスビルドでは常に false）
@@ -171,7 +168,6 @@ namespace E2EBridge
 
         public static JToken KeyDown(JObject args)
         {
-            RequireNewInputBackend();
             var key = RequireKey(args);
             _keys.Add(key);
             FlushKeyboard();
@@ -180,7 +176,6 @@ namespace E2EBridge
 
         public static JToken KeyUp(JObject args)
         {
-            RequireNewInputBackend();
             var key = RequireKey(args);
             if (!_keys.Remove(key))
                 throw new BridgeException(ErrorCodes.NotPressed, $"key '{key}' is not down");
@@ -202,7 +197,6 @@ namespace E2EBridge
 
         public static JToken MouseMove(JObject args)
         {
-            RequireNewInputBackend();
             _mousePos = RequirePos(args);
             FlushMouse(Vector2.zero);
             return MouseAck();
@@ -210,7 +204,6 @@ namespace E2EBridge
 
         public static JToken MouseDown(JObject args)
         {
-            RequireNewInputBackend();
             var button = RequireButton(args);
             if (args["x"] != null && args["y"] != null) _mousePos = RequirePos(args);
             if (!_mouseButtons.Add(button))
@@ -221,7 +214,6 @@ namespace E2EBridge
 
         public static JToken MouseUp(JObject args)
         {
-            RequireNewInputBackend();
             var button = RequireButton(args);
             if (!_mouseButtons.Remove(button))
                 throw new BridgeException(ErrorCodes.NotPressed, $"mouse button '{button}' is not down");
@@ -231,7 +223,6 @@ namespace E2EBridge
 
         public static JToken MouseScroll(JObject args)
         {
-            RequireNewInputBackend();
             var dx = args["dx"] != null ? (float)args["dx"] : 0f;
             var dy = args["dy"] != null ? (float)args["dy"] : 0f;
             FlushMouse(new Vector2(dx, dy));
@@ -252,7 +243,6 @@ namespace E2EBridge
 
         public static JToken PadButtonDown(JObject args)
         {
-            RequireNewInputBackend();
             var button = RequirePadButton(args);
             _padButtons.Add(button);
             FlushGamepad();
@@ -261,7 +251,6 @@ namespace E2EBridge
 
         public static JToken PadButtonUp(JObject args)
         {
-            RequireNewInputBackend();
             var button = RequirePadButton(args);
             if (!_padButtons.Remove(button))
                 throw new BridgeException(ErrorCodes.NotPressed, $"gamepad button '{button}' is not down");
@@ -271,7 +260,6 @@ namespace E2EBridge
 
         public static JToken PadStick(JObject args)
         {
-            RequireNewInputBackend();
             var stick = ((string)args["stick"] ?? "left").ToLowerInvariant();
             var value = new Vector2(
                 args["x"] != null ? (float)args["x"] : 0f,
@@ -453,4 +441,56 @@ namespace E2EBridge
             };
         }
     }
+#else
+    /// <summary>
+    /// Input System が使えないビルド向けのスタブ。
+    /// **注入は理由つきで断り、診断（Devices）と復旧（Reset）は落とさない**
+    /// ― 診断コマンドが例外になると「なぜ使えないのか」を調べる手段まで失われる。
+    /// </summary>
+    public static class DeviceInjector
+    {
+        public static JToken Devices() => new JObject
+        {
+            // **キー名と型は本物に揃える**。揃えないと、レガシー構成でだけ呼び手が壊れる
+            //（`devices` を配列として回す・`realGamepads` を読むコードが落ちる）
+            ["available"] = false,
+#if UAPP_E2E_INPUTSYSTEM
+            ["reason"] = "Active Input Handling が 'Input Manager (Old)' のみのため、Input System の注入は届きません",
+#else
+            ["reason"] = "com.unity.inputsystem がこのプロジェクトに入っていません",
+#endif
+            ["devices"] = new JArray(),
+            ["editorFocusOverride"] = false,
+            ["realGamepads"] = 0,
+            ["realKeyboards"] = 0,
+            ["realMice"] = 0,
+            // **未生成でも種別を並べる**（本物と同じ。名前で引く呼び手が KeyError にならないため）
+            ["virtualDevices"] = new JArray
+            {
+                new JObject { ["kind"] = "keyboard", ["name"] = "E2EVirtualKeyboard", ["created"] = false },
+                new JObject { ["kind"] = "mouse",    ["name"] = "E2EVirtualMouse",    ["created"] = false },
+                new JObject { ["kind"] = "gamepad",  ["name"] = "E2EVirtualGamepad",  ["created"] = false }
+            }
+        };
+
+        public static JToken KeyDown(JObject args) => throw InputBackendUnavailable.For("キー入力（key_down）");
+        public static JToken KeyUp(JObject args) => throw InputBackendUnavailable.For("キー入力（key_up）");
+        public static JToken MouseMove(JObject args) => throw InputBackendUnavailable.For("マウス入力（mouse_move）");
+        public static JToken MouseDown(JObject args) => throw InputBackendUnavailable.For("マウス入力（mouse_down）");
+        public static JToken MouseUp(JObject args) => throw InputBackendUnavailable.For("マウス入力（mouse_up）");
+        public static JToken MouseScroll(JObject args) => throw InputBackendUnavailable.For("マウス入力（mouse_scroll）");
+        public static JToken PadButtonDown(JObject args) => throw InputBackendUnavailable.For("パッド入力（pad_button_down）");
+        public static JToken PadButtonUp(JObject args) => throw InputBackendUnavailable.For("パッド入力（pad_button_up）");
+        public static JToken PadStick(JObject args) => throw InputBackendUnavailable.For("パッド入力（pad_stick）");
+
+        public static int RepairDisabledDevices() => 0;
+
+        // **キー名は本物と同じ `reenabledDevices`**（docs/02 と client.py がこの名前を約束している）
+        public static JToken Reset() => new JObject
+        {
+            ["released"] = 0,
+            ["reenabledDevices"] = 0
+        };
+    }
+#endif
 }

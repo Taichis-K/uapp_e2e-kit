@@ -1,5 +1,7 @@
 using UnityEngine;
+#if UAPP_E2E_INPUTSYSTEM && ENABLE_INPUT_SYSTEM
 using UnityEngine.InputSystem;
+#endif
 #if UNITY_EDITOR
 using UnityEditor;
 #endif
@@ -43,7 +45,7 @@ namespace E2EBridge
     /// </summary>
     internal static class EditorInputRouting
     {
-#if UNITY_EDITOR
+#if UNITY_EDITOR && UAPP_E2E_INPUTSYSTEM && ENABLE_INPUT_SYSTEM
         // **元の値は SessionState に置く**（静的フィールドだけだと、再生中のスクリプト再読み込みで
         // 消え、「上書き後の値」を元の値として記録してしまう＝復元が効かなくなる）。
         // SessionState はドメインリロードを跨ぎ、エディタを閉じれば消えるので、この用途に合う

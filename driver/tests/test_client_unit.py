@@ -531,3 +531,67 @@ def test_wait_for_bridge_returns_connected_client(monkeypatch, work):
         assert client.ping()["platform"] == "Android"
     finally:
         client.close()
+
+
+# ------------------------------------------------------------------ 応答しない相手
+# 2026-09-08 に踏んだ「listener は生きているのに応答が返らない」状態の回帰。
+# Unity がモーダルダイアログで止まるとメインスレッドがコマンドを処理できず、
+# **TCP 接続だけ成立して ping が返らない**。回数だけで再試行していたため 14 分無言だった。
+
+class _SilentBridge:
+    """接続は受けるが、何も返さないサーバー（メインスレッドが止まった状態の代役）。"""
+
+    def __init__(self):
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(4)
+        self.port = self.sock.getsockname()[1]
+        self._conns = []
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self):
+        while True:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            self._conns.append(conn)  # 掴んだまま何も返さない（閉じない）
+
+
+def test_connect_gives_up_on_wall_clock_not_retry_count():
+    """応答しない相手でも **壁時計で打ち切る**（回数 × timeout まで伸びない）。"""
+    import time as _time
+    bridge = _SilentBridge()
+    client = BridgeClient(port=bridge.port, timeout=5.0)
+    started = _time.monotonic()
+    with pytest.raises(ConnectionError):
+        # 回数だけで数えると 10 × (5 + 0.1) = 51 秒。壁時計 3 秒で打ち切れること
+        client.connect(retries=10, interval=0.1, total_timeout=3.0)
+    elapsed = _time.monotonic() - started
+    assert elapsed < 10.0, f"打ち切りが効いていない: {elapsed:.1f}s"
+
+
+def test_connect_still_succeeds_against_responsive_bridge(monkeypatch, work):
+    """対照: **応答する相手には影響しない**（打ち切りが正常系を壊していない）。"""
+    bridge = _FakeBridge()
+    _write_config(work, bridge.port)
+    client = BridgeClient(timeout=5.0)
+    client.connect(total_timeout=10.0)
+    assert client.ping()["bridge"] == "1.0"
+    # 接続後は本来の timeout に戻っている（残り時間で縮めたままにしない）
+    assert client._sock.gettimeout() == 5.0
+    client.close()
+
+
+def test_call_timeout_reports_main_thread_stall():
+    """応答が返らない `call` は、原因の候補を並べた TimeoutError になる（無限に待たない）。"""
+    bridge = _SilentBridge()
+    client = BridgeClient(port=bridge.port, timeout=1.0)
+    client._sock = socket.create_connection(("127.0.0.1", bridge.port), timeout=1.0)
+    client._file = client._sock.makefile("r", encoding="utf-8", newline="\n")
+    with pytest.raises(TimeoutError) as e:
+        client.call("ping")
+    message = str(e.value)
+    assert "メインスレッド" in message
+    assert "Play" in message and "モーダル" in message   # 断定せず候補を並べている
+    client.close()

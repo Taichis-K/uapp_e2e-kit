@@ -1254,3 +1254,108 @@ function Copy-UappTree {
         Copy-Item -LiteralPath $file -Destination $dest -Force
     }
 }
+
+<#
+.SYNOPSIS
+  Unity のプロセスが**モーダルダイアログで止まっていないか**を判定する。
+
+.DESCRIPTION
+  **測っているのは「無効化された可視ウィンドウがあるか」だけ**で、モーダルの有無そのものではない。
+  モーダルダイアログは表示されている間オーナーを無効化する（EnableWindow(owner, FALSE)）ので
+  強い手がかりになるが、**同じ状態は長時間処理の UI ロックでも作れる**
+  （レビューで `$form.Enabled = $false` だけの対照を作られ、blocked=$true になることを実測された。
+  `EditorUtility.DisplayProgressBar` が該当するかは**未検証**）。だから返り値の名前も
+  `disabledWindowExists` にしてあり、**呼び手は「止まっている」と断定しないこと**。
+  ウィンドウのタイトルでは判定しない ―
+  **ダイアログの文言は Unity の版・言語・出どころで変わる**ので、名前で当てにいくと必ず取りこぼす。
+
+  この判定が要る理由（2026-09-08 に実測）:
+  `com.unity.inputsystem` が入っていて activeInputHandler が 0 のプロジェクトを **GUI で開くと**、
+  Input System が「Do you want to enable the backends?」の Warning ダイアログを出して止まることがある
+  （パッケージ実装 InputSystem.cs の ShowRestartWarning）。**毎回出るとは限らない** ―
+  条件は `!newInputBackendsCheckedAsEnabled && !newSystemBackendsEnabled && !Application.isBatchMode` で、
+  **フラグを立てる行は if の外にある**ので batchmode を 1 回通すだけでも立つ。
+  2026-09-08 の実測でも、1 度目の GUI 起動では出て、2 度目では出なかった（**出る条件は確定していない**）。このとき **Unity CLI の `unity status` は `ready` を返す**が、
+  メインスレッドはコマンドを処理できないので、ブリッジは接続だけ成立して応答が返らない。
+  ＝**「pipeline が ready」は「コマンドを実行できる」の根拠にならない**（issue #20 と同じ型）。
+
+.OUTPUTS
+  determinable / disabledWindowExists / windows（見えているトップレベルウィンドウのタイトル）を持つオブジェクト。
+  **判定できない環境では determinable=$false を返す**（$false を「止まっていない」と読ませないため）。
+  macOS は未実装 ― CGWindowList は Unity のウィンドウ名を空で返し、System Events は
+  ウィンドウ数 0 を返す（2026-08-26 に実測）ので、**同じやり方は成立しない**。
+#>
+function Test-UappEditorModalBlocked {
+    param([Parameter(Mandatory)][int]$ProcessId)
+
+    if (-not $IsWindows) {
+        return [pscustomobject]@{ determinable = $false; disabledWindowExists = $false; windows = @()
+                                  reason = "この OS ではウィンドウ列挙による判定を実装していない" }
+    }
+
+    if (-not ('UappWin32' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public class UappWin32 {
+    public delegate bool EnumProc(IntPtr hWnd, IntPtr lParam);
+    [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr lParam);
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr hWnd);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowTextW(IntPtr hWnd, StringBuilder s, int n);
+}
+'@
+    }
+
+    $found = New-Object System.Collections.ArrayList
+    $callback = [UappWin32+EnumProc]{
+        param($hWnd, $lParam)
+        # **$pid は PowerShell の読み取り専用の自動変数**なので使えない（代入で例外になる）
+        $ownerPid = 0
+        [void][UappWin32]::GetWindowThreadProcessId($hWnd, [ref]$ownerPid)
+        if ($ownerPid -eq $ProcessId -and [UappWin32]::IsWindowVisible($hWnd)) {
+            $sb = New-Object System.Text.StringBuilder 512
+            [void][UappWin32]::GetWindowTextW($hWnd, $sb, 512)
+            $title = $sb.ToString()
+            if (-not [string]::IsNullOrWhiteSpace($title)) {
+                [void]$found.Add([pscustomobject]@{
+                    title   = $title
+                    enabled = [UappWin32]::IsWindowEnabled($hWnd)
+                })
+            }
+        }
+        return $true
+    }
+
+    try {
+        if (-not [UappWin32]::EnumWindows($callback, [IntPtr]::Zero)) {
+            return [pscustomobject]@{ determinable = $false; disabledWindowExists = $false; windows = @()
+                                      reason = "ウィンドウ列挙に失敗した" }
+        }
+    } catch {
+        return [pscustomobject]@{ determinable = $false; disabledWindowExists = $false; windows = @()
+                                  reason = "ウィンドウ列挙で例外: $($_.Exception.Message)" }
+    }
+
+    # **無効化されたウィンドウが 1 枚でもあれば、それを止めているモーダルが居る**
+    # **ウィンドウが 1 枚も見えないなら「無い」ではなく「判定できない」**。
+    # 起動途中でメインウィンドウが未生成の Unity や、別のウィンドウステーション
+    #（タスクスケジューラのセッション 0 など）では常に 0 枚になる ―
+    # そこで $false を返すと、**観測していないことを「観測してなかった」と報告する**ことになる
+    if ($found.Count -eq 0) {
+        return [pscustomobject]@{ determinable = $false; disabledWindowExists = $false; windows = @()
+                                  reason = "可視ウィンドウが 1 枚も見えない（起動途中か、別のウィンドウステーション）" }
+    }
+
+    $disabled = @($found | Where-Object { -not $_.enabled })
+    return [pscustomobject]@{
+        determinable = $true
+        disabledWindowExists = [bool]($disabled.Count -gt 0)
+        windows      = @($found | ForEach-Object { $_.title })
+        reason       = $(if ($disabled.Count -gt 0) {
+                            "無効化されたウィンドウ: " + (($disabled | ForEach-Object { $_.title }) -join " / ")
+                        } else { "無効化されたウィンドウは無い" })
+    }
+}

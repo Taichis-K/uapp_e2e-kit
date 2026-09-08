@@ -193,9 +193,9 @@ Codex ユーザーでルート `AGENTS.md` が無いプロジェクトは `-Root
 | 検出結果 | uiType | セットアップ上の追加作業 | テストで使う操作API |
 |---|---|---|---|
 | uGUI + New Input System | `ugui-nis` | なし（標準） | `tap / press / pinch`（Touchscreen注入） |
-| uGUI + レガシーのみ | `ugui-legacy` | Input Handling を Both に。**EventSystemが`StandaloneInputModule`のままだと注入タップはUIに届かない** → `InputSystemUIInputModule`への切替をユーザーに提案（通常挙動は変わらない）。切替不可なら操作は adb 単点タップに限定 | 切替後: `tap`系 / 切替不可: `adb.input_tap_unity_coords` |
+| uGUI + レガシーのみ | `ugui-legacy` | **なし**（Input Handling・EventSystem・パッケージ追加のいずれも不要） | `ugui_tap / ugui_press / ugui_release / ugui_drag`（**`pointer_*` は届かない**）＋実入力検証は adb タップ |
 | NGUI + NIS配線済み（入力ラッパーがMouse/EnhancedTouchを読む） | `ngui-nis` | なし | `tap / press / pinch` ＋ `ngui_*` も可 |
-| NGUI + レガシー読み（UICameraが`Input.touchCount`直読み） | `ngui-legacy` | Input Handling を Both に（E2EBridgeのコンパイルに必要。NGUIの挙動は不変） | `ngui_tap / ngui_press / ngui_release`（**`pointer_*`は届かない**）＋実入力検証は adb タップ |
+| NGUI + レガシー読み（UICameraが`Input.touchCount`直読み） | `ngui-legacy` | **なし**（Input Handling の変更もパッケージ追加も不要になった） | `ngui_tap / ngui_press / ngui_release`（**`pointer_*`は届かない**）＋実入力検証は adb タップ |
 | uGUI と NGUI が混在 | `mixed` | 上記の該当分岐を両方適用 | 要素の `ui` フィールド（dump）で使い分け |
 
 判定に自信が持てない場合（入力ラッパーが独自実装等）は、根拠（該当コードの抜粋）を添えて
@@ -220,9 +220,28 @@ Codex ユーザーでルート `AGENTS.md` が無いプロジェクトは `-Root
 ### 4. プロジェクト設定の変更（変更は最小限・すべて可逆）
 
 1. `Packages/manifest.json` に追加（未導入の場合のみ。既存 Newtonsoft DLL があればパッケージは追加しない）:
-   - `com.unity.inputsystem`（2022.3系: "1.7.0" / Unity 6系: "1.14.0" 以降。**そのUnityバージョンに存在する版か注意**）
-   - `com.unity.nuget.newtonsoft-json`: "3.2.1"
-2. `activeInputHandler` が 0 のプロジェクトは 2（Both）へ（ProjectSettings.asset を直接編集可。レガシー入力の挙動は変わらない）
+   - `com.unity.nuget.newtonsoft-json`: "3.2.1"（**必須**）
+   - `com.unity.inputsystem`（**任意**。2022.3系: "1.7.0" / Unity 6系: "1.14.0" 以降。
+     **そのUnityバージョンに存在する版か注意**）
+     - **入れなくても計装はコンパイルでき**、dump / resolve / hittable / `ugui_*` / `ngui_*` は全部動く。
+       要るのは `pointer_*`（`tap` / `pinch`）とキー / マウス / パッドの注入を使うときだけ
+     - **レガシー Input のプロジェクトには入れないほうがよい** ―
+       入れて `activeInputHandler` が 0 のままだと、**GUI でエディタを開いたとき**に
+       Input System が「Do you want to enable the backends?」のモーダルを出して**エディタが止まる**
+       （batchmode では出ない）。**Yes を押すと 2（Both）に変わってエディタが再起動する**
+2. **`activeInputHandler` は変更しない**（0 のままでよい）。0 のままでも `ugui_tap` 系 / `ngui_tap` 系は動く。
+   - **変更が要るのは「NIS 経由の入力注入を使いたいとき」だけ** ―
+     `pointer_*`（`tap` / `press` / `pinch`）とキー / マウス / パッドの注入がそれに当たる。
+     使いたい場合だけ 2（Both）へ（レガシー入力の挙動は変わらない）
+   - **0 のままなら**: キー / マウス / パッドの注入は明示エラーになり
+     （**パッケージ未導入なら `INPUT_SYSTEM_NOT_PRESENT`、導入済みで 0 なら `INPUT_BACKEND_LEGACY`**。
+     直し方が違うので区別している ― 前者はパッケージ追加、後者は Player Settings）、
+     **`Input.touchCount` 直読みのピンチは動かせない**（レガシー Input に注入の API が無いため。
+     実マルチタッチが要るなら OS 側の手段になる）。
+     **UI 操作と、uGUI の経路を通るマルチタッチ**（A を押しながら B をタップ）は
+     `ugui_*` / `ngui_*` で行える
+   - **EventSystem を `InputSystemUIInputModule` へ替える必要は無い**。
+     替えると**計装ビルドと本番ビルドで uGUI の経路が別物になる**ので、勧めない
 3. テスト用ビルドへの `UAPP_E2E_BRIDGE` define 付与:
    - 自前ビルドスクリプトがある → そこに define 追加処理を組み込む（docs/05 のスニペット）
    - 無い → Player Settings の Scripting Define Symbols へ追加（本番ビルド前に外す運用をユーザーに確認）

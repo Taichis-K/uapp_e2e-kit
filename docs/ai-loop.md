@@ -144,7 +144,7 @@ adb.uninstall(pkg); adb.install(apk)                      # クリーンイン�
 1. **dump を見てから書く**（推測で書かない）。ジャーニー記録（`Builds/journey/journey.json`）が
    あれば画面・ボタン・カバレッジの**索引**として先に読む。ただし過去のスナップショットなので
    使うパスは生 dump で最終確認する
-2. 操作APIは `e2e-config.json` の `uiType` に従う（`ngui-legacy` は `ngui_tap` 系）
+2. 操作APIは `e2e-config.json` の `uiType` に従う（`ngui-legacy` は `ngui_tap` 系 / `ugui-legacy` は `ugui_tap` 系）
 3. 待機は `wait_until_*` を使う。`time.sleep` は「待てる条件が存在しない」場合
    （物理値の安定待ち・「何も起きない」ことの確認）のみ例外とし、理由をコメントに書く
 4. マルチタッチテストは logcat 例外アサートをセットにする

@@ -65,6 +65,69 @@ class Gestures:
         self.client.ngui_event(path, "release")
         time.sleep(self.frame_wait)
 
+    # ----------------------------------------------------------------- ugui
+    # レガシーInput構成のuGUIアプリ向け（Active Input Handling が Input Manager (Old)）。
+    # その構成では Touchscreen 注入を誰も読まないので tap / press / pinch が届かない。
+    # ヒットテストは通常の tap と同じ RaycastProbe（EventSystem.RaycastAll）なので、
+    # 変わるのは送出側だけ＝ wait_until_hittable もそのまま使える。
+    # uGUI+NewInputSystem 構成のアプリでは通常の tap / press / pinch がそのまま使える。
+
+    def ugui_tap(self, path: str, pointer_id: int | None = None) -> None:
+        """uGUIタップ。hittable を検証してから pointerDown/Up/Click を送出。
+
+        **応答の `hittable` も確かめる**。`ugui_event` は遮蔽されていても送出するので、
+        事前検証と送出の間に遮蔽が割り込む遷移（ローディング膜が出た等）を
+        見ないと、押せていないのに緑になる。実タップ（`tap`）との挙動差でもある。
+        """
+        self._require_hittable(path)
+        result = self.client.ugui_event(path, "click", pointer_id or self.TAP_POINTER)
+        if result.get("hittable") is False:
+            raise BlockedError(path, result.get("blockedBy") or "UNKNOWN")
+        time.sleep(self.frame_wait)
+
+    def ugui_press(self, path: str, pointer_id: int | None = None) -> None:
+        """押しっぱなしにする（release まで保持）。
+
+        **pointer_id を分ければ複数の指を同時に置ける**（A を押しながら B をタップ）。
+        ドラッグの起点にも使う。応答の `hittable` も確かめる（ugui_tap と同じ理由）。
+        """
+        self._require_hittable(path)
+        result = self.client.ugui_event(path, "press", pointer_id or self.TAP_POINTER)
+        if result.get("hittable") is False:
+            # 押下は成立しているので、掴んだままにしない
+            self.client.ugui_event(event="release", pointer_id=pointer_id or self.TAP_POINTER)
+            raise BlockedError(path, result.get("blockedBy") or "UNKNOWN")
+        time.sleep(self.frame_wait)
+
+    def ugui_move(self, x: float, y: float, pointer_id: int | None = None) -> None:
+        """押下中のポインタを動かす（ScrollRect / Slider のドラッグ用）。"""
+        self.client.ugui_event(event="move", pointer_id=pointer_id or self.TAP_POINTER, x=x, y=y)
+        time.sleep(self.frame_wait)
+
+    def ugui_release(self, path: str | None = None, pointer_id: int | None = None) -> None:
+        """離す。path を渡すとその位置まで動かしてから離す（drag & drop）。"""
+        self.client.ugui_event(path, "release", pointer_id or self.TAP_POINTER)
+        time.sleep(self.frame_wait)
+
+    def ugui_drag(self, path: str, x2: float, y2: float, *, steps: int = 8,
+                  pointer_id: int | None = None) -> None:
+        """path の中心から (x2, y2) まで、押下したまま段階的に動かして離す。
+
+        **段階を刻むのは ScrollRect の慣性や Slider の追従が 1 手では出ないため**
+        （実タップの drag と同じ理由）。
+        """
+        pid = pointer_id or self.TAP_POINTER
+        x1, y1 = self._require_hittable(path)
+        self.client.ugui_event(path, "press", pid)
+        time.sleep(self.frame_wait)
+        for i in range(1, steps + 1):
+            t = i / steps
+            self.client.ugui_event(event="move", pointer_id=pid,
+                                   x=x1 + (x2 - x1) * t, y=y1 + (y2 - y1) * t)
+            time.sleep(self.frame_wait)
+        self.client.ugui_event(event="release", pointer_id=pid)
+        time.sleep(self.frame_wait)
+
     # ----------------------------------------------------------------- drag
 
     def drag(self, x1: float, y1: float, x2: float, y2: float, *,

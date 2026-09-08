@@ -677,7 +677,10 @@ if ($PytestArgs) {
     # 指すと pytest がエラーになる
     $knownAdbTests = @(
         "tests/test_smoke.py::test_hold_a_tap_b_then_release",
-        "tests/test_ngui_legacy.py::test_real_tap_via_adb_reaches_legacy_ngui"
+        "tests/test_ngui_legacy.py::test_real_tap_via_adb_reaches_legacy_ngui",
+        # **サンプルを増やしたら、その adb 直叩きテストもここへ足すこと**。
+        # 足し忘れても Windows は IOS_SKIP なので気づけず、mac の verify-all だけが落ちる
+        "tests/test_ugui_legacy.py::test_real_tap_reaches_ugui"
     )
     # 表記ゆれ（./tests, tests/, 末尾スラッシュ）を正規化してから比較する。
     # さらに**ファイルが実在するときだけ**除外を足す — --deselect は収集されない id を

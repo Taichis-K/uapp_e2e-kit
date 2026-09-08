@@ -81,6 +81,10 @@ namespace E2EBridge
                 case "input_reset":      result = ResetAllInput(); break;
                 case "input_devices":    result = DeviceInjector.Devices(); break;
                     case "ngui_event":    result = NguiAdapter.HandleEvent(args); break;
+                    // 入力バックエンドに依らず uGUI のイベント経路へ直接送る。
+                    // Active Input Handling が「Input Manager (Old)」のプロジェクトでは
+                    // pointer_* の注入が誰にも読まれないので、こちらが唯一の UI 操作手段になる
+                    case "ugui_event":    result = UguiAdapter.HandleEvent(args); break;
                     default:
                         throw new BridgeException(ErrorCodes.UnknownCommand, $"unknown command: {cmd}");
                 }
@@ -134,9 +138,16 @@ namespace E2EBridge
             try { pointers = (JObject)TouchInjector.Reset(); }
             catch (Exception ex) { failure = failure ?? ex; }
 
+            // uGUI の合成ポインタも同じ理由で解放する。押下が残ると以後の
+            // ugui_event press が全部 ALREADY_PRESSED で落ちる（タッチ側と同型）
+            int ugui = 0;
+            try { ugui = UguiAdapter.Reset(); }
+            catch (Exception ex) { failure = failure ?? ex; }
+
             if (failure != null) throw failure;
 
             devices["releasedPointers"] = pointers["released"];
+            devices["releasedUgui"] = ugui;
             return devices;
         }
 
@@ -172,7 +183,10 @@ namespace E2EBridge
                 // リセット待ちループが空回りした）
                 ["scene"] = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name,
                 ["screen"] = new JObject { ["w"] = Screen.width, ["h"] = Screen.height },
-                ["activePointers"] = TouchInjector.ActiveCount,
+                // **uGUI の合成ポインタも数える**。数えないと、`ugui_press` の押しっぱなしが
+                // ping から見えず、「押下が残る事故は ping の activePointers で見つける」という
+                // 配布文書の手順が新しい経路に効かない（レガシー構成では常に 0 に見えていた）
+                ["activePointers"] = TouchInjector.ActiveCount + UguiAdapter.ActiveCount,
                 ["ngui"] = NguiAdapter.Available
             };
         }

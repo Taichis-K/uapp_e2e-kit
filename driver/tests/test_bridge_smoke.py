@@ -138,6 +138,15 @@ def test_input_reset_releases_a_stuck_pointer(client):
     **対照を対にする**: 押下が無いときは `releasedPointers` が 0 であること。
     これが無いと「常に何か解放したと言う」実装でもこのテストは通る。
     """
+    # **Input System への注入が使えない構成では、このテストの前提が成り立たない**。
+    # 計装は com.unity.inputsystem が無くてもコンパイルできる（UI 操作は ugui_* / ngui_* で行う）ので、
+    # パッケージを入れていないプロジェクトでは `pointer_down` が明示エラーになるのが正しい。
+    # **その環境で赤くしない**（配布物のスモークなので、導入先の正しい構成で落ちてはいけない）。
+    # 判定は診断コマンドで行う ― 例外を握って判断すると、本物の不具合まで skip に化ける
+    devices = client.input_devices()
+    if devices.get("available") is False:
+        pytest.skip(f"Input System への注入が使えない構成: {devices.get('reason')}")
+
     # 対照: 何も押していない状態
     client.input_reset()
     assert client.input_reset().get("releasedPointers") == 0, \

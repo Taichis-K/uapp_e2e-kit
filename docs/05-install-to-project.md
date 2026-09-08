@@ -19,8 +19,8 @@
 |---|---|
 | Unity | 2022.3 以降を想定（コンパイル検証済み: 2022.3 / 6000.0.58f2 / 6000.2 / 6000.3） |
 | UIフレームワーク | uGUI / NGUI（自動検出・リフレクション対応。混在可） |
-| 入力 | New Input System または Both（レガシーInputのみのアプリは Both へ変更が必要。既存挙動は変わらない） |
-| 追加パッケージ | `com.unity.inputsystem`、`com.unity.nuget.newtonsoft-json`（ともに無料の公式パッケージ） |
+| 入力 | **どれでもよい**（New Input System / Both / Input Manager のみ）。**Active Input Handling の変更もパッケージ追加も不要**。レガシーのみの構成では `com.unity.inputsystem` すら要らず、UI 操作は `ugui_*` / `ngui_*` を使う |
+| 追加パッケージ | `com.unity.nuget.newtonsoft-json`（無料の公式）。**`com.unity.inputsystem` は任意** — 入れなくても計装はコンパイルでき、UI 操作・dump・hittable はすべて動く。要るのは `pointer_*`（`tap` / `pinch`）とキー / マウス / パッドの注入を使うときだけ |
 | PowerShell | **PowerShell 7（pwsh）以降**。Windows 標準の Windows PowerShell 5.1 は非対応（キットのスクリプトは BOM なし UTF-8 のため 5.1 では日本語が誤解釈され動作しない） |
 | OS | **Windows で開発・検証している。macOS は Intel（x86_64）と Apple Silicon（arm64）の両方の実機で検証済み**（下記） |
 | AIエージェント | Claude Code、または OpenAI Codex CLI v0.94.0 以降（任意。人手運用も可） |
@@ -125,8 +125,13 @@ Codex ユーザーでルートに `AGENTS.md` が無い場合は `-RootAgentsMd`
 "com.unity.nuget.newtonsoft-json": "3.2.1"
 ```
 
-- 初回オープン時に「新しい入力バックエンドを有効化しますか？」→ **Yes**
-  （聞かれない場合は Player Settings > Active Input Handling を **Both** に。レガシー入力の挙動は変わらない）
+- **`com.unity.inputsystem` を入れない場合、このダイアログ自体が出ない**（レガシー構成の推奨）。
+  入れた場合に「新しい入力バックエンドを有効化しますか？」と聞かれたら、**どちらを選んでもよい**:
+  - **No のまま（Input Manager のみ＝`activeInputHandler: 0`）**: レガシー入力のアプリはこれが正しい。
+    UI 操作は `ugui_*` / `ngui_*` を使う。**プロジェクト側の変更はここで終わり**
+  - **Yes（Both）**: `pointer_*`（`tap` / `pinch`）とキー / マウス / パッドの注入も使いたい場合のみ。
+    レガシー入力の挙動は変わらない
+  - **既に New Input System のアプリは何もしなくてよい**（`1` のままでよく、Both にする必要は無い）
 - 既に Newtonsoft の DLL を Plugins に持つプロジェクトはパッケージ追加せず、それを使う
   （重複するとコンパイルエラーになるため要確認）
 

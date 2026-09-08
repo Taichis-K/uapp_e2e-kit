@@ -27,8 +27,8 @@ description: UnityアプリのE2Eテストを規約に沿って新規作成す�
    既定の `probe="selectable"` では押せる対象が 1 件も出ず「操作待ちではない」と誤読する
 3. **テストを書く**。規約:
    - 使用する操作APIは `uapp_e2e/e2e-config.json` の `uiType` に従う
-     （`ngui-legacy`→`ngui_tap`系 / それ以外→`tap`系。詳細は SETUP.md の判定表）
-   - タップは `g.tap(path)`（hittable検証込み）。NGUIレガシー構成なら `g.ngui_tap(path)`
+     （`ngui-legacy`→`ngui_tap`系 / `ugui-legacy`→`ugui_tap`系 / それ以外→`tap`系。詳細は SETUP.md の判定表）
+   - タップは `g.tap(path)`（hittable検証込み）。レガシーInput構成なら `g.ugui_tap(path)` / `g.ngui_tap(path)`
    - 待機は `g.wait_until_visible / gone / hittable / until`。`time.sleep` は使わない
    - 状態検証は `client.get(path, "コンポーネント名", "プロパティ名")`
    - マルチタッチ（ホールド+タップ、ピンチ）は `g.press/release`（pointerId指定）や `g.pinch`。

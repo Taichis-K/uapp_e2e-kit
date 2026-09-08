@@ -164,18 +164,28 @@ function Get-CliStatus {
             -RedirectStandardOutput $outFile -RedirectStandardError $errFile
         if (-not $p.WaitForExit($CliTimeoutSeconds * 1000)) {
             try { $p.Kill() } catch { }
-            return [pscustomobject]@{ available = $true; timedOut = $true; connected = $false; state = $null }
+            return [pscustomobject]@{ available = $true; timedOut = $true; connected = $false
+                                      instanceCount = 0; state = $null }
         }
         $raw = ((Get-Content -LiteralPath $outFile -Raw -ErrorAction SilentlyContinue) +
                 (Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue))
         $json = $null
         try { $json = $raw | ConvertFrom-Json } catch { }
         $connected = [bool]($json -and $json.success -and $json.data.count -ge 1)
+        # **「0 件」と「見つかったが繋がらない」を潰さない**（2026-09-08 の退行の真因）。
+        # CLI は別物として返している: 正常= success/count 1/state ready、
+        # モーダル・占有= count 1 / state unreachable / STATUS_ALL_UNREACHABLE、
+        # pipeline 未導入= count 0 / STATUS_NO_INSTANCES。
+        # connected だけ見ると後者 2 つが同じになり、**pipeline を入れていない健全なエディタ**
+        # （手動 Play ＋ UAPP_E2E_EDITOR=1 の運用。2022.3 でも動く）まで「使えない」に落ちる
+        $instanceCount = 0
+        if ($json -and $json.data -and $null -ne $json.data.count) { $instanceCount = [int]$json.data.count }
         return [pscustomobject]@{
-            available = $true
-            timedOut  = $false
-            connected = $connected
-            state     = if ($connected) { $json.data.instances[0].state } else { $null }
+            available     = $true
+            timedOut      = $false
+            connected     = $connected
+            instanceCount = $instanceCount
+            state         = if ($connected) { $json.data.instances[0].state } else { $null }
         }
     } finally {
         Remove-Item -LiteralPath $outFile, $errFile -Force -ErrorAction SilentlyContinue
@@ -234,7 +244,44 @@ $pipelineOk = [bool]($cliStatus -and $cliStatus.connected)
 # **使える状態か**（-Editor 系が成立するか）と、**占有しているか**（batchmode が失敗するか）は別。
 # 起動途中・ダイアログ待ちは「占有しているが使えない」＝どちらの経路もダメで人の操作が要る
 $occupied = [bool]($targetProcs.Count -gt 0 -or $targetBatchProcs.Count -gt 0 -or $instanceAlive -or $locked)
-$usable = [bool]($pipelineOk -or $instanceAlive)
+# **CLI が「繋がらない」と答えたら、EditorInstance.json の生存では覆さない**（2026-09-08・mac の実測）。
+# mac ではモーダル中に `unity status` が `unreachable` を返すのに、`-or $instanceAlive` の
+# 右側が勝って `open`（使える）と答えていた ― Windows とは別経路で同じ「使えないのに使えると言う」。
+#
+# **CLI が無い場合は覆さない**（`available` が false）。測れていないだけなので、
+# 手動 Play の運用まで「使えない」と言ってしまう。**測ったうえで否定されたときだけ落とす**。
+# なお `-Editor` 系は com.unity.pipeline への接続が前提なので、
+# 「CLI はあるが繋がらない」は素直に「使えない」でよい
+# **このプロジェクトのインスタンスを見つけたうえで繋がらない**ときだけ落とす。
+# - `instanceCount -eq 0`（STATUS_NO_INSTANCES）は「CLI がこのエディタについて何も言えていない」
+#   ＝**測れていない**側。ここで落とすと com.unity.pipeline 未導入の健全なエディタを止める
+#   （2026-09-08 に実際に落とした。mac が旧版との A/B で発見）
+# - `timedOut` も落とさない。**CLI が無言ハングしただけ**で「ダイアログを閉じろ」と言うのは誤誘導
+#   （この機は unity auth status が 25 秒返らないことがある。CLAUDE.local.md に記録）
+$cliDeniesUsable = [bool]($cliStatus -and $cliStatus.available -and -not $cliStatus.timedOut `
+                          -and $cliStatus.instanceCount -ge 1 -and -not $cliStatus.connected)
+$usable = [bool](($pipelineOk -or $instanceAlive) -and -not $cliDeniesUsable)
+
+# **4 つ目の信号: モーダルダイアログで止まっていないか**（2026-09-08 に追加）。
+# 上の 3 信号だけだと **pipeline が ready を返すのに open と答えて外す**。
+# 実測: Input System の「Do you want to enable the backends?」ダイアログが出ている間、
+# `unity status` は ready・EditorInstance.json も生存・ロックも保持で **open と判定された**が、
+# メインスレッドは止まっており、ブリッジは接続だけ成立して応答が返らなかった
+# （呼び手側は 14 分無言でリトライし続けた）。
+# **「pipeline が ready」は「コマンドを実行できる」の根拠にならない** ― issue #20 で
+# 「`unity status=ready` と pipeline コマンドに応答できることは別」と分かっていたのに、
+# その学びが判定側へ反映されていなかった。
+$modal = $null
+foreach ($p in $targetProcs) {
+    $probe = Test-UappEditorModalBlocked -ProcessId $p.pid
+    if ($probe.determinable -and $probe.disabledWindowExists) { $modal = $probe; break }
+    # **「判定できて、無効化ウィンドウが無い」を優先して残す**。
+    # 判定不能を先に掴んだまま上書きしないと、実際に見た結果があるのに「未確認」と表示してしまう
+    if (-not $modal -or (-not $modal.determinable -and $probe.determinable)) { $modal = $probe }
+}
+# **判定できた場合だけ落とす**。判定できない環境（mac 等・ウィンドウ未生成）で塞ぐと、
+# 正常なエディタまで使えないと言ってしまう。判定不能は下の表示で「見ていない」と明示する
+if ($modal -and $modal.determinable -and $modal.disabledWindowExists) { $usable = $false }
 # **プロセス列挙に失敗したら判定しない**。3 信号のうち最重要のものが欠けている状態で
 # closed と言うと、読んだ側が batchmode を起動して排他ロックで失敗する（安全側へ倒す）
 if ($procEnumFailed -and -not $usable) {
@@ -257,6 +304,11 @@ $report = [pscustomobject]@{
         editorInstanceJson     = $instance
         lockfileHeld           = $locked
         pipelineConnected      = $pipelineOk
+        # **「0 件」と「見つかったが繋がらない」を呼び手も区別できるようにする**。
+        # close-editor は「pipeline 経由でしか閉じられない」ので、0 件なら早期に落とす
+        pipelineInstanceCount  = $(if ($cliStatus) { $cliStatus.instanceCount } else { $null })
+        disabledWindowExists   = $(if ($modal -and $modal.determinable) { $modal.disabledWindowExists } else { $null })
+        modalWindows           = $(if ($modal -and $modal.determinable) { $modal.windows } else { @() })
     }
     unityProcesses   = $procs.Count                              # マシン上の Unity プロセス総数
     othersOnly       = [bool](-not $occupied -and $procs.Count -gt 0)
@@ -283,11 +335,20 @@ switch ($state) {
     default  {
         Write-Host "  このプロジェクトのエディタ: **起動途中か、ダイアログ待ちで止まっている**"
         Write-Host "    → batchmode も -Editor も失敗する。エディタの画面を見て（ダイアログを閉じて）から再実行する"
-        # **候補を挙げる（断定しない）**。この状態を作るモーダルは 1 種類ではない
-        Write-Host "    この状態になる例: プロジェクトにコンパイルエラーがあると **Enter Safe Mode? のモーダル**が出て止まる"
+        # **モーダルとは限らない**（2026-09-08 に mac が実測）。プログレスバー等でメインスレッドが
+        # 占有されているだけでも同じ表示になり、そちらは**待てば明ける**。
+        # いきなり「プロセス終了 → Temp 削除」を案内すると、**待てばよいものに最も高くつく手順**を
+        # 踏ませる ―「断定は、間違っているときに探索の方向ごと固定する」の実例なので、
+        # **先に測り直しを案内する**
+        Write-Host "    **まず 20〜30 秒あけて、もう一度これを実行してください**"
+        Write-Host "      長い import / コンパイル / 重い処理でメインスレッドが塞がっているだけなら、待つと open へ戻ります"
+        Write-Host "      （その状態と、人の操作が要るモーダルは、この判定では区別できません）"
+        Write-Host "    2 回目も同じなら、人の操作が要る可能性が高い。この状態になる例:"
+        Write-Host "    - プロジェクトにコンパイルエラーがあると **Enter Safe Mode? のモーダル**が出て止まる"
         Write-Host "      （2026-08-26 に Windows / macOS の両方で実測。Editor.log はコンパイルエラーの直後で更新が止まり、"
         Write-Host "        EditorInstance.json は書かれず、ロックだけ握った状態になる。Recovering Scene Backups でも同じ状態）"
-        Write-Host "      復旧: 画面でダイアログを閉じる。閉じられなければプロセス終了 → <プロジェクト>\Temp 削除 → 再起動"
+        Write-Host "      復旧（**2 回目も同じだったときだけ**）: 画面でダイアログを閉じる。"
+        Write-Host "        閉じられなければプロセス終了 → <プロジェクト>\Temp 削除 → 再起動"
         foreach ($p in $targetProcs) {
             # **この分岐は実質 Windows 専用**。mac 側の列挙は MainWindowTitle を $null で埋めるので
             # hasWindow が常に false になり、ここへは来ない（mac セッションの指摘）。
@@ -305,10 +366,27 @@ switch ($state) {
         }
     }
 }
-Write-Host ("    根拠: -projectPath 一致プロセス={0} / EditorInstance.json={1} / ロックファイル保持={2} / Pipeline={3}" -f `
+Write-Host ("    根拠: -projectPath 一致プロセス={0} / EditorInstance.json={1} / ロックファイル保持={2} / Pipeline={3} / モーダル={4}" -f `
     $targetProcs.Count,
     $(if ($instance) { "pid=$($instance.pid) 生存=$($instance.alive)" } else { "なし" }),
-    $locked, $pipelineOk)
+    $locked, $(if ($cliDeniesUsable -and $instanceAlive) {
+                   "$pipelineOk（**CLI が繋がらないので使えない側へ倒した** ― エディタは生きているが、コマンドを受けられない）"
+               } else { $pipelineOk }),
+    $(if (-not $modal) { "未確認" }
+      elseif (-not $modal.determinable) { "判定不能（$($modal.reason)）" }
+      elseif ($modal.disabledWindowExists) { "**無効化ウィンドウあり**（$($modal.reason)）" }
+      else { "なし" }))
+if ($modal -and $modal.determinable -and $modal.disabledWindowExists) {
+    Write-Host "    **無効化されたウィンドウがあります**（pipeline が ready でもコマンドが実行されないことがあります）"
+    Write-Host "      観測したのは「無効化された可視ウィンドウがある」ことだけで、原因は断定しません。"
+    Write-Host "      最も多いのはモーダルダイアログですが、**長時間処理の UI ロックでも同じ状態になります**"
+    Write-Host ("      見えているウィンドウ: " + ($modal.windows -join " / "))
+    Write-Host "      この状態になる例: Input System の 'Do you want to enable the backends?'"
+    Write-Host "        （com.unity.inputsystem を入れて activeInputHandler が 0 のプロジェクトを GUI で開くと出る。"
+    Write-Host "          **Yes を押すと 2（Both）へ変わってエディタが再起動する**ので、0 のままにしたいなら No）"
+    Write-Host "      ほかに Enter Safe Mode? / Recovering Scene Backups でも同じ状態になる（断定はしない）"
+    Write-Host "      復旧: 画面でダイアログを閉じる。閉じられなければプロセス終了 → <プロジェクト>\Temp 削除 → 再起動"
+}
 if ($cliStatus) {
     if ($cliStatus.timedOut) {
         Write-Host "  Unity CLI: $CliTimeoutSeconds 秒で応答なし（認証切れの可能性。'unity doctor' / 'unity auth login'）"
