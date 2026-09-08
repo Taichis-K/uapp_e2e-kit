@@ -26,7 +26,10 @@ Claude Code 等の AI エージェントによる自律テスト開発を前提�
 - **画面の文字を読む**: **`texts`**（v0.1.16）は見出し・残数表示・セリフのような
   **押せないが読みたいテキスト**を型で絞って取る（`hittables` は押せる要素のテキストしか返さない）。
   **型も範囲も呼ぶ側が決める**ので、TMP・uGUI・NGUI・独自の表示部品のどれでも同じ口で読める
-- **uGUI / NGUI 両対応**、Input System・レガシー Input 両対応（`e2e-config.json` の `uiType` で切替）
+- **uGUI / NGUI 両対応**、Input System・レガシー Input 両対応（`e2e-config.json` の `uiType` で切替）。
+  **4 通りのどの組み合わせでもセットアップ上の追加作業は不要**（v0.1.17）― uGUI + レガシー Input には
+  EventSystem へ直接送出する `ugui_tap` 系があるので、Active Input Handling の Both 化も
+  EventSystem の差し替えも要らない。レガシー構成なら `com.unity.inputsystem` も入れずに導入できる
 - **タップ・ドラッグ・ピンチ・複数ポインタの同時操作**（press/release）のジェスチャ注入、
   `wait_until_*` による待機（sleep に頼らない）
 - **UI を経由しない入力にも対応**（v0.1.4）: キーボード・マウス・ゲームパッドを直接注入できる。
