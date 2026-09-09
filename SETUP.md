@@ -145,7 +145,7 @@ bundle id ならそのままでよい）。
 
 | 制約 | 内容 |
 |---|---|
-| **アプリの外は、計装だけでは操作できない** | 計装（E2EBridge）は Unity アプリの中で動くので、**外部ブラウザ・システムダイアログ・他アプリは `dump` にも `tap` にも現れない**。**Android にはこのキットの中に逃げ道がある**（`adb` の uiautomator 経由で `ui_tap` / `ui_type`。外部ブラウザでの認証も自動化できる）。**iOS 側の同梱手段は `-OsAgent`（XCUITest ベースの OS レイヤーエージェント）**で、座標タップ・スクショは実機で実測済み。ただし**文字入力・アラート・スワイプは実装のみ・実利用未検証**（`simctl` 自体にはタップ注入の公開 API が無い） |
+| **アプリの外は、計装だけでは操作できない** | 計装（E2EBridge）は Unity アプリの中で動くので、**外部ブラウザ・システムダイアログ・他アプリは `dump` にも `tap` にも現れない**。**Android にはこのキットの中に逃げ道がある**（`adb` の uiautomator 経由で `ui_tap` / `ui_type`。外部ブラウザでの認証も自動化できる）。**iOS 側の同梱手段は `-OsAgent`（XCUITest ベースの OS レイヤーエージェント）**で、座標タップ・スクショは実機で実測済み。**文字入力（`/type`）・アラート（`/alert`）・スワイプ（`/swipe`）はシミュレータで実測済み**（検索欄に文字が入る／ダイアログのボタンを列挙して押すと消える／ページ送りが起きる。bundleId 省略で 400・非前面で 409 のガードも確認）。**実機ではこの 3 つが未検証**（`simctl` 自体にはタップ注入の公開 API が無い） |
 | **→ 設計への影響** | **iOS の E2E は「アプリ内で完結する導線」を基本に組む**。アプリ外は `-OsAgent` で広げられるが、検証済みなのは座標タップとスクショまでで、**外部ブラウザでの認証フローの自動化は Android の `ui_type` 相当まで検証されていない**。テスト用にアプリ内 WebView やモック認証へ切り替えられるビルド構成を用意しておくと、後で困らない |
 | **画面の記録** | Android は `adb screencap` で**画面に出ているものをそのまま**残せる。iOS シミュレータは `simctl` で同じことができる。**iOS 実機は経路が端末で分かれ、2 つの条件は別物**: `-OsAgent`（XCUITest ベース）が使えるかは**次の行の `pairingState`** で決まる（使えれば OS 合成後の画面を撮れる。実機で実測済み。端末側の UI オートメーション有効化が前提）。一方 **`idevicescreenshot` の自動試行は同梱実装では iOS の主版 ≤16 のときだけ**（実測は iOS 16 の 1 台。iOS 17 以降は Apple が経路を変えたため試行しない）。下の行の計装スクショは Unity の描画のみで代替にならない |
 | **端末によって使える手段が入れ替わる** | **`-OsAgent`（XCUITest）の可否は `pairingState` で判定する**（`xcrun devicectl list devices` の `pairingState` が `paired` でない端末は XCUITest の宛先にならない。`run-ios-e2e.ps1 -OsAgent` の事前ガードもこれを見る）。`idevicescreenshot` の自動試行条件は前の行のとおり iOS の主版 ≤16（実測では CoreDevice 非対応の iOS 16 端末で使え、対応端末では使えなかった — 各 1 台の実測で、一般化の裏は取れていない）。いずれにせよ**手段が端末で切り替わる前提で組む**。**`pairingState` で止められた端末（表示は `unsupported` とは限らず、CoreDevice が担当しない端末では `pairingState=未登録` になる）でも、go-ios を自分で用意すれば OS エージェントを動かせる** — 手順は同梱の [docs/09-ios16-osagent.md](docs/09-ios16-osagent.md)（iPhone 8 / iOS 16.7.16 で実測。**go-ios はキットに同梱しないので各自で用意する**。**ガードは正しいので外さないこと** — `-showdestinations` に出るようになっても `xcodebuild test` は同じ文言で落ちる、を実測している） |
@@ -249,7 +249,7 @@ Codex ユーザーでルート `AGENTS.md` が無いプロジェクトは `-Root
      `build-ios.ps1` の既定エントリ（BuildEntry）がビルド時に一時付与し、終了時に復元する。
      **例外はエディタ直結**: iOS プラットフォームのまま Play で使うなら iOS ターゲットへの
      付与が要る（エディタはアクティブターゲットの define でコンパイルするため。Windows でも可）。
-     その場合、**BuildEntry を通さない本番 iOS ビルドには計装が混入する**ので本番前に外す運用を明確に
+     その場合、**BuildEntry を通さない本番 iOS ビルドには計装が混入する**ので本番前に外す運用を明確に。**運用に頼らず機械で止める**なら `e2e-config.json` に `"productionGuard": { "devDefine": "<開発版ビルドの目印 define>" }` を書く （`UAPP_E2E_BRIDGE` があるのにその define が無いビルドをプリプロセスで失敗させる。**既定は無効**・外すときは環境変数 `UAPP_E2E_SKIP_PRODUCTION_GUARD=1`。詳細は docs/05）
 4. `.gitignore` に `uapp_e2e/config/local.json` と `uapp_e2e/Builds/` を追加
 5. `.claude/rules/uapp-e2e.md` と `uapp_e2e/AGENTS.md` が配置されていることを確認（installer が配置する。
    これらが `uapp_e2e/CLAUDE.md` への参照導線となるため、**プロジェクト本体の CLAUDE.md は書き換えない**。

@@ -826,6 +826,29 @@ function Get-UappUnityProjectLockState {
     }
 }
 
+function Get-UappKitTest {
+    <#
+      .SYNOPSIS
+      導入先へ配る「キット所有のテスト」の一覧を返す（`driver\tests\` 配下のファイル名）。
+
+      .NOTES
+      **配布経路が 2 つあるので、この一覧は 1 か所に置く**（Get-UappDevOnlyScript と同じ理由）:
+        package-kit.ps1 …… zip に入れるとき（分類ガードの基準）
+        install-to-project.ps1 … 導入先へ置くとき（所有判定とコピー）
+      片方だけに書くと、**もう片方の経路でだけ静かに欠ける**。
+      実際に test_gestures_unit.py が installer の列挙から漏れ、
+      **zip には入るのに導入先へ 1 度も届かなかった**（0.1.18 のリリース前検査で発見）。
+      これは 0.1.17 の test_ugui_legacy.py と**同じ型**で、そのときは
+      package-kit 側にだけガードを入れて終わっていた ―
+      **直した型は、同じ性質の経路をすべて潰すまでが 1 つの修正**。
+
+      conftest.py もキットが配るが、**installer では既存を尊重して上書きせず、
+      manifest の所有にも載せない**ので、呼び出し側で除いて使う。
+    #>
+    @("conftest.py", "test_journey_unit.py", "test_adb_ui.py", "test_client_unit.py",
+      "test_bridge_smoke.py", "test_metrics_unit.py", "test_gestures_unit.py")
+}
+
 function Get-UappDevOnlyScript {
     <#
       .SYNOPSIS

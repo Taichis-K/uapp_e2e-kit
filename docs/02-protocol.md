@@ -531,8 +531,67 @@ sequenceDiagram
 | `NGUI_NOT_PRESENT` | `ngui_event` を呼んだが NGUI がビルドに入っていない |
 | `INPUT_BACKEND_LEGACY` | Input System への注入が届かない（パッケージはあるが `activeInputHandler: 0`）。**直し方は Player Settings の変更** |
 | `INPUT_SYSTEM_NOT_PRESENT` | Input System への注入が使えない（`com.unity.inputsystem` 未導入）。**直し方はパッケージの追加**。UI 操作だけなら不要（`ugui_event` / `ngui_event` を使う） |
+| `PROPERTY_NOT_READABLE` | プロパティは在るが**読めない**（getter が無い）。`NOT_FOUND` とは**直し方が違う** ― 名前ではなく、書き込み専用か、**IL2CPP の Managed Stripping で getter だけ落とされている**。後者は `link.xml` でその型を保持すれば読める |
 | `TIMEOUT` | メインスレッド 30 秒無応答 |
 | `INTERNAL` | 予期しない例外（message にスタックトレース） |
+
+## 読めなかったプロパティ（`readErrors`）
+
+`dump` / `hittables` / `texts` は、表示テキストをリフレクションで読む。
+**読めないコンポーネントがあっても応答は落とさず**、`readErrors` に**型ごとに 1 件へ畳んで**返す。
+
+```json
+"readErrors": [
+  { "type": "UnityEngine.TextMesh", "property": "text",
+    "assembly": "UnityEngine.TextRenderingModule",
+    "path": "Stage/Board/PlayerName", "count": 4,
+    "error": "Get Method not found for 'text'" }
+]
+```
+
+- **無いときはキーごと出ない**（`readErrors` が無い＝読み取り失敗 0 件）
+- `type` は**完全修飾名**。短い名前だと `UnityEngine.TextMesh` と `TMPro.*` を取り違える
+  （実際に取り違えた。`ExtractText` の型フィルタは `TextMesh` の**部分一致**なので両方に当たる）
+- `count` は同じ型で何件失敗したか。`path` は**最初の 1 件**
+
+**なぜ落とさないか**: IL2CPP の Managed Stripping は**誰も呼ばない getter を落とす**ので、
+`GetProperty("text")` は返るのに `GetValue` が `ArgumentException` を投げることがある。
+以前はここで **`dump` 全体が失敗**し、**何も見えないので原因も追えなかった**
+（導入先は候補型の列挙と名指し総当たりで切り分ける羽目になった）。
+
+**なぜ黙って null にしないか**: 取れなかったことが見えなくなるほうが質が悪い。
+**どの型が落ちるかはプロジェクトによる**（3D テキスト・NGUI・独自の派生・第三者 DLL）ので、
+ブリッジ側で型を列挙して先回りはしない。**値も読みたいなら**、
+`readErrors` に出た型を `link.xml` で保持する。
+
+- `assembly` は**その型があるアセンブリ**。**型名からは導けない**ので返している
+  （`UnityEngine.TextMesh` は `UnityEngine.TextRenderingModule` にある）
+
+**エディタでは再現しない**（stripping が掛からない）。**書き込み専用のプロパティは同じ例外**になるので、
+検証台はエディタでも作れる。
+
+### 値も読みたいとき（`link.xml`）
+
+**`readErrors` に出た型を保持すれば読めるようになる。** 応答の 2 つの値をそのまま写す:
+
+```xml
+<!-- Assets/ の下のどこかに link.xml として置く -->
+<linker>
+  <assembly fullname="ここに readErrors の assembly">
+    <type fullname="ここに readErrors の type" preserve="methods"/>
+  </assembly>
+</linker>
+```
+
+- **雛形に特定の型を並べていないのは、どの型が落ちるかがプロジェクトによるから**
+  （3D テキスト・NGUI・独自の派生・第三者 DLL）。**保持すべき型は `readErrors` が教える**
+- 導入先の実機で **`UnityEngine.TextMesh` を保持したら、落ちなくなるだけでなく値も読めた**
+  （`dump` 1395 ノード成功・`texts` が実値を返す）
+- **`preserve="methods"` で効くかは型による**。効かなければ
+  `<method signature="System.String get_text()" />` まで絞る
+- **切り分け**: `link.xml` を書いても直らないなら、**Managed Stripping Level を一時的に
+  Disabled にしてビルド**する。それで直れば stripping が原因と確定し、
+  `link.xml` の書き方の問題に絞れる。直らなければ**原因は別**
 
 ## バージョニング
 

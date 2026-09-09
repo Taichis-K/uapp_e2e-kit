@@ -202,14 +202,14 @@ function Get-KitOwnedFiles($target, $sourceRoots) {
             }
         }
     }
+    # キット所有のテストは Get-UappKitTest が唯一の一覧（uapp-platform.ps1。package-kit と共有）。
+    # conftest.py は既存を尊重して上書きしないので所有に含めない
+    $kitTestPaths = @(Get-UappKitTest | Where-Object { $_ -ne "conftest.py" } |
+                      ForEach-Object { Join-UappPath $kit "driver\tests\$_" })
     foreach ($f in @((Join-UappPath $target "Assets\uapp_e2e\E2EBridge.meta"),
                      (Join-UappPath $kit "driver\pytest.ini"),
                      (Join-UappPath $kit "driver\requirements.txt"),
-                     (Join-UappPath $kit "driver\tests\test_journey_unit.py"),
-                     (Join-UappPath $kit "driver\tests\test_adb_ui.py"),
-                     (Join-UappPath $kit "driver\tests\test_client_unit.py"),
-                     (Join-UappPath $kit "driver\tests\test_bridge_smoke.py"),
-                     (Join-UappPath $kit "driver\tests\test_metrics_unit.py"),
+                     $kitTestPaths,
                      (Join-UappPath $kit "config\local.sample.json"),
                      (Join-UappPath $kit "config\e2e-config.sample.json"),
                      # scripts-local は**中身がプロジェクト所有**。README だけキットが管理する
@@ -500,8 +500,7 @@ if (-not (Test-Path -LiteralPath $conftestDest)) {
 # **前回の所有記録が無い場合（手動導入・kit-manifest.json の削除・不完全な導入）も警告する** —
 # 「所有していた証拠が無い既存ファイル」は自作テストかもしれず、黙って消してよい根拠が無い
 $testNameConflicts = @()
-foreach ($t in @("test_journey_unit.py", "test_adb_ui.py", "test_client_unit.py", "test_bridge_smoke.py",
-                 "test_metrics_unit.py")) {
+foreach ($t in @(Get-UappKitTest | Where-Object { $_ -ne "conftest.py" })) {
     $testDest = Join-UappPath $kit "driver\tests\$t"
     if ((Test-Path -LiteralPath $testDest) -and (($null -eq $prevOwned) -or ($prevOwned -notcontains (ConvertTo-UappPathKey "uapp_e2e\driver\tests\$t")))) {
         $testNameConflicts += $t

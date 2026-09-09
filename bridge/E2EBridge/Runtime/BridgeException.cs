@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 
 namespace E2EBridge
 {
@@ -34,6 +34,11 @@ namespace E2EBridge
         // Input System **パッケージ自体が入っていない**。バックエンドが無効（INPUT_BACKEND_LEGACY）とは別物で、
         // 直し方も違う（前者はパッケージ導入、後者は Active Input Handling の変更）
         public const string InputSystemNotPresent = "INPUT_SYSTEM_NOT_PRESENT";
+        // プロパティは在るのに**読めない**（issue #64）。NOT_FOUND とは直し方が違う ―
+        // 名前を直すのではなく、**getter が存在しない**（書き込み専用、または
+        // IL2CPP の Managed Stripping で getter だけ落とされた）。
+        // 後者は link.xml でその型を保持すれば読めるようになる
+        public const string PropertyNotReadable = "PROPERTY_NOT_READABLE";
         public const string Internal = "INTERNAL";
     }
 }

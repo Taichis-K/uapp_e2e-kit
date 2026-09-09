@@ -85,17 +85,28 @@ class Gestures:
             raise BlockedError(path, result.get("blockedBy") or "UNKNOWN")
         time.sleep(self.frame_wait)
 
-    def ugui_press(self, path: str, pointer_id: int | None = None) -> None:
+    def ugui_press(self, path: str, pointer_id: int | None = None, *,
+                   x: float | None = None, y: float | None = None) -> None:
         """押しっぱなしにする（release まで保持）。
 
         **pointer_id を分ければ複数の指を同時に置ける**（A を押しながら B をタップ）。
         ドラッグの起点にも使う。応答の `hittable` も確かめる（ugui_tap と同じ理由）。
+
+        **x/y を渡すと、押す位置をその座標にする**（既定は path の中心）。
+        **座標を渡したときは事前の中心ヒットテストをしない** ―
+        中心が別の要素に取られていること自体が座標を指定する理由なので、
+        そこで弾いては用を成さない（ScrollRect の中央にスライダーが載っている等）。
+        かわりに**押下の応答で確かめる**: ブリッジは x/y があれば**その座標で**ヒットテストし、
+        **当たった実体へ送る**（当たらなければ path の要素へ）ので、応答の `hittable` は
+        「その座標で本当に届いたか」を表す。
         """
-        self._require_hittable(path)
-        result = self.client.ugui_event(path, "press", pointer_id or self.TAP_POINTER)
+        pid = pointer_id or self.TAP_POINTER
+        if x is None and y is None:
+            self._require_hittable(path)
+        result = self.client.ugui_event(path, "press", pid, x=x, y=y)
         if result.get("hittable") is False:
             # 押下は成立しているので、掴んだままにしない
-            self.client.ugui_event(event="release", pointer_id=pointer_id or self.TAP_POINTER)
+            self.client.ugui_event(event="release", pointer_id=pid)
             raise BlockedError(path, result.get("blockedBy") or "UNKNOWN")
         time.sleep(self.frame_wait)
 
@@ -110,21 +121,57 @@ class Gestures:
         time.sleep(self.frame_wait)
 
     def ugui_drag(self, path: str, x2: float, y2: float, *, steps: int = 8,
-                  pointer_id: int | None = None) -> None:
+                  hold: float = 0.0, pointer_id: int | None = None) -> None:
         """path の中心から (x2, y2) まで、押下したまま段階的に動かして離す。
 
         **段階を刻むのは ScrollRect の慣性や Slider の追従が 1 手では出ないため**
         （実タップの drag と同じ理由）。
+
+        hold > 0 なら終点で押したまま保持してから離す（実タップの `drag` と同じ）。
+
+        **掴む位置を選びたいときは `ugui_drag_xy`**（中心が別の要素に取られている場合）。
         """
         pid = pointer_id or self.TAP_POINTER
         x1, y1 = self._require_hittable(path)
         self.client.ugui_event(path, "press", pid)
         time.sleep(self.frame_wait)
+        self._ugui_drag_steps(pid, x1, y1, x2, y2, steps, hold)
+
+    def ugui_drag_xy(self, path: str, x1: float, y1: float, x2: float, y2: float, *,
+                     steps: int = 12, hold: float = 0.0,
+                     pointer_id: int | None = None) -> None:
+        """(x1, y1) で押し、(x2, y2) まで動かして離す。**掴む位置を座標で決める**（issue #61）。
+
+        `ugui_drag` は path の**中心**から始まるので、**中心が別の要素に取られている**
+        ScrollRect では使えない（中央にスライダーやドロップダウンが載っていると、
+        そちらがドラッグを消費する）。導入先の実運用では「スクロール領域の左端 +12」のような
+        端を掴む必要があった。
+
+        `path` は**イベントの宛先**で、位置は x/y が決める。
+        ブリッジは指定座標でヒットテストし、**当たった実体があればそちらへ送る**
+        （当たらなければ `path` の要素へ）。
+        **事前の中心ヒットテストはしない**理由は `ugui_press` の説明を参照。
+
+        hold > 0 なら終点で押したまま保持してから離す（仮想スティックを倒し続ける等）。
+        """
+        pid = pointer_id or self.TAP_POINTER
+        self.ugui_press(path, pid, x=x1, y=y1)
+        self._ugui_drag_steps(pid, x1, y1, x2, y2, steps, hold)
+
+    def _ugui_drag_steps(self, pid: int, x1: float, y1: float, x2: float, y2: float,
+                         steps: int, hold: float) -> None:
+        """押下済みのポインタを (x2, y2) まで刻んで動かし、必要なら保持して離す。
+
+        **ugui_drag と ugui_drag_xy で共有する**（押し方だけが違い、動かし方は同じ。
+        片方にだけ hold を足すような食い違いを作らないため）。
+        """
         for i in range(1, steps + 1):
             t = i / steps
             self.client.ugui_event(event="move", pointer_id=pid,
                                    x=x1 + (x2 - x1) * t, y=y1 + (y2 - y1) * t)
             time.sleep(self.frame_wait)
+        if hold > 0:
+            time.sleep(hold)
         self.client.ugui_event(event="release", pointer_id=pid)
         time.sleep(self.frame_wait)
 

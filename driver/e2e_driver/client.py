@@ -511,6 +511,11 @@ class BridgeClient:
         「ダイアログは存在するがまだ非アクティブ」を確認する使い方があり、既定を変えると
         それを黙って壊す。実機では走査と JSON 化が支配的なので、押せる要素だけが要るなら
         hittables() のほうが速い（導入先の実測: 同じ画面で dump 390ms / hittables 107ms）。
+
+        **読めなかったコンポーネントは応答の ``readErrors`` に出る**（issue #64）。
+        キーが無ければ 0 件。IL2CPP の Managed Stripping で getter が落ちた型があると、
+        **その text だけ欠けて**（応答自体は落ちない）型名が完全修飾で載る。
+        値も読みたいなら、出た型を ``link.xml`` で保持する。
         """
         args: dict[str, Any] = {"scope": scope, "probe": probe}
         if path:
@@ -526,6 +531,11 @@ class BridgeClient:
         判定は dump と同じ経路（RaycastProbe / NguiAdapter.Probe）を通すので、
         **dump(probe="all") の hittable 集合と一致する**のが仕様。
         重い画面ほど効き、**軽い画面では往復ぶん不利**なので dump の置き換えではない。
+
+        **読めなかったコンポーネントは応答の ``readErrors`` に出る**（issue #64）。
+        キーが無ければ 0 件。IL2CPP の Managed Stripping で getter が落ちた型があると、
+        **その text だけ欠けて**（応答自体は落ちない）型名が完全修飾で載る。
+        値も読みたいなら、出た型を ``link.xml`` で保持する。
         """
         return self.call("hittables")
 
@@ -554,6 +564,11 @@ class BridgeClient:
         使う型名は `dump` の `components` に出ているものがそのまま使える。
         **解決できなかった型は `unknownTypes` に返る** ― 打ち間違いを黙って飲み込むと
         「テキストが無い」と読めてしまう（偽の緑）ので、必ず確認すること。
+
+        **読めなかったコンポーネントは応答の ``readErrors`` に出る**（issue #64）。
+        キーが無ければ 0 件。IL2CPP の Managed Stripping で getter が落ちた型があると、
+        **その text だけ欠けて**（応答自体は落ちない）型名が完全修飾で載る。
+        値も読みたいなら、出た型を ``link.xml`` で保持する。
         """
         return self.call("texts", types=list(types), scope=scope)
 

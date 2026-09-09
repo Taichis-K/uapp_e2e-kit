@@ -41,7 +41,10 @@ param(
     # localhost 宛ての Pipeline 通信までプロキシへ流し 503 になり、Pipeline 接続が
     # 「なし」と誤判定される（詳細は uapp-platform.ps1 の Get-UappUnityCliGlobalArgs）。
     # 環境変数 UAPP_E2E_UNITY_CLI_PROXY_DISABLE=1 でも同じ
-    [switch]$UnityCliProxyDisable
+    [switch]$UnityCliProxyDisable,
+    # **exec の疎通まで見るときの打ち切り**（issue #60）。メインスレッドが空いていれば
+    # eval は即返るので短くてよい。0 を渡すとプローブ自体を打たない
+    [int]$ExecProbeTimeoutSeconds = 15
 )
 
 $ErrorActionPreference = "Stop"
@@ -153,6 +156,63 @@ function Get-UnityProcesses {
 
 # Unity CLI があれば pipeline の接続状況も見る（Play 中かどうかはここでしか分からない）。
 # **時間制限つきで呼ぶ**: CLI は認証セッションが切れると無言で 10 分以上返らない
+function Test-CliExec {
+    <#
+      **exec が実際に通るかを 1 回だけ確かめる**（issue #60）。
+
+      `pipeline` が ready でも、**メインスレッドが止まっていればコマンドは返らない**。
+      4 つ目の信号（無効化ウィンドウ）は**モーダルしか捕まえられず**、
+      **モーダルが見当たらないのに exec だけ 30 秒タイムアウトを繰り返す**状態が
+      導入先で実際に起きた（15 分・CPU 0%・画面にダイアログなし。
+      Input System パッケージを外した直後のドメインリロードで発生）。
+
+      **状態を変えない eval を打つ。** 返れば「使える」が**確定する**（推定ではなくなる）。
+      **分類はしない** ― 返らなかったという**観測**だけを返す。
+      理由（モーダル・長い処理・リロード中）はここでは区別できないし、
+      **区別できないものを断定すると、読み手が別の方向を見なくなる**。
+    #>
+    param([string]$Cli, [string]$ProjectDir, [int]$TimeoutSeconds)
+    if (-not $Cli -or $TimeoutSeconds -le 0) {
+        return [pscustomobject]@{ attempted = $false; ok = $false; timedOut = $false; seconds = 0 }
+    }
+    $outFile = [System.IO.Path]::GetTempFileName()
+    $errFile = [System.IO.Path]::GetTempFileName()
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    try {
+        # **cmd は --project-path でスコープする**（複数エディタが起動していても対象を間違えない）。
+        # code は名前付き引数が必須（位置引数だと 400 になる）
+        $p = Start-Process -FilePath $Cli -PassThru -NoNewWindow `
+            -ArgumentList (@($cliGlobalArgs) + @("cmd", "--project-path", (Format-CliArg $ProjectDir),
+                                                 "eval", "--code", (Format-CliArg 'return "ok";'),
+                                                 "--format", "json", "--no-banner")) `
+            -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+        if (-not $p.WaitForExit($TimeoutSeconds * 1000)) {
+            # **子孫ごと落とす。** `Kill()` は子へ再帰しないので、CLI が別プロセスを
+            # 抱えていると**打ち切ったつもりで待たされる** ―
+            # 偽 CLI で実測したら、6 秒で打ち切ったのに全体は 122 秒かかった
+            # （残った子がリダイレクト先のハンドルを握り続けるため）
+            try { Stop-UappProcessTree -ProcessId $p.Id } catch { try { $p.Kill() } catch { } }
+            $sw.Stop()
+            return [pscustomobject]@{ attempted = $true; ok = $false; timedOut = $true
+                                      seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1) }
+        }
+        $sw.Stop()
+        $raw = ((Get-Content -LiteralPath $outFile -Raw -ErrorAction SilentlyContinue) +
+                (Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue))
+        $json = $null
+        try { $json = $raw | ConvertFrom-Json } catch { }
+        return [pscustomobject]@{ attempted = $true; ok = [bool]($json -and $json.success)
+                                  timedOut = $false
+                                  seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1) }
+    } catch {
+        $sw.Stop()
+        return [pscustomobject]@{ attempted = $true; ok = $false; timedOut = $false
+                                  seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1) }
+    } finally {
+        Remove-Item -LiteralPath $outFile, $errFile -ErrorAction SilentlyContinue
+    }
+}
+
 function Get-CliStatus {
     param([string]$Cli)
     if (-not $Cli) { return $null }
@@ -282,6 +342,23 @@ foreach ($p in $targetProcs) {
 # **判定できた場合だけ落とす**。判定できない環境（mac 等・ウィンドウ未生成）で塞ぐと、
 # 正常なエディタまで使えないと言ってしまう。判定不能は下の表示で「見ていない」と明示する
 if ($modal -and $modal.determinable -and $modal.disabledWindowExists) { $usable = $false }
+
+# **5 つ目の信号: exec が実際に通るか**（issue #60）。
+# 4 つ目（無効化ウィンドウ）は**モーダルしか捕まえられない**。導入先では
+# **モーダルが見当たらないのに /api/exec だけ 30 秒タイムアウトを繰り返す**状態が起きた
+# （15 分・CPU 0%）。上の 4 信号はどれも「使える」と答えてしまう。
+#
+# **CLI が接続できているときだけ打つ。** `instanceCount = 0`（pipeline 未導入）の
+# 健全なエディタへ打つと必ず失敗し、**2026-09-08 に踏んだ退行を作り直すことになる**。
+# ここは「ready と言っている相手が本当に応じるか」を確かめる場所であって、
+# **pipeline を使わない構成を裁く場所ではない**
+$execProbe = $null
+# **エディタが実在するときだけ打つ**（`$occupied`）。居ないのに CLI を呼ぶのは
+# ただの無駄で、偽 CLI の検証で「closed なのに exec を打っている」のが見えた
+if ($occupied -and $usable -and $cliStatus -and $cliStatus.connected) {
+    $execProbe = Test-CliExec -Cli $cli -ProjectDir $projectDir -TimeoutSeconds $ExecProbeTimeoutSeconds
+    if ($execProbe.attempted -and -not $execProbe.ok) { $usable = $false }
+}
 # **プロセス列挙に失敗したら判定しない**。3 信号のうち最重要のものが欠けている状態で
 # closed と言うと、読んだ側が batchmode を起動して排他ロックで失敗する（安全側へ倒す）
 if ($procEnumFailed -and -not $usable) {
@@ -297,6 +374,9 @@ $report = [pscustomobject]@{
     project          = $projectName
     projectPath      = $projectDir
     state            = $state       # closed / open / starting-or-blocked
+    # **exec の観測**（issue #60）。分類はしない ― 打ったか / 返ったか / 何秒かかったか、だけ。
+    # 返らなかった理由（モーダル・長い処理・ドメインリロード）はここでは区別できない
+    execProbe        = $execProbe
     occupied         = $occupied    # true なら batchmode（build / test）は排他ロックで失敗する
     usable           = $usable      # true なら -Editor 系（エディタ直結E2E・エディタ内テスト）が使える
     signals          = [pscustomobject]@{
@@ -386,6 +466,21 @@ if ($modal -and $modal.determinable -and $modal.disabledWindowExists) {
     Write-Host "          **Yes を押すと 2（Both）へ変わってエディタが再起動する**ので、0 のままにしたいなら No）"
     Write-Host "      ほかに Enter Safe Mode? / Recovering Scene Backups でも同じ状態になる（断定はしない）"
     Write-Host "      復旧: 画面でダイアログを閉じる。閉じられなければプロセス終了 → <プロジェクト>\Temp 削除 → 再起動"
+}
+
+# **exec の観測を出す**（issue #60）。分類はしない ― 打ったか / 返ったか / 何秒か、だけ
+if ($execProbe -and $execProbe.attempted) {
+    if ($execProbe.ok) {
+        Write-Host "  exec 疎通: **通った**（$($execProbe.seconds) 秒）― コマンドを受け付ける状態です"
+    } elseif ($execProbe.timedOut) {
+        Write-Host "  exec 疎通: **$($execProbe.seconds) 秒返らない**（打ち切り）"
+        Write-Host "    pipeline が ready でも**メインスレッドが空いていなければコマンドは返りません**。"
+        Write-Host "    **理由は断定しません** ― モーダル・長時間処理・ドメインリロードのどれでも同じに見えます。"
+        Write-Host "    まず時間をあけて測り直してください（リロード中なら数十秒で明けます）。"
+        Write-Host "    明けないなら画面を確認する（上の無効化ウィンドウの行も見る）"
+    } else {
+        Write-Host "  exec 疎通: **失敗**（$($execProbe.seconds) 秒。応答が JSON にならないか success でない）"
+    }
 }
 if ($cliStatus) {
     if ($cliStatus.timedOut) {

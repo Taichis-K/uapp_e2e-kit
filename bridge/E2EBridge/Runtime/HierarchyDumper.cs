@@ -51,6 +51,7 @@ namespace E2EBridge
                 roots.AddRange(Roots());
             }
 
+            BeginReadErrors();
             var nodes = new JArray();
             foreach (var root in roots)
             {
@@ -58,12 +59,12 @@ namespace E2EBridge
                 nodes.Add(DumpNode(root, probe, activeOnly));
             }
 
-            return new JObject
+            return WithReadErrors(new JObject
             {
                 ["screen"] = new JObject { ["w"] = Screen.width, ["h"] = Screen.height },
                 ["scene"] = SceneManager.GetActiveScene().name,
                 ["nodes"] = nodes
-            };
+            });
         }
 
         /// <summary>root Canvas（描画順）。uGUI の表示系はこの配下にある。</summary>
@@ -196,6 +197,7 @@ namespace E2EBridge
         /// </summary>
         public static JToken Hittables(JObject args)
         {
+            BeginReadErrors();
             var items = new JArray();
             var seen = new HashSet<int>();
 
@@ -212,12 +214,12 @@ namespace E2EBridge
                 }
             }
 
-            return new JObject
+            return WithReadErrors(new JObject
             {
                 ["screen"] = new JObject { ["w"] = Screen.width, ["h"] = Screen.height },
                 ["scene"] = SceneManager.GetActiveScene().name,
                 ["items"] = items
-            };
+            });
         }
 
         /// <summary>指定した型の表示テキストを**パスと本文だけ**で返す（issue #56）。</summary>
@@ -269,6 +271,7 @@ namespace E2EBridge
             var scope = (string)args["scope"] ?? "scene";
             var roots = RootsForScope(scope);
 
+            BeginReadErrors();
             var items = new JArray();
             var resolved = new JArray();
             var unknown = new JArray();
@@ -303,14 +306,14 @@ namespace E2EBridge
                 });
             }
 
-            return new JObject
+            return WithReadErrors(new JObject
             {
                 ["scene"] = SceneManager.GetActiveScene().name,
                 ["scope"] = scope,
                 ["items"] = items,
                 ["resolvedTypes"] = resolved,
                 ["unknownTypes"] = unknown
-            };
+            });
         }
 
         /// <summary>
@@ -422,11 +425,99 @@ namespace E2EBridge
 #endif
         }
 
-        /// <summary>コンポーネントの "text" プロパティ。</summary>
+        /// <summary>コンポーネントの "text" プロパティ。**読めなければ記録して null**（issue #64）。</summary>
         private static string TextOf(Component component)
         {
             var prop = component.GetType().GetProperty("text", BindingFlags.Instance | BindingFlags.Public);
-            return prop?.PropertyType == typeof(string) ? (string)prop.GetValue(component) : null;
+            if (prop?.PropertyType != typeof(string)) return null;
+            return ReadStringProperty(component, prop, out _);   // 失敗時は null（記録済み）
+        }
+
+        // ------------------------------------------------------------ 読み取りの失敗
+        // **リフレクションの失敗を握って、観測として返す**（issue #64）。
+        //
+        // IL2CPP の Managed Stripping は**誰も呼ばない getter を落とす**ので、
+        // `GetProperty("text")` は返るのに `GetValue` が
+        // `ArgumentException: Get Method not found for 'text'` を投げることがある
+        // （導入先の実機で `UnityEngine.TextMesh` が実際にそうなった。
+        // 書き込み専用プロパティでも同じ例外になる）。
+        //
+        // **1 つのコンポーネントの失敗で dump 全体を落とさない** ―
+        // 他のノードは取れるし、落ちると**何も見えないので原因も追えない**
+        // （導入先は候補型の列挙と名指し総当たりで手作業の切り分けをする羽目になった）。
+        //
+        // **ただし黙って null にはしない。** 取れなかったことが見えなくなるほうが質が悪い。
+        // **型（FullName）とパスを応答へ返す**ので、必要なら link.xml でその型を保持できる。
+        // **どの型が落ちるかはプロジェクトによる**（3D テキスト・NGUI・独自の派生・第三者 DLL）ので、
+        // **こちらで型を列挙して先回りはしない**。
+        private static Dictionary<string, JObject> _readErrors;
+
+        private static void BeginReadErrors() { _readErrors = new Dictionary<string, JObject>(); }
+
+        /// <summary>集めた失敗を返す（無ければ null）。呼ぶと収集を終える。</summary>
+        private static JArray EndReadErrors()
+        {
+            var collected = _readErrors;
+            _readErrors = null;
+            if (collected == null || collected.Count == 0) return null;
+            var arr = new JArray();
+            foreach (var e in collected.Values) arr.Add(e);
+            return arr;
+        }
+
+        /// <summary>応答に読み取り失敗を添える（**無いときはキーを出さない**＝既存の形を変えない）。</summary>
+        private static JObject WithReadErrors(JObject result)
+        {
+            var errors = EndReadErrors();
+            if (errors != null) result["readErrors"] = errors;
+            return result;
+        }
+
+        /// <summary>
+        /// 読めなければ記録して null を返す。**型ごとに 1 件へ畳む**（同じ型が何百件でも応答は増えない）。
+        ///
+        /// <para>**`ok` で「読めなかった」と「読めた結果が null」を分ける。**
+        /// 混ぜると、値が null のコンポーネントを「失敗」と見なして次を探してしまい、
+        /// **どのコンポーネントの text を返すかという既存の挙動が変わる**。</para>
+        /// </summary>
+        private static string ReadStringProperty(Component component, PropertyInfo prop, out bool ok)
+        {
+            try
+            {
+                ok = true;
+                return (string)prop.GetValue(component);
+            }
+            catch (Exception ex)
+            {
+                ok = false;
+                RecordReadError(component, prop.Name, ex);
+                return null;
+            }
+        }
+
+        private static void RecordReadError(Component component, string property, Exception ex)
+        {
+            if (_readErrors == null || component == null) return;
+            var type = component.GetType().FullName ?? component.GetType().Name;
+            if (_readErrors.TryGetValue(type, out var existing))
+            {
+                existing["count"] = (int)existing["count"] + 1;
+                return;
+            }
+            _readErrors[type] = new JObject
+            {
+                ["type"] = type,          // **FullName で出す** — 短い名前だと
+                ["property"] = property,  // UnityEngine.TextMesh と TMPro.* を取り違える
+                // **アセンブリ名も返す**（issue #64 の B）。link.xml は
+                // <assembly fullname="..."><type fullname="..."/></assembly> の 2 つを要求するが、
+                // **型名からアセンブリは導けない**（UnityEngine.TextMesh は
+                // UnityEngine.TextRenderingModule にある）。ここで返せば、受け取った側は
+                // **そのまま link.xml へ書ける**
+                ["assembly"] = component.GetType().Assembly.GetName().Name,
+                ["path"] = GetPath(component.transform),
+                ["count"] = 1,
+                ["error"] = ex.Message
+            };
         }
 
         /// <summary>`hittables` の 1 件ぶん。**判定は dump と同じ経路を通す**（食い違わせない）。</summary>
@@ -561,7 +652,22 @@ namespace E2EBridge
             var prop = type.GetProperty(propertyName, BindingFlags.Instance | BindingFlags.Public);
             if (prop != null)
             {
-                value = prop.GetValue(component);
+                // **在るのに読めない**ことがある（issue #64）― 書き込み専用、または
+                // IL2CPP の Managed Stripping で getter だけ落とされた場合。
+                // 例外をそのまま INTERNAL で返すと**ブリッジの不具合に見える**ので、
+                // **何が起きたか・どう直すか**が分かる形にする
+                try
+                {
+                    value = prop.GetValue(component);
+                }
+                catch (Exception ex)
+                {
+                    throw new BridgeException(ErrorCodes.PropertyNotReadable,
+                        $"property '{propertyName}' on {componentName} ({component.GetType().FullName}) は" +
+                        $"読み取れません（getter が無い）: {ex.Message}。" +
+                        "書き込み専用のプロパティか、IL2CPP の Managed Stripping で getter が" +
+                        "落とされています（後者なら link.xml でこの型を保持すると読めるようになります）");
+                }
             }
             else
             {
@@ -899,8 +1005,11 @@ namespace E2EBridge
                     !typeName.Contains("InputField") && !typeName.Contains("UIInput"))
                     continue;
                 var prop = component.GetType().GetProperty("text", BindingFlags.Instance | BindingFlags.Public);
-                if (prop?.PropertyType == typeof(string))
-                    return (string)prop.GetValue(component);
+                if (prop?.PropertyType != typeof(string)) continue;
+                // **読めなければ記録して次のコンポーネントへ**（issue #64）。
+                // 以前はここで落ちて **dump そのものが失敗**していた
+                var text = ReadStringProperty(component, prop, out var ok);
+                if (ok) return text;
             }
             return null;
         }

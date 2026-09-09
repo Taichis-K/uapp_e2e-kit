@@ -149,6 +149,14 @@ adb.uninstall(pkg); adb.install(apk)                      # クリーンイン�
    （物理値の安定待ち・「何も起きない」ことの確認）のみ例外とし、理由をコメントに書く
 4. マルチタッチテストは logcat 例外アサートをセットにする
 5. 描画検証はスクリーンショットを画像として読む
+6. **アプリの外は計装では触れない**（issue #66）。**外部ブラウザ・システムダイアログ・
+   ソフトウェアキーボード・他アプリ・IMGUI（`OnGUI`）は `dump` にも出ず `tap` でも押せない** ―
+   計装は Unity アプリの中で動いているため。
+   使うのは **Android: `adb.ui_tap` / `adb.ui_type`、iOS: `os_agent.tap` / `os_agent.type_text` /
+   `os_agent.handle_alert`**（`from e2e_driver import adb, os_agent`。
+   iOS は `run-ios-e2e.ps1 -OsAgent` で起動しておく）。
+   **文字入力が要る導線は、ここを知らないと詰まる** ― 実際に導入先が
+   「入力欄に値を入れられずテストが進まない」で止まった
 
 ### 結果の読み方（測る前に決めておく 3 つ）
 
@@ -178,6 +186,32 @@ adb.uninstall(pkg); adb.install(apk)                      # クリーンイン�
    `adb shell pidof <package>` が空ならプロセス死亡。アプリが生きていて接続だけ死んでいるなら
    エミュレーター疲弊を疑い `adb reboot`（リブート直後の起動は1〜2分置く）
 5. dump を再取得して期待した UI 状態との差分を見る
+5.5 **`dump` / `texts` の応答に `readErrors` があれば、そこは読めていない**（issue #64）。
+   **実機（IL2CPP ＋ Managed Stripping）でだけ起きる** ― **誰も呼ばない getter が削られる**ので、
+   その型の `text` が `null` になる。**エディタでは再現しない**（stripping が掛からない）ため、
+   内側ループが緑のまま実機だけで欠ける。
+
+   ```json
+   "readErrors": [
+     { "type": "UnityEngine.TextMesh", "assembly": "UnityEngine.TextRenderingModule",
+       "property": "text", "path": "...", "count": 4, "error": "Get Method not found for 'text'" }
+   ]
+   ```
+
+   **値も読みたいなら、その 2 つをそのまま `link.xml` へ写す**（`Assets/` の下に置く）:
+
+   ```xml
+   <linker>
+     <assembly fullname="readErrors の assembly">
+       <type fullname="readErrors の type" preserve="methods"/>
+     </assembly>
+   </linker>
+   ```
+
+   **保持すべき型はプロジェクトによる**（3D テキスト・NGUI・独自の派生・第三者 DLL）ので、
+   キットは雛形に型を並べない。**`readErrors` が教える**。
+   直らないときは **Managed Stripping Level を一時的に Disabled にしてビルド**して切り分ける
+   （それで直れば stripping が原因と確定し、`link.xml` の書き方の問題に絞れる）
 6. **エディタ直結で Unity CLI の呼び出しが失敗した**なら
    `uapp_e2e/Builds/failure/unity-cli-raw.txt`（run-e2e が自動保存する生の応答）を見る。
    **JSON にできなかった応答**と、**分類できなかった CLI エラー**（`[未知のエラー文]` タグ付き）の
