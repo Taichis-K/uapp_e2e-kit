@@ -54,8 +54,14 @@ description: UnityアプリのE2Eテストを規約に沿って新規作成す�
    |---|---|---|
    | 座標タップ | `adb.ui_tap(...)` | `os_agent.tap(x, y)` |
    | **文字入力** | `adb.ui_type("...")` | **`os_agent.type_text("...", bundle_id=...)`** |
-   | システムダイアログ | `adb.ui_tap(text="許可")` | `os_agent.handle_alert("許可")`（省略で候補を列挙） |
+   | システムダイアログ | `adb.ui_tap(text="許可")` | `os_agent.handle_alert("許可")`（**名前は省略しない** ― 省略すると先頭のボタンを押す。名前が違うと 404＋候補一覧が返る） |
    | 他アプリから戻す | — | `os_agent.activate(bundle_id)` |
+
+   **押せる要素をラベルで探すときは `hittables` の `label` を見る（`text` ではない）。**
+   `text` は**その GameObject 自身**のコンポーネントだけなので、**uGUI の Button のように
+   子に Text がある構成では出ない**（子は押せないので `items` にも現れない）。
+   **`text` で探すと、例外もエラーも出さずに空振りする** ― 導入先の実機では
+   **押せる 74 件のうち `text` を持つのは 11 件**だった。
 
    ```python
    from e2e_driver import adb, os_agent

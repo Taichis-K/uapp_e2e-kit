@@ -66,6 +66,42 @@ def test_hittables_matches_dump(client):
     assert not extra, f"hittables に余計なものが入った: {sorted(extra)[:10]}"
 
 
+def test_hittables_expose_labels(client):
+    """押せる要素の `label` が使える形で返ること（0.1.19）。
+
+    **なぜ要るか**: `text` は**その GameObject 自身**のコンポーネントだけを指すので、
+    **uGUI の Button のように子に Text がある構成では null** になる。子は押せないので
+    `items` にも出ない。結果として「押せる要素を一覧してラベルで探す」書き方が
+    **例外もエラーも出さずに空振りする**（導入先の実機で、押せる 74 件のうち
+    `text` を持つのは 11 件だった）。
+
+    **判定そのものは EditMode が見ている**（`BridgeHittableLabelTests`）。
+    ここが見るのは**デバイス経路での配線** ― `hittables` の item に実際に載ること。
+
+    **ラベルの選び方をテスト側で再実装しない**（実装を無効化する変異が素通りするため）。
+    代わりに実装の契約だけを見る: 空文字を返さない／自身に `text` があればそれと一致する。
+    """
+    items = client.hittables()["items"]
+    labeled = [i for i in items if i.get("label") is not None]
+    assert labeled, "押せる要素が 1 つも label を持たない（配線が落ちている可能性）"
+
+    for item in labeled:
+        assert isinstance(item["label"], str) and item["label"] != "", (
+            f"label が空: {item['path']}"
+        )
+        if item.get("text"):
+            assert item["label"] == item["text"], (
+                f"自身に text があるのに label が違う: {item['path']}"
+            )
+
+    from_child = [i for i in labeled if not i.get("text")]
+    if not from_child:
+        pytest.skip(
+            "この画面には「本体に Text が無く、子にラベルがある」押せる要素が無い"
+            "（構成由来。uGUI の Button があれば出る）"
+        )
+
+
 def test_dump_active_only_drops_inactive_branches(client):
     """`activeOnly=True` で非アクティブな枝が消え、既定（False）では消えないこと（issue #45）。
 

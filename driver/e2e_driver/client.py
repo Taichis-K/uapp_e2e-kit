@@ -464,6 +464,9 @@ class BridgeClient:
                 "（Input System の『Do you want to enable the backends?』等。"
                 "`unity-editor-status.ps1` で確認）③アプリがフリーズ/ANR "
                 "④重い処理でフレームが進んでいない"
+                "⑤OS のシステムアラートが出ている（iOS は権限ダイアログ等の表示中に"
+                "アプリが非アクティブになりメインスレッドが止まる。アプリは壊れていない ― "
+                "`os_agent.handle_alert()` で閉じると復帰する）"
             ) from e
         if not line:
             raise ConnectionError("bridge closed the connection")

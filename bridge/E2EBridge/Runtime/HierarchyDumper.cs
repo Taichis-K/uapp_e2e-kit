@@ -546,6 +546,12 @@ namespace E2EBridge
             var text = ExtractText(go);
             if (text != null) item["text"] = text;
 
+            // **押せる要素の「ラベル」**。`text` は**自身のコンポーネントだけ**なので、
+            // uGUI の Button のように**子に Text がある構成では null**になる。
+            // 呼び手が**1 つのキーだけ見れば済む**よう、自身 → 子孫の順で最初の文字を返す。
+            var label = LabelOf(go);
+            if (!string.IsNullOrEmpty(label)) item["label"] = label;
+
             items.Add(item);
         }
 
@@ -994,6 +1000,64 @@ namespace E2EBridge
         /// Text / TMP_Text / InputField 系から表示テキストを取り出す。
         /// TMP への直接依存を避けるためリフレクションで "text" プロパティを探す。
         /// </summary>
+        /// <summary>押せる要素の**ラベル**（自身 → 子孫の順で最初に見つかった文字）。無ければ null。</summary>
+        ///
+        /// <remarks>
+        /// **`hittables` の口からは EditMode で検証できない**ので、判定だけを取り出してある。
+        /// `RaycastProbe` は `EventSystem.current` を要求し、**EditMode では items が空になる**
+        /// （2026-09-11 に実測。空の items に対して「null を期待するテスト」は素通りするので、
+        /// **ラベルが取れることを主張する側と対にしないと偽の緑になる**）。
+        /// 実際の `hittables` への配線は、同梱スモークがデバイス経路で見る。
+        /// </remarks>
+        public static string LabelOf(GameObject go)
+        {
+            var own = ExtractText(go);
+            return !string.IsNullOrEmpty(own) ? own : DescendantLabel(go);
+        }
+
+        /// <summary>`label` を探す深さの上限。`Button > 入れ物 > Text` くらいまでを見る。</summary>
+        private const int LabelSearchDepth = 4;
+
+        /// <summary>押せる要素の**ラベル**を子孫から 1 つ拾う。無ければ null。</summary>
+        ///
+        /// <remarks>
+        /// <para>**なぜ要るか**: uGUI の一般的な構成では **Button 本体に Text は無く子に付いている**
+        /// （その子は `raycastTarget=false` のことが多い）。子は押せないので `hittables` の
+        /// `items` には出ず、本体の `text` も null になる ― 結果として
+        /// **「押せる要素を一覧してラベルで目的のボタンを探す」という自然な書き方が、
+        /// 例外もエラーも出さずに空振りする**（2026-09-11 に導入先が実機で実測。
+        /// **押せる 74 件のうち `text` を持つのは 11 件**だった）。</para>
+        ///
+        /// <para>**`text` とは別のキーで返す。** `text` に子の値を混ぜると
+        /// 「誰のテキストか」が壊れ、`dump` のノードとの対応も崩れる。</para>
+        ///
+        /// <para>**別の押せる要素の配下へは降りない** ― 降りると、複数のボタンを含むパネルが
+        /// **最初の子ボタンのラベルを名乗る**。深さにも上限を置く（病的な階層で走査が伸びない）。</para>
+        ///
+        /// <para>**非アクティブな子は見ない**。`hittables` はアクティブな要素の一覧なので、
+        /// 隠れているラベルを返すと画面と食い違う。</para>
+        /// </remarks>
+        private static string DescendantLabel(GameObject go, int depth = LabelSearchDepth)
+        {
+            if (depth <= 0) return null;
+            var t = go.transform;
+            for (var i = 0; i < t.childCount; i++)
+            {
+                var child = t.GetChild(i).gameObject;
+                if (!child.activeInHierarchy) continue;
+                // **別の押せる要素の中は見ない**（パネルが子ボタンのラベルを名乗るのを防ぐ）
+                if (child.GetComponent<Selectable>() != null) continue;
+                if (NguiAdapter.Available && NguiAdapter.Interactable(child).HasValue) continue;
+
+                var text = ExtractText(child);
+                if (!string.IsNullOrEmpty(text)) return text;
+
+                var nested = DescendantLabel(child, depth - 1);
+                if (nested != null) return nested;
+            }
+            return null;
+        }
+
         private static string ExtractText(GameObject go)
         {
             foreach (var component in go.GetComponents<Component>())

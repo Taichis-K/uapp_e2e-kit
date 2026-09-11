@@ -203,8 +203,15 @@ UI 階層をツリー JSON で返す。AI がテストを書くための「地�
 → {"cmd": "hittables"}
 ← {"screen": {"w": 1080, "h": 2340}, "scene": "SampleScene",
    "items": [{"path": "Canvas/StartButton", "center": {"x": 390, "y": 230},
-              "interactable": true, "text": "はじめる"}]}
+              "interactable": true, "label": "はじめる"}]}
 ```
+- **ラベルは `label` で見る。`text` ではない。** `text` は**その GameObject 自身の
+  コンポーネント**だけを指すので、**uGUI の Button のように子に Text がある構成では出ない**
+  （子は押せないので `items` にも現れない）。**導入先の実機では、押せる 74 件のうち
+  `text` を持つのは 11 件だった**（2026-09-11）。`label` は**自身 → 子孫の順で
+  最初に見つかった文字**を返すので、**呼び手はこれ 1 つだけ見ればよい**
+  - 別の押せる要素の配下へは降りない（パネルが最初の子ボタンのラベルを名乗らないため）／
+    非アクティブな子は見ない／深さに上限がある
 - **`dump(probe="all")` の hittable 集合と一致する**のが仕様（判定は同じ経路を通す）。
   同梱の `test_hittables_matches_dump` が**集合の一致**で検証する（件数ではないので、
   取りこぼしも余計な混入も落ちる）

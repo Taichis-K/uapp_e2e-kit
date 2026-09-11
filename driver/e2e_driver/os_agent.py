@@ -139,6 +139,22 @@ def swipe(x1: float, y1: float, x2: float, y2: float, duration: float = 0.2) -> 
           timeout=DEFAULT_TIMEOUT + float(duration))
 
 
+def swipe_unity(x1: float, y1: float, x2: float, y2: float, screen: tuple[int, int],
+                duration: float = 0.2) -> None:
+    """Unity スクリーン座標（左下原点・ピクセル）でスワイプする。
+
+    `tap_unity` の swipe 版。dump / resolve が返す `center` をそのまま渡せる。
+    **Y 軸の反転**と正規化をここで吸収する。
+
+    これが無いと呼び手が毎回同じ換算を手で書くことになる（導入先が実際にそうしていた。
+    2026-09-10 の実機検証で `ScrollRect` を動かすのに使われた）。
+    """
+    width, height = screen
+    if width <= 0 or height <= 0:
+        raise OsAgentError(f"画面サイズが不正です: {screen}")
+    swipe(x1 / width, 1.0 - (y1 / height), x2 / width, 1.0 - (y2 / height), duration=duration)
+
+
 def type_text(text: str, bundle_id: str) -> None:
     """**対象アプリを明示して**文字を送る（入力欄のタップは呼び出し側で行う）。
 
