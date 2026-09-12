@@ -19,10 +19,11 @@ description: UnityアプリのE2Eテストを実行し、失敗時は証跡（lo
    （ビルド・デバイス・adb 不要。adb を使うテストは `-PytestArgs "--deselect <nodeid>"` で除外。
    「既に Play 中」エラーは他タスクが使用中＝奪わずに待つか調整する）。
    実機依存（logcat アサート・adb タップ・実機描画）の検証は以下のデバイス実行で行う
-1. エミュレーター確認・起動: `uapp_e2e\scripts\start-emulator.ps1`（起動済みならスキップされる）
-2. 計装ビルドが必要か判断:
-   - `Assets/` や計装対象コードを変更した → `uapp_e2e\scripts\build-android.ps1`（十数分かかる）
+1. 計装ビルドが必要か判断（**エミュレーターより先**。動いていると `build-android` は始まらない）:
+   - `Assets/` や計装対象コードを変更した → `uapp_e2e\scripts\build-android.ps1`（十数分かかる。
+     エミュレーターが起動済みなら `adb emu kill` で止めてから。奪い合いが無い環境なら `-AllowRunningEmulator`）
    - テストコードのみの変更 → ビルド不要
+2. エミュレーター確認・起動: `uapp_e2e\scripts\start-emulator.ps1`（起動済みならスキップされる）
 3. 実行: `uapp_e2e\scripts\run-e2e.ps1`（テストのみ再実行なら `-SkipInstall`、部分実行は `-PytestArgs "-k <名前>"`）
 4. 全パスなら結果を報告して終了
 
@@ -41,4 +42,4 @@ description: UnityアプリのE2Eテストを実行し、失敗時は証跡（lo
    `adb shell pidof <package>` が空ならプロセス死亡。空のままアプリが生きていればエミュレーター疲弊を疑い `adb reboot`
 5. dump を再取得して期待とのUI差分を見る
 
-修正 → 手順2から再実行。アプリコードとテストのどちらを直すべきかは、失敗が「実ユーザーにも起きるか」で判断する。
+修正 → **手順 1（ビルドが必要かの判断）から**再実行。アプリコードとテストのどちらを直すべきかは、失敗が「実ユーザーにも起きるか」で判断する。

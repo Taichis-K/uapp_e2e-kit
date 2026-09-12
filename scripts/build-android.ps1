@@ -10,8 +10,11 @@ param(
     [string]$ExecuteMethod,           # ビルドメソッドの明示指定（自前パイプラインを使う場合）
     [switch]$Release,
     [switch]$VerifyApkOnly,           # ビルドせず、既存 APK のブリッジ登録検査だけ行う
-    [switch]$SkipBridgeCheck          # ブリッジ登録検査を外す（データを APK 外へ置く非標準構成向け。
+    [switch]$SkipBridgeCheck,         # ブリッジ登録検査を外す（データを APK 外へ置く非標準構成向け。
                                       # 外した場合は run-e2e の疎通テストで実接続を確認すること）
+    # エミュレーターが動いていても（または稼働なしを確認できなくても）ビルドを始める。
+    # 環境変数 UAPP_E2E_ALLOW_RUNNING_EMULATOR=1 でも同じ。既定では**稼働なしを確認できたときだけ**始める
+    [switch]$AllowRunningEmulator
 )
 
 $ErrorActionPreference = "Stop"
@@ -193,6 +196,38 @@ if ($VerifyApkOnly) {
     return
 }
 
+# **エミュレーターが動いたままビルドを始めない**（2026-09-11 に手動で 2 回踏んだ。直後の E2E が
+# load 15.64 / `Application Not Responding: system` で失敗し、ゲストの再起動で 159 秒 → 15.9 秒）。
+# Unity ビルドはディスク律速で、動いているエミュレーターは同じ HDD の I/O とメモリを奪う。
+# **ビルドを始めてよいのは「稼働なしを確認できた」ときだけ** ― adb の失敗や未接続を「いない」に
+# しない（見逃し経路）。判定は Get-UappEmulatorState（verify-all も同じものを使う）。
+# 防げるのは「起動したまま始める」事故だけで、ビルド途中の起動は防げない。
+# **外し方**: -AllowRunningEmulator か UAPP_E2E_ALLOW_RUNNING_EMULATOR=1
+#（AVD とプロジェクトが別ディスクにある等、奪い合いが無いと分かっている環境向け）
+if (-not $AllowRunningEmulator -and $env:UAPP_E2E_ALLOW_RUNNING_EMULATOR -ne "1") {
+    $emu = Get-UappEmulatorState -UnityPath $UnityPath   # 同梱 SDK の adb も候補にする（ビルドだけの環境）
+    if ($emu.State -ne "none") {
+        $detail = if ($emu.State -eq "running") {
+            "稼働中: serial=[" + ($emu.Serials -join ",") + "] qemu pid=[" + ($emu.ProcessIds -join ",") + "]"
+        } else { "判定できない: " + $emu.Reason }
+        # **観測ごとに次の一手を変える**（原因は断定しない）
+        $hint = if ($emu.State -eq "running" -and @($emu.ProcessIds).Count -eq 0) {
+            "  qemu のプロセスは無く adb の一覧にだけ残っている＝残骸の可能性。adb kill-server で消えるか確かめる`n"
+        } elseif ($emu.State -eq "running") {
+            "  止める: adb emu kill → adb devices から消え、qemu-system のプロセスも無くなるまで待つ`n"
+        } else {
+            "  判定できないとき: adb が動く状態に直す（adb kill-server / start-server、SDK の platform-tools を PATH へ）。`n" +
+            "  adb を置かないビルド専用の環境なら、下の解除で外す`n"
+        }
+        throw ("エミュレーターの稼働なしを確認できないため、ビルドを始めません（$detail）。`n" +
+               "  このマシンでは、ビルド中に動いていたエミュレーターが同じディスクの I/O とメモリを奪い、" +
+               "直後の E2E がゲストの ANR で失敗した（2026-09-11 の観測）。`n" +
+               $hint +
+               "  この制約を外す: -AllowRunningEmulator または UAPP_E2E_ALLOW_RUNNING_EMULATOR=1")
+    }
+    Write-Host "[$projectName] エミュレーターの稼働なしを確認（adb devices に emulator-* 無し・qemu プロセス無し）"
+}
+
 # ビルドメソッド: サンプル（本リポジトリ配置）は Sample.Editor、
 # 実プロジェクトはキット同梱の汎用エントリ（E2EBridge/Editor/BuildEntry.cs）
 if (-not $ExecuteMethod) {
@@ -226,8 +261,22 @@ $process = Start-Process -FilePath $UnityPath -ArgumentList $unityArgs -Wait -Pa
 #（-Release は計装なしなので対象外）。**ダッシュボードへの記録より先に検査する** —
 # 後に回すと、検査で止めたのにダッシュボードには「成功」が残り、
 # この検査が排除したい偽の緑を別経路で再生成してしまう
+# **成果物の鮮度を見る**。終了コードと登録簿だけでは「今回のビルドが作ったもの」であることを言えない ―
+# Unity が 0 で終わったのに何も書かなければ、前回の APK がそのまま「ビルド成功」になる
+# （2026-09-12 に mac が偽 Unity で実測: 08-05 の APK で緑が出た。「成果物の鮮度を見ない」型は以前にも踏んでいる）
+$freshnessFailure = $null
+if ($process.ExitCode -eq 0) {
+    $apkItem = Get-Item -LiteralPath $Output -ErrorAction SilentlyContinue
+    if (-not $apkItem) {
+        $freshnessFailure = "Unity は終了コード 0 で終わりましたが、成果物がありません: $Output（ログ: $logFile）"
+    } elseif ($apkItem.LastWriteTime -lt $buildStarted) {
+        $freshnessFailure = ("Unity は終了コード 0 で終わりましたが、成果物がビルド開始（" + $buildStarted.ToString("HH:mm:ss") +
+                             "）より古いままです: $Output（" + $apkItem.LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss") +
+                             "）。今回のビルドは何も書いていません（ログ: $logFile）")
+    }
+}
 $bridgeCheckFailure = $null
-if ($process.ExitCode -eq 0 -and -not $Release -and -not $SkipBridgeCheck) {
+if ($process.ExitCode -eq 0 -and -not $freshnessFailure -and -not $Release -and -not $SkipBridgeCheck) {
     try { Assert-BridgeRegisteredInApk -ApkPath $Output }
     catch { $bridgeCheckFailure = $_ }
 }
@@ -242,7 +291,7 @@ if (Test-Path -LiteralPath $emitHelper -PathType Leaf) {
     $apkSize = if (Test-Path -LiteralPath $Output -PathType Leaf) { (Get-Item -LiteralPath $Output).Length } else { $null }
     # exitCode には登録簿検査の結果まで反映する（Unity が 0 でも検査で落ちれば失敗として記録）
     $reportedExit = if ($process.ExitCode -ne 0) { $process.ExitCode }
-                    elseif ($bridgeCheckFailure) { 1 }
+                    elseif ($freshnessFailure -or $bridgeCheckFailure) { 1 }
                     else { 0 }
     Send-DashEvent -Kind "evidence.build" -StartPath $root -Data @{
         target       = "Android"
@@ -260,5 +309,6 @@ if ($process.ExitCode -ne 0) {
     Get-Content -LiteralPath $logFile -Tail 60
     throw "ビルド失敗 (exit=$($process.ExitCode))。ログ全体: $logFile"
 }
+if ($freshnessFailure) { throw $freshnessFailure }
 if ($bridgeCheckFailure) { throw $bridgeCheckFailure }
 Write-Host "[$projectName] ビルド成功: $Output"

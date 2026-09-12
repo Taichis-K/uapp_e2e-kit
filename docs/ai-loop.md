@@ -72,8 +72,9 @@ Android ビルドは1回十数分かかるため、③を回す頻度が高い�
 
 ```powershell
 cd uapp_e2e
-.\scripts\start-emulator.ps1     # 起動済みならスキップされる
-.\scripts\build-android.ps1      # Assets やアプリコードを変更した時のみ
+.\scripts\build-android.ps1      # Assets やアプリコードを変更した時のみ。エミュレーターは止めた状態で
+                                 #（動いていると始まらない。奪い合いが無い環境なら -AllowRunningEmulator）
+.\scripts\start-emulator.ps1     # 起動済みならスキップされる ― ビルドが終わってから
 .\scripts\run-e2e.ps1            # テストのみの変更なら -SkipInstall
 ```
 
@@ -188,10 +189,11 @@ adb.uninstall(pkg); adb.install(apk)                      # クリーンイン�
 4.5 **iOS で「ブリッジが応答しない」なら、まず OS のシステムアラートを疑う**。
    **権限ダイアログ等が出ている間、iOS はアプリを非アクティブにする**ので Unity の
    メインスレッドが進まず、ping がタイムアウトする。**アプリは壊れていない** ―
-   `os_agent.handle_alert()` で閉じると**即座に復帰する**。
+   **押したいボタン名を指定して**閉じると（`os_agent.handle_alert("許可しない")`）**即座に復帰する**。
+   **省略すると先頭のボタンが押される**ので、確認のつもりで引数なしを使わないこと。
    **ドライバのタイムアウトは「アプリがフリーズ/ANR」も候補に挙げるが、この経路ではそれが誤り**。
    アラートが出うる導線（位置情報・通知・ATT・ローカルネットワーク）では、
-   **異常と読む前に `os_agent.handle_alert()` を試す**（2026-09-10 に導入先が実機で実測）
+   **異常と読む前にシステムアラートを疑う**（2026-09-10 に導入先が実機で実測）
 5. dump を再取得して期待した UI 状態との差分を見る
 5.5 **`dump` / `texts` の応答に `readErrors` があれば、そこは読めていない**（issue #64）。
    **実機（IL2CPP ＋ Managed Stripping）でだけ起きる** ― **誰も呼ばない getter が削られる**ので、

@@ -215,6 +215,11 @@ namespace E2EBridge
             return Camera.main;
         }
 
+        /// <summary>自身に `UIButton` があるか（`label` の「既知のコントロール」判定）。
+        /// `Interactable` と同じ型を見るので、`interactable` が付く要素と範囲が揃う。</summary>
+        public static bool HasUiButton(GameObject go) =>
+            Available && _uiButton != null && go.GetComponent(_uiButton) != null;
+
         /// <summary>UIButton.isEnabled。UIButton が無いオブジェクトは null。</summary>
         public static bool? Interactable(GameObject go)
         {

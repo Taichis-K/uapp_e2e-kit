@@ -11,8 +11,9 @@ Codex 等は `uapp_e2e/AGENTS.md`（同）から参照される。
 ## よく使うコマンド（このフォルダ＝uapp_e2e/ から実行）
 
 ```powershell
-.\scripts\start-emulator.ps1                  # AVD起動（config\local.json の avd）
-.\scripts\build-android.ps1                   # 計装入りビルド（プロジェクト自動検出）
+.\scripts\build-android.ps1                   # 計装入りビルド（プロジェクト自動検出）。**エミュレーターは止めた状態で**
+                                              # （動いていると始まらない。奪い合いが無い環境なら -AllowRunningEmulator で外す）
+.\scripts\start-emulator.ps1                  # AVD起動（config\local.json の avd）― ビルドが終わってから
 .\scripts\run-e2e.ps1                         # install→起動→forward→pytest 一括
 .\scripts\run-e2e.ps1 -SkipInstall -PytestArgs "-k xxx"   # 部分実行
 .\scripts\run-e2e.ps1 -Editor                 # エディタ直結E2E（Unity CLI＋Unity 6以降。ビルド/デバイス/adb不要・

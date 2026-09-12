@@ -74,7 +74,9 @@ function Get-DeviceFreeBytes {
     param([string[]]$AdbTarget = @())
     try {
         # df の 1K ブロック表示から Available 列を取る（-h だと単位付きで解析が面倒）
-        $line = (& $script:adbExe @AdbTarget shell df /data 2>$null | Select-Object -Last 1)
+        $r = Invoke-UappAdb -AdbPath $script:adbExe -ArgumentList (@($AdbTarget) + @("shell", "df", "/data")) -TimeoutSeconds 20
+        if ($r.TimedOut -or $r.ExitCode -ne 0) { return 0 }
+        $line = ($r.Lines | Select-Object -Last 1)
         $columns = ($line -split '\s+') | Where-Object { $_ }
         # Filesystem 1K-blocks Used Available Use% Mounted → 4 列目が Available
         if ($columns.Count -ge 4 -and $columns[3] -match '^\d+$') { return [long]$columns[3] * 1024 }
@@ -824,7 +826,9 @@ if ($Editor) {
         if ($null -eq $probeClass -or $probeClass.Class -eq "permanent") {
             throw ("Unity CLI / com.unity.pipeline のバージョンが想定と異なります（eval の疎通に失敗: $detail）。" +
                    "'unity --version' と <プロジェクト>\Packages\manifest.json の com.unity.pipeline を確認する。" +
-                   "検証済みの組み合わせ: unity-cli 1.0.0-beta.3 / com.unity.pipeline 0.4.0-exp.1")
+                   "検証済みの組み合わせ: unity-cli 1.0.0-beta.3 または 1.0.0-beta.5 / " +
+                   "com.unity.pipeline 0.4.0-exp.1（3 サンプル）・0.5.0-exp.1（unity-ngui-nis で実走）。" +
+                   "0.6.0-exp.1 以降は未検証（レジストリの最新はそれより新しいことがある）")
         }
         # **ここで記録する** ― プローブは `-AllowFail` なので Invoke-UnityCli 側では書かれない
         # （書かせると、後始末の editor_stop でも書かれて緑の走行に証跡が出てしまう）。
@@ -1072,7 +1076,7 @@ if (-not $Apk) { $Apk = Join-UappPath $root "Builds\$projectName.apk" }
 # **mac は SDK を入れても platform-tools が PATH に入らないことが多い**
 $adbPathAdded = Initialize-UappAndroidPath
 if ($adbPathAdded) { Write-Host "adb を PATH に追加しました: $adbPathAdded" }
-# **解決した実体を保持して、以降は `& $script:adbExe` で呼ぶ**。
+# **解決した実体を保持して、以降は `Invoke-UappAdb`（期限つき）へ渡す**。
 # PATH に足すだけでは足りない（`adb` という関数やエイリアスが定義されていると、
 # 存在判定は実行ファイルを見つけるのに、実際の呼び出しはそちらへ入って失敗する）。
 # PATH への追加は**子プロセスの Python ドライバ用**として引き続き必要
@@ -1087,9 +1091,47 @@ $adbTarget = @()
 if ($DeviceSerial) { $adbTarget = @("-s", $DeviceSerial) }
 
 # adbデーモン再起動直後は device offline で各コマンドが黙って失敗するため、
-# 接続を待った上で全stepのexit codeを検証する
-& $script:adbExe @adbTarget wait-for-device
-if ($LASTEXITCODE -ne 0) { throw "デバイスが接続されていません (adb devices で確認)" }
+# 接続を待った上で全stepのexit codeを検証する。
+# **adb は全部 Invoke-UappAdb（期限つき）で呼ぶ**（2026-09-12）。同期で呼ぶと、応答しない adb server に
+# 掴まったとき何分でも無言になる（wait-for-device はデバイスが居なければ永久に待つ。実際に verify-all が
+# 約 29 分止まった記録がある）。期限は呼び出しの性質ごと（Invoke-UappAdb の .NOTES）。
+# 超過は「応答が無かった」という観測で、adb server とデバイスのどちらが原因かはここでは断定しない
+function Get-AdbTimeoutFromEnv {
+    <#
+      .SYNOPSIS
+      環境変数から adb の期限（秒）を読む。読めない値は**警告して既定へ戻す**。
+
+      .NOTES
+      **0 は「期限なし」ではなく即 kill**（`WaitForExit(0)`）。数字でない値を黙って捨てると
+      「延ばしたつもりが効いていない」まま進む。**逃げ道の設定が事故にならないようにする**
+      （2026-09-12 のレビューが実測で指摘）。
+    #>
+    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][int]$Default)
+    $raw = [Environment]::GetEnvironmentVariable($Name)
+    if ([string]::IsNullOrWhiteSpace($raw)) { return $Default }
+    if ($raw -notmatch '^\d+$') {
+        Write-Warning "$Name='$raw' は数字ではありません。既定の $Default 秒を使います"
+        return $Default
+    }
+    $v = [int64]$raw
+    if ($v -lt 1 -or $v -gt 2000000) {
+        Write-Warning "$Name=$v は範囲外です（1〜2000000 秒）。既定の $Default 秒を使います"
+        return $Default
+    }
+    return [int]$v
+}
+$adbWaitDeviceSeconds = Get-AdbTimeoutFromEnv -Name "UAPP_E2E_ADB_WAIT_DEVICE_SECONDS" -Default 120
+$adbInstallSeconds    = Get-AdbTimeoutFromEnv -Name "UAPP_E2E_ADB_INSTALL_SECONDS"     -Default 600
+# **`am start -W` は 180 秒**（移行前は無期限）。ゲストが重いと起動が遅れて通る回が実在するので、
+# 120 秒だと「遅いが通っていた」を確定失敗に変えうる（レビュー指摘）。逃げ道も用意する
+$adbStartSeconds      = Get-AdbTimeoutFromEnv -Name "UAPP_E2E_ADB_START_SECONDS"       -Default 180
+$r = Invoke-UappAdb -AdbPath $script:adbExe -ArgumentList (@($adbTarget) + @("wait-for-device")) -TimeoutSeconds $adbWaitDeviceSeconds
+if ($r.TimedOut) {
+    throw ("adb wait-for-device が $adbWaitDeviceSeconds 秒以内に返りませんでした（デバイスが接続されていない / " +
+           "adb server が応答していない、のどちらかは未判定）。adb devices で確認し、一覧が空か固まるなら " +
+           "adb kill-server のあと再実行。待ち時間は UAPP_E2E_ADB_WAIT_DEVICE_SECONDS で変えられます")
+}
+if ($r.ExitCode -ne 0) { throw "デバイスが接続されていません (adb devices で確認。exit=$($r.ExitCode))" }
 
 if (-not $SkipInstall) {
     if (-not (Test-Path -LiteralPath $Apk)) { throw "APK がありません: $Apk （先に build-android.ps1 -Project $projectName を実行）" }
@@ -1106,17 +1148,26 @@ if (-not $SkipInstall) {
     }
 
     # install の出力は捨てない。失敗理由（ストレージ不足・署名不一致等）が全部ここに出る
-    $installOutput = (& $script:adbExe @adbTarget install -r -g $Apk 2>&1 | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0) {
-        throw (Format-InstallFailure -Output $installOutput -ExitCode $LASTEXITCODE -Apk $Apk `
+    # （adb は失敗理由を標準エラーに出すので ErrLines も繋ぐ）
+    $r = Invoke-UappAdb -AdbPath $script:adbExe -ArgumentList (@($adbTarget) + @("install", "-r", "-g", $Apk)) -TimeoutSeconds $adbInstallSeconds
+    $installOutput = ((@($r.Lines) + @($r.ErrLines)) -join "`n").Trim()
+    if ($r.TimedOut) {
+        throw ("adb install が $adbInstallSeconds 秒以内に終わりませんでした（APK $([math]::Round($apkBytes / 1MB)) MB）。" +
+               "ゲストの負荷（adb shell uptime）と adb server の応答を確認してください。" +
+               "待ち時間は UAPP_E2E_ADB_INSTALL_SECONDS で変えられます`n--- adb の出力（途中まで） ---`n$installOutput")
+    }
+    if ($r.ExitCode -ne 0) {
+        throw (Format-InstallFailure -Output $installOutput -ExitCode $r.ExitCode -Apk $Apk `
                                      -Package $package -FreeBytes $freeBytes)
     }
 }
 
 # 縦横両対応アプリの初期向き指定（e2e-config.json の deviceRotation: 0=縦 1=横(左) 2=逆縦 3=横(右)）
 if ($null -ne $config.deviceRotation) {
-    & $script:adbExe @adbTarget shell settings put system accelerometer_rotation 0
-    & $script:adbExe @adbTarget shell settings put system user_rotation $config.deviceRotation
+    foreach ($kv in @(@("accelerometer_rotation", "0"), @("user_rotation", "$($config.deviceRotation)"))) {
+        $r = Invoke-UappAdb -AdbPath $script:adbExe -ArgumentList (@($adbTarget) + @("shell", "settings", "put", "system") + $kv) -TimeoutSeconds 20
+        if ($r.TimedOut) { Write-Warning "adb shell settings put $($kv[0]) が 20 秒以内に返りませんでした（回転の固定は未確認のまま続行）" }
+    }
     Write-Host "[$projectName] デバイス回転を固定: $($config.deviceRotation)"
 }
 
@@ -1141,15 +1192,24 @@ if ($editorBridgePort -eq $HostPort) {
                    "この forward は実行後も残り、次にエディタ直結（-Editor / UAPP_E2E_EDITOR=1）を回すと" +
                    "接続先を奪います。editorBridgePort をずらすか、-HostPort で別の番号を使ってください")
 }
-& $script:adbExe @adbTarget forward "tcp:$HostPort" "tcp:$devicePort" | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "adb forward 失敗 (exit=$LASTEXITCODE)。ポート $HostPort が他ターゲットと重複していないか確認" }
-& $script:adbExe @adbTarget logcat -c
+$r = Invoke-UappAdb -AdbPath $script:adbExe -ArgumentList (@($adbTarget) + @("forward", "tcp:$HostPort", "tcp:$devicePort")) -TimeoutSeconds 20
+if ($r.TimedOut) { throw "adb forward が 20 秒以内に返りませんでした（adb server の応答を確認。adb kill-server のあと再実行）" }
+if ($r.ExitCode -ne 0) { throw "adb forward 失敗 (exit=$($r.ExitCode))。ポート $HostPort が他ターゲットと重複していないか確認`n$($r.ErrLines -join "`n")" }
+$r = Invoke-UappAdb -AdbPath $script:adbExe -ArgumentList (@($adbTarget) + @("logcat", "-c")) -TimeoutSeconds 20
+if ($r.TimedOut) { Write-Warning "adb logcat -c が 20 秒以内に返りませんでした（前回のログが残ったまま続行）" }
 # -S: 起動前に対象プロセスを確実にkill（前回実行の状態残留を防ぐ） / -W: 起動完了まで待つ
 # -a MAIN -c LAUNCHER: ランチャー起動と同じ Intent にする（action 無しだと起動直後に
 #   自ら閉じるカスタムActivityがある。実プロジェクト導入試験で実証）
 # --ei uapp_e2e_port: ブリッジの待ち受けポートをアプリに伝える（BridgeHost が Intent extra から読む）
-& $script:adbExe @adbTarget shell am start -S -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER --ei uapp_e2e_port $devicePort -n "$package/$activity" | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "アプリ起動失敗 (exit=$LASTEXITCODE)" }
+$r = Invoke-UappAdb -AdbPath $script:adbExe -TimeoutSeconds $adbStartSeconds -ArgumentList (@($adbTarget) + @(
+        "shell", "am", "start", "-S", "-W", "-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER",
+        "--ei", "uapp_e2e_port", "$devicePort", "-n", "$package/$activity"))
+if ($r.TimedOut) {
+    throw ("アプリ起動（am start -W）が $adbStartSeconds 秒以内に返りませんでした。ゲストの負荷（adb shell uptime）と " +
+           "画面のダイアログ（dumpsys window の mCurrentFocus）を確認してください。" +
+           "待ち時間は UAPP_E2E_ADB_START_SECONDS で変えられます")
+}
+if ($r.ExitCode -ne 0) { throw "アプリ起動失敗 (exit=$($r.ExitCode))`n$((@($r.Lines) + @($r.ErrLines)) -join "`n")" }
 Write-Host "[$projectName] アプリ起動（$(if ($DeviceSerial) { $DeviceSerial } else { '既定デバイス' }) / port $HostPort）。テストを実行します..."
 if ($JourneyDir) { Write-Host "[$projectName] ジャーニー記録: $JourneyDir" }
 
@@ -1202,10 +1262,17 @@ if ($exit -ne 0) {
     New-Item -ItemType Directory -Force $evidence | Out-Null
     # **PNG は `>` で保存しない**（版によってはテキスト変換されて壊れる）。
     # 標準出力をバイト列のままファイルへ落とす
-    Save-UappNativeOutput -Exe $script:adbExe -Arguments (@($adbTarget) + @("exec-out", "screencap", "-p")) `
-                          -OutFile (Join-UappPath $evidence "screen.png") | Out-Null
-    & $script:adbExe @adbTarget logcat -d -s "Unity:*" > (Join-UappPath $evidence "unity-logcat.txt")
-    & $script:adbExe @adbTarget logcat -d -b crash > (Join-UappPath $evidence "crash.txt")
+    # **証跡収集の 1 本目こそ期限が要る**（ここへ来るのは端末が重い / ANR のとき）。
+    # 超過しても続ける ― 残りの証跡（logcat）のほうが原因に近いことが多い
+    $shot = Save-UappNativeOutput -Exe $script:adbExe -Arguments (@($adbTarget) + @("exec-out", "screencap", "-p")) `
+                                  -OutFile (Join-UappPath $evidence "screen.png") -TimeoutSeconds 60
+    if ($null -eq $shot) { Write-Warning "screencap が 60 秒以内に返りませんでした（screen.png は途中までの可能性）" }
+    foreach ($lc in @(@{ Args = @("logcat", "-d", "-s", "Unity:*"); File = "unity-logcat.txt" },
+                      @{ Args = @("logcat", "-d", "-b", "crash");    File = "crash.txt" })) {
+        $r = Invoke-UappAdb -AdbPath $script:adbExe -ArgumentList (@($adbTarget) + $lc.Args) -TimeoutSeconds 60 `
+                            -StdOutFile (Join-UappPath $evidence $lc.File)
+        if ($r.TimedOut) { Write-Warning "adb $($lc.Args -join ' ') が 60 秒以内に返りませんでした（$($lc.File) は途中までです）" }
+    }
     Write-Host "失敗時の証跡を保存: $evidence （screen.png / unity-logcat.txt / crash.txt）"
     Send-E2eEvidence -ExitCode $exit -Mode "device" -FailureDir $evidence
     exit $exit

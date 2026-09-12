@@ -6,6 +6,7 @@
 #   -Purge: uapp_e2e\ を丸ごと削除（ジャーニー記録・更新バックアップ含む）。installer -RootAgentsMd が
 #           作成したルート AGENTS.md も、生成時から未編集の場合に限り削除する
 # ProjectSettings の UAPP_E2E_BRIDGE define と Packages\manifest.json の追加パッケージは自動では戻さない
+# （最後に「残っているもの」として案内する。com.unity.pipeline を含む）
 # （他機能が使っている可能性があるため。最後に残手順として表示する）。詳細: docs/05-install-to-project.md
 param(
     [string]$ProjectPath,
@@ -172,5 +173,31 @@ if ($defineFound) {
     Write-Host "1. [済] UAPP_E2E_BRIDGE define は ProjectSettings に見つからない"
 }
 Write-Host "2. com.unity.inputsystem / com.unity.nuget.newtonsoft-json が他で不要なら Packages\manifest.json から削除"
-Write-Host "3. .gitignore の uapp_e2e/ 関連行は残っていても無害（気になるなら手動で削除）"
+# **com.unity.pipeline は案内から漏れていた**（導入先の指摘 2026-09-12）。run-e2e -Editor / run-unity-tests -Editor の
+# 初回に自動追加されるので、エディタ直結を使ったプロジェクトには残る。製品コードが参照しないなら消してよい
+# **「測れなかった」を「無い」にしない**（2026-09-12 のレビューが実測で指摘）。
+# manifest が壊れている / 読めないときに [済] と書くと、導入先は見に行かず残り続ける
+# ― `Get-UappEmulatorState` で none / running / unknown を分けたのと同じ理由
+$pipelineState = "none"   # none / present / unknown
+$pipelineWhy = ""
+$manifestForPipeline = Join-UappPath $target "Packages\manifest.json"
+if (Test-Path -LiteralPath $manifestForPipeline) {
+    try {
+        $mj = Get-Content -LiteralPath $manifestForPipeline -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        if ($mj.dependencies -and ($mj.dependencies.PSObject.Properties.Name -contains "com.unity.pipeline")) { $pipelineState = "present" }
+    } catch {
+        $pipelineState = "unknown"
+        $pipelineWhy = $_.Exception.Message
+    }
+}
+if ($pipelineState -eq "present") {
+    Write-Host "3. [残] com.unity.pipeline が Packages\manifest.json にある（run-e2e -Editor / run-unity-tests -Editor が初回に自動追加したもの）。"
+    Write-Host "     エディタ直結を使わないなら行ごと削除してよい（製品コードは参照しない。Unity が packages-lock.json を整理する）"
+} elseif ($pipelineState -eq "unknown") {
+    Write-Host "3. [不明] Packages\manifest.json を読めませんでした（$pipelineWhy）。"
+    Write-Host "     com.unity.pipeline の行が残っていないか、中身を見て確かめてください"
+} else {
+    Write-Host "3. [済] com.unity.pipeline は Packages\manifest.json に見つからない"
+}
+Write-Host "4. .gitignore の uapp_e2e/ 関連行は残っていても無害（気になるなら手動で削除）"
 exit 0

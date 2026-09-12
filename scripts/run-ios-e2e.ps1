@@ -396,10 +396,14 @@ if ($isDevice) {
     if (@(& (Get-UappCommandPath "lsof") -nP "-iTCP:$HostPort" -sTCP:LISTEN -t 2>$null).Count) {
         throw "ホスト側ポート $HostPort は既に使用中です。-HostPort で別番号を指定してください"
     }
+    # **案内する .log は必ず畳んでから案内する**（Unix では標準エラーが <log>.err へ分かれる。
+    # 2026-09-12 に verify-all 側で塞いだのと同じ型が、こちらの 3 か所に残っていた）
+    $script:tunnelLog = Join-UappPath $buildsDir "iproxy-$projectName.log"
+    $null = Merge-UappErrLog -LogPath $script:tunnelLog
     $tunnelProc = Start-UappBackgroundProcess -FilePath $iproxy `
         -ArgumentList @("$HostPort`:$port", "-u", $udid) `
-        -LogPath (Join-UappPath $buildsDir "iproxy-$projectName.log")
-    if (-not $tunnelProc) { throw "iproxy を起動できませんでした" }
+        -LogPath $script:tunnelLog
+    if (-not $tunnelProc) { $null = Merge-UappErrLog -LogPath $script:tunnelLog; throw "iproxy を起動できませんでした（詳細: $script:tunnelLog）" }
     # **起動直後の検査で失敗しても iproxy を残さない**（末尾の finally はここより後ろから
     # 有効になるので、この区間だけは自分で落としてから送出する。レビュー指摘）
     try {
@@ -857,6 +861,7 @@ if ($OsAgent) {
         # 早期終了はすべて配備の失敗とみなしてよい
         $agentAttempts = if ($isDevice) { 5 } else { 1 }
         for ($i = 1; $i -le $agentAttempts; $i++) {
+            $null = Merge-UappErrLog -LogPath $script:agentLog   # 前回の残骸を持ち越さない
             $script:agentProc = Start-UappBackgroundProcess -FilePath (Get-UappCommandPath "xcodebuild") `
                 -ArgumentList $agentArgs -LogPath $script:agentLog
             if (-not $agentProc) { break }
@@ -879,10 +884,12 @@ if ($OsAgent) {
     try {
         # 実機はシミュレータと違いホストから直接届かないので USB トンネルを張る
         if ($isDevice) {
+            $agentTunnelLog = Join-UappPath $buildsDir "iproxy-osagent-$projectName.log"
+            $null = Merge-UappErrLog -LogPath $agentTunnelLog
             $script:agentTunnel = Start-UappBackgroundProcess -FilePath (Get-UappCommandPath "iproxy") `
                 -ArgumentList @("$agentHostPort`:$OsAgentPort", "-u", $udid) `
-                -LogPath (Join-UappPath $buildsDir "iproxy-osagent-$projectName.log")
-            if (-not $agentTunnel) { throw "OS エージェント用の iproxy を起動できませんでした" }
+                -LogPath $agentTunnelLog
+            if (-not $agentTunnel) { $null = Merge-UappErrLog -LogPath $agentTunnelLog; throw "OS エージェント用の iproxy を起動できませんでした（詳細: $agentTunnelLog）" }
         }
         $script:agentUrl = "http://127.0.0.1:$agentHostPort"
         # **ビルドから走るので待ち時間が長い**（初回は数分）。待受と /status の両方で確認する

@@ -466,7 +466,8 @@ class BridgeClient:
                 "④重い処理でフレームが進んでいない"
                 "⑤OS のシステムアラートが出ている（iOS は権限ダイアログ等の表示中に"
                 "アプリが非アクティブになりメインスレッドが止まる。アプリは壊れていない ― "
-                "`os_agent.handle_alert()` で閉じると復帰する）"
+                "`os_agent.handle_alert(\"<ボタン名>\")` で閉じると復帰する。"
+                "ボタン名を省略すると先頭が押されるので指定すること）"
             ) from e
         if not line:
             raise ConnectionError("bridge closed the connection")
@@ -530,7 +531,20 @@ class BridgeClient:
     def hittables(self) -> dict:
         """**いま押せる要素だけ**を階層走査なしで返す（issue #45）。
 
-        返るのは {"screen", "scene", "items": [{"path", "center", "interactable"?, "text"?, "ui"?}]}。
+        返るのは {"screen", "scene",
+        "items": [{"path", "center", "interactable"?, "text"?, "label"?, "ui"?}]}。
+
+        **ラベルで探すときは `label` を見る（`text` ではない）。** `text` は
+        **その GameObject 自身**のコンポーネントだけなので、**uGUI の Button のように
+        子に Text がある構成では出ない**。
+        `label` は自身 → 子孫の順で最初に見つかった文字。**子孫から借りるのは自身に
+        `Selectable`（uGUI）／`UIButton`（NGUI）がある要素だけ**（コントロールでない容器は借りない）。
+        **`label` は文字による探索ヒントで、表示名も「その要素を操作すれば意図したハンドラに
+        届くこと」も保証しない。** 候補を絞ったら `resolve()` の `hittable` / `interactable` で確かめる。
+        **label は押せる側にだけ付く** ― コントロールが子孫の文字を借りたら、その子孫（Button の
+        子 Text / NGUI の UILabel）の item には label が付かない（text は残る）。**それでも一意ではない**
+        （同じ文字のコントロールが 2 つあれば 2 件）。**`path` の長さ・深さ・center で機械的に 1 つへ
+        決めない**。同名候補が残るときは自動で確定せず失敗させる。
         判定は dump と同じ経路（RaycastProbe / NguiAdapter.Probe）を通すので、
         **dump(probe="all") の hittable 集合と一致する**のが仕様。
         重い画面ほど効き、**軽い画面では往復ぶん不利**なので dump の置き換えではない。

@@ -7,6 +7,9 @@ import threading
 import pytest
 from pathlib import Path
 
+# スモークの判定ヘルパは test_bridge_smoke.py にあるが、あちらはモジュール全体が
+# run-e2e 経由でしか動かない（pytestmark の skipif）。判定の契約だけはブリッジ無しで固定する
+from test_bridge_smoke import _has_control_with_child_text
 from e2e_driver.client import (CONFIG_SEARCH_PARENTS, DEFAULT_PORT, BridgeClient,
                                WrongBridgeTargetError, resolve_port)
 
@@ -595,3 +598,39 @@ def test_call_timeout_reports_main_thread_stall():
     assert "メインスレッド" in message
     assert "Play" in message and "モーダル" in message   # 断定せず候補を並べている
     client.close()
+
+
+def test_has_control_with_child_text_requires_a_control_on_the_parent():
+    """判定ヘルパの契約（ブリッジ不要）。**偽の赤と偽の緑の両側を固定する**。
+
+    0.1.19 の旧ヘルパは「子が押せないこと」を条件にしていたため、`KnownControl` へ変えた実装に
+    対して `Panel(Image) > Text(raycastTarget=false)` で**偽の赤**（実装は null が正しいのに要求する）
+    になり、`Button > Text(raycastTarget=true)` では**要求しない**（欠陥の象限を見ない）状態だった。
+    """
+    def node(**kw):
+        n = {"name": "x", "path": "x", "active": True, "hittable": True}
+        n.update(kw)
+        return n
+
+    # 借りる側: `interactable` キー（Selectable / UIButton）を持ち、子 Text は押せても押せなくてもよい
+    button = node(interactable=True, children=[node(text="OK", raycastTarget=True)])
+    assert _has_control_with_child_text({"nodes": [button]})
+    # 偽の赤にしない: コントロールでない容器は借りないので、要求してはいけない
+    panel = node(raycastTarget=True, children=[node(text="カード", hittable=False)])
+    assert not _has_control_with_child_text({"nodes": [panel]})
+    # 別のコントロールの枝には降りない（無効化した子ボタンも境界）
+    outer = node(interactable=True, children=[node(interactable=False, text="内側")])
+    assert not _has_control_with_child_text({"nodes": [outer]})
+    # 非アクティブな子は見ない / 自身に text があれば対象外
+    hidden = node(interactable=True, children=[node(text="隠れている", active=False)])
+    assert not _has_control_with_child_text({"nodes": [hidden]})
+    own = node(interactable=True, text="自身", children=[node(text="子")])
+    assert not _has_control_with_child_text({"nodes": [own]})
+    # 隠れているコントロール（hittable=false）は要求しない ― hittables に出ないので要求すると偽の赤
+    covered = node(hittable=False, interactable=True, children=[node(text="OK")])
+    assert not _has_control_with_child_text({"nodes": [covered]})
+    # 空文字の子は「文字あり」に数えない（実装も空を飛ばす。数えると Button > Text("") で偽の赤）
+    empty = node(interactable=True, children=[node(text="")])
+    assert not _has_control_with_child_text({"nodes": [empty]})
+    # 深いところにいても見つける（木を再帰で見る）
+    assert _has_control_with_child_text({"nodes": [node(hittable=False, children=[button])]})

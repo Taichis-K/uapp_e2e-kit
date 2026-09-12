@@ -66,6 +66,36 @@ def test_hittables_matches_dump(client):
     assert not extra, f"hittables に余計なものが入った: {sorted(extra)[:10]}"
 
 
+def _has_control_with_child_text(dumped: dict) -> bool:
+    """`dump` の木に「既知のコントロールで、自身にテキストが無く、直下の子にテキストがある
+    hittable」がいるか。
+
+    **スモークが要求してよい条件を、実装と独立に判定するため**だけに使う
+    （`label` の選び方はここで再実装しない ― 実装を無効化する変異が素通りするため）。
+
+    - 既知のコントロール＝dump に `interactable` キーが付く要素（uGUI の `Selectable` /
+      NGUI の `UIButton` 由来）。**これは近い代理であって同じ範囲ではない** ―
+      NGUI の `interactable` は `isEnabled` が読めて矩形があることまで要求するので、
+      **`UIButton` はあるのにこのキーが出ない象限がある**（実装は `UIButton` の有無だけを見る）。
+      その象限ではこの関数が False を返し、下の配線検査が走らない（**偽の緑**）。
+      dump のキーだけで実装と同じ境界は引けないので、ここは「いれば要求する」側に倒してある
+    - 子は**押せるかどうかを問わない**（`raycastTarget=true` の子 Text は hittable だが、
+      label は親のコントロールが借りる ― 0.1.19 はここを境界にして Unity 標準の Button に
+      label が付かなかった）。**子がコントロールでないこと**は見る（別のコントロールの枝には
+      降りないので、そこを条件に入れると「実装は null が正しいのにテストが落ちる」偽の赤になる）
+    - 直下の子だけ見る（実装は 4 階層まで降りるので、直下にあれば必ず見つかる＝十分条件）
+    """
+    def walk(node: dict) -> bool:
+        children = node.get("children") or []
+        if node.get("hittable") is True and "interactable" in node and not node.get("text"):
+            if any(c.get("text") and c.get("active", True) and "interactable" not in c
+                   for c in children):
+                return True
+        return any(walk(c) for c in children)
+
+    return any(walk(n) for n in dumped.get("nodes", []))
+
+
 def test_hittables_expose_labels(client):
     """押せる要素の `label` が使える形で返ること（0.1.19）。
 
@@ -83,8 +113,10 @@ def test_hittables_expose_labels(client):
     """
     items = client.hittables()["items"]
     labeled = [i for i in items if i.get("label") is not None]
-    assert labeled, "押せる要素が 1 つも label を持たない（配線が落ちている可能性）"
 
+    # **「ラベルが 1 件はあるはず」と仮定しない。** アイコンだけの画面や items が空の画面は
+    # 仕様どおり正常で、そこで落とすと**導入先の標準 E2E を壊す**（偽の赤）。
+    # 配線が生きているかは、下で dump と突き合わせて**画面の中身に依存せず**判定する。
     for item in labeled:
         assert isinstance(item["label"], str) and item["label"] != "", (
             f"label が空: {item['path']}"
@@ -94,11 +126,35 @@ def test_hittables_expose_labels(client):
                 f"自身に text があるのに label が違う: {item['path']}"
             )
 
-    from_child = [i for i in labeled if not i.get("text")]
-    if not from_child:
-        pytest.skip(
-            "この画面には「本体に Text が無く、子にラベルがある」押せる要素が無い"
-            "（構成由来。uGUI の Button があれば出る）"
+    # **label を落とすのは「同じ応答の中に借り手が居る」ときだけ**（0.1.20 の 2 パス）。
+    # したがって「text はあるが label が無い」item には、その文字を label に持つ祖先が**必ず同じ応答に居る**。
+    # 居なければ label が黙って落ちている（実装を無効化する変異で落ちる側の検査）。
+    #
+    # **借り手に `interactable` キーを要求しない** ― NGUI では `UIButton` があってもこのキーが
+    # 出ない象限があり、要求すると**実装が正しいのに落ちる**（レビュー指摘）。
+    for item in items:
+        if item.get("text") and item.get("label") is None:
+            borrowers = [
+                i for i in items
+                if item["path"].startswith(i["path"] + "/") and i.get("label") == item["text"]
+            ]
+            assert borrowers, (
+                f"text はあるのに label が無く、その文字を借りた祖先も同じ応答に居ない: {item['path']}"
+            )
+
+    # **重複そのものの規則は EditMode が見る**（`BridgeHittableLabelTests` の 2 パスのテスト）。
+    # ここで items だけから「重複か」を組み直すと、**同じ文字の兄弟・深さの上限・コントロール自身が
+    # 境界であること**を再実装することになり、実装と食い違った瞬間に**偽の赤**になる
+    # （2026-09-12 のレビューが、その形を実際に作っていたと指摘した）。
+
+    # **配線の検査は dump 側を基準にする。** skip も「1 件はあるはず」も使わない ―
+    # 前者は終了コード 0 で偽の緑になり（機能が丸ごと消えても降格して通る）、
+    # 後者はアイコンだけの画面で偽の赤になる。どちらもレビューで実証された。
+    # **「そういう構成が画面にいるか」を独立に判定し、いるときだけ要求する。**
+    if _has_control_with_child_text(client.dump(scope="scene", probe="all")):
+        assert any(not i.get("text") and "interactable" in i for i in labeled), (
+            "本体に Text が無く子にラベルがあるコントロールが画面にいるのに、"
+            "label が子から取れていない（配線が落ちている）"
         )
 
 

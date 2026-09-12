@@ -200,9 +200,10 @@ namespace E2EBridge
             BeginReadErrors();
             var items = new JArray();
             var seen = new HashSet<int>();
+            var entries = new List<LabelEntry>();
 
             foreach (var rt in FindAllActive<RectTransform>())
-                AddIfHittable(rt.gameObject, ScreenRect(rt), false, seen, items);
+                AddIfHittable(rt.gameObject, ScreenRect(rt), false, seen, items, entries);
 
             if (NguiAdapter.Available)
             {
@@ -210,9 +211,11 @@ namespace E2EBridge
                 {
                     if (go == null || seen.Contains(go.GetInstanceID())) continue;
                     if (NguiAdapter.TryGetScreenRect(go, out var rect))
-                        AddIfHittable(go, rect, true, seen, items);
+                        AddIfHittable(go, rect, true, seen, items, entries);
                 }
             }
+
+            SuppressBorrowedLabels(entries);
 
             return WithReadErrors(new JObject
             {
@@ -451,14 +454,21 @@ namespace E2EBridge
         // **どの型が落ちるかはプロジェクトによる**（3D テキスト・NGUI・独自の派生・第三者 DLL）ので、
         // **こちらで型を列挙して先回りはしない**。
         private static Dictionary<string, JObject> _readErrors;
+        /// <summary>1 回の応答の中の `ExtractText` の memo（instanceID → 文字）。`Begin/EndReadErrors` と同じ寿命。</summary>
+        private static Dictionary<int, string> _textCache;
 
-        private static void BeginReadErrors() { _readErrors = new Dictionary<string, JObject>(); }
+        private static void BeginReadErrors()
+        {
+            _readErrors = new Dictionary<string, JObject>();
+            _textCache = new Dictionary<int, string>();
+        }
 
         /// <summary>集めた失敗を返す（無ければ null）。呼ぶと収集を終える。</summary>
         private static JArray EndReadErrors()
         {
             var collected = _readErrors;
             _readErrors = null;
+            _textCache = null;
             if (collected == null || collected.Count == 0) return null;
             var arr = new JArray();
             foreach (var e in collected.Values) arr.Add(e);
@@ -520,8 +530,16 @@ namespace E2EBridge
             };
         }
 
+        /// <summary>`hittables` の 1 件ぶんの、2 パス目で使う材料（どの要素の item か・自身の文字は何か）。</summary>
+        private struct LabelEntry
+        {
+            public JObject Item;
+            public GameObject Go;
+            public string OwnText;
+        }
+
         /// <summary>`hittables` の 1 件ぶん。**判定は dump と同じ経路を通す**（食い違わせない）。</summary>
-        private static void AddIfHittable(GameObject go, Rect rect, bool isNgui, HashSet<int> seen, JArray items)
+        private static void AddIfHittable(GameObject go, Rect rect, bool isNgui, HashSet<int> seen, JArray items, List<LabelEntry> entries)
         {
             var id = go.GetInstanceID();
             if (!seen.Add(id)) return;
@@ -549,10 +567,64 @@ namespace E2EBridge
             // **押せる要素の「ラベル」**。`text` は**自身のコンポーネントだけ**なので、
             // uGUI の Button のように**子に Text がある構成では null**になる。
             // 呼び手が**1 つのキーだけ見れば済む**よう、自身 → 子孫の順で最初の文字を返す。
-            var label = LabelOf(go);
+            // **`text` を使い回す**（`LabelOf(go)` は `ExtractText(go)` をもう一度実行し、
+            // **同じ読み取り失敗を `readErrors` に 2 回数える**。`dump` / `texts` は 1 回なので
+            // 口によって件数が食い違う ― レビューの実測で見つけた退行）。
+            // 判定は `resolve` と**同じ 1 つの実装**を通す（口ごとに基準を持たない）
+            // **label は押せる側にだけ付ける**。親のコントロールがこの要素の文字を借りているなら、
+            // この item には付けない（`text` は残す）。付けると `Button > Text` の親子が同じ label で並び、
+            // 「label で探す」呼び手が毎回 2 件から選ぶことになる（2026-09-12 に mac が実画面で実測、ユーザー指摘）
+            var label = LabelOf(go, text);
             if (!string.IsNullOrEmpty(label)) item["label"] = label;
 
             items.Add(item);
+            entries.Add(new LabelEntry { Item = item, Go = go, OwnText = text });
+        }
+
+        /// <summary>
+        /// **同じ応答の中に借り手が居るときだけ**、借りられた側の `label` を落とす（`text` は残す）。
+        /// </summary>
+        ///
+        /// <remarks>
+        /// <para>**なぜ 2 パスなのか**（2026-09-12・レビュー 2 本と codex）。
+        /// 1 パスで「祖先が借りているか」だけを見て落とすと、**借り手が応答に出ない構成でその文字が
+        /// どこからも引けなくなる** ― コントロールの中心を別の要素が覆っていると親は hittable にならない
+        /// （`RaycastProbe` は中心の最前面で決まる）。落としてよいのは「同じ応答の中に、その文字を
+        /// `label` に持つ借り手が実際に居る」ときだけで、それは items を集め終えないと分からない。</para>
+        ///
+        /// <para>**同じ文字の兄弟もまとめて落ちる**。判定を「出所の要素そのものか」（参照の一致）ではなく
+        /// **「借り手の label と自分の文字が同じか」**にしてあるため。影・縁取り・押下時表示のために
+        /// 同じ文字の Text を重ねる構成は普通にあり、参照で見ると 2 つ目が残って重複する。</para>
+        ///
+        /// <para>`resolve` は 1 件しか返さないので集合を持てない。あちらは木だけで決める
+        /// （`IsLabelBorrowedByAncestor`）。**候補の作り方（`LabelOf`）は共通**で、違うのは
+        /// 「応答の中で重複をならすか」だけ。</para>
+        /// </remarks>
+        private static void SuppressBorrowedLabels(List<LabelEntry> entries)
+        {
+            var inResponse = new HashSet<int>();
+            foreach (var e in entries) inResponse.Add(e.Go.GetInstanceID());
+
+            foreach (var e in entries)
+            {
+                if (e.Item["label"] == null) continue;
+                if (IsLabelSuppressed(e.Go, e.OwnText, inResponse)) e.Item.Remove("label");
+            }
+        }
+
+        /// <summary>
+        /// この要素の `label` を落とすべきか ― **借り手が居て、かつ同じ応答に出ている**ときだけ真。
+        /// </summary>
+        ///
+        /// <remarks>
+        /// **純関数として公開してある**（`hittables` の口は EditMode では items が空になるので、
+        /// ここを直接呼べないと 2 パスの規則を検証する台が無い。codex の指摘）。
+        /// `responseInstanceIds` は「その応答に出ている要素の InstanceID の集合」。
+        /// </remarks>
+        public static bool IsLabelSuppressed(GameObject go, string ownText, ICollection<int> responseInstanceIds)
+        {
+            var owner = LabelBorrowedFrom(go, ownText);
+            return owner != null && responseInstanceIds != null && responseInstanceIds.Contains(owner.GetInstanceID());
         }
 
         public static JToken Resolve(JObject args)
@@ -561,11 +633,24 @@ namespace E2EBridge
                        ?? throw new BridgeException(ErrorCodes.BadRequest, "'path' is required");
             var go = Require(path);
 
+            // **読み取り失敗を黙って「無い」に変えない**（2026-09-12・codex）。`label` は自分以外の
+            // getter を多数読むので、IL2CPP の stripping で落ちていると**`label` が静かに null になる**。
+            // `hittables` は `readErrors` で分かるのに、ここだけ手掛かりが残らなかった。
+            // memo（`_textCache`）もこの区間だけ効くので、同じ要素を 2 度読まない
+            BeginReadErrors();
+
             var result = new JObject
             {
                 ["path"] = GetPath(go.transform),
                 ["active"] = go.activeInHierarchy
             };
+
+            // **`hittables` と同じラベルをここでも返す**。`label` で目的のボタンを見つけた
+            // 呼び手が `resolve` で確かめると、**`text` は自身のコンポーネントだけなので
+            // uGUI の Button では空振りする** ― 同じ型の穴を別の口に残さない
+            var ownText = ExtractText(go);
+            var resolvedLabel = LabelOf(go, ownText);
+            if (!string.IsNullOrEmpty(resolvedLabel) && !IsLabelBorrowedByAncestor(go, ownText)) result["label"] = resolvedLabel;
 
             Rect? screenRect = null;
             var isNgui = false;
@@ -620,11 +705,12 @@ namespace E2EBridge
                 }
             }
 
-            var text = ExtractText(go);
+            // **もう一度読まない**（同じ getter を 2 度叩き、readErrors も 2 重に数える）
+            var text = ownText;
             if (text != null)
                 result["text"] = text;
 
-            return result;
+            return WithReadErrors(result);
         }
 
         // ----------------------------------------------------------------- get
@@ -996,69 +1082,171 @@ namespace E2EBridge
             return new Rect(min, max - min);
         }
 
-        /// <summary>
-        /// Text / TMP_Text / InputField 系から表示テキストを取り出す。
-        /// TMP への直接依存を避けるためリフレクションで "text" プロパティを探す。
-        /// </summary>
         /// <summary>押せる要素の**ラベル**（自身 → 子孫の順で最初に見つかった文字）。無ければ null。</summary>
         ///
         /// <remarks>
-        /// **`hittables` の口からは EditMode で検証できない**ので、判定だけを取り出してある。
+        /// <para>**`hittables` の口からは EditMode で検証できない**ので、判定だけを取り出してある。
         /// `RaycastProbe` は `EventSystem.current` を要求し、**EditMode では items が空になる**
         /// （2026-09-11 に実測。空の items に対して「null を期待するテスト」は素通りするので、
         /// **ラベルが取れることを主張する側と対にしないと偽の緑になる**）。
-        /// 実際の `hittables` への配線は、同梱スモークがデバイス経路で見る。
+        /// 実際の `hittables` への配線は、同梱スモークがデバイス経路で見る。</para>
+        ///
+        /// <para>**`label` は文字による探索ヒントであって、表示名を保証しない。**
+        /// 文字が見つかることと、その要素への操作が意図したハンドラに届くことは別の話。</para>
         /// </remarks>
-        public static string LabelOf(GameObject go)
+        public static string LabelOf(GameObject go) => LabelOf(go, ExtractText(go));
+
+        /// <summary>自身のテキストを読み終えている呼び手向け（`hittables` は `text` を使い回す）。</summary>
+        public static string LabelOf(GameObject go, string ownText)
         {
-            var own = ExtractText(go);
-            return !string.IsNullOrEmpty(own) ? own : DescendantLabel(go);
+            if (!string.IsNullOrEmpty(ownText)) return ownText;
+            // **子孫から借りられるのは既知のコントロールだけ。** `Panel > Card(Image) > Text` の
+            // Panel も Card もコントロールではないので、どちらも Text の文字を名乗らない
+            return IsKnownControl(go) ? DescendantLabel(go) : null;
         }
 
         /// <summary>`label` を探す深さの上限。`Button > 入れ物 > Text` くらいまでを見る。</summary>
         private const int LabelSearchDepth = 4;
 
-        /// <summary>押せる要素の**ラベル**を子孫から 1 つ拾う。無ければ null。</summary>
+        /// <summary>
+        /// **既知のコントロール**か ― uGUI は自身に `Selectable`、NGUI は自身に `UIButton` がある。
+        /// 子孫から `label` を借りてよいのも、子孫探索の境界になるのも、この判定だけ。
+        /// </summary>
         ///
         /// <remarks>
-        /// <para>**なぜ要るか**: uGUI の一般的な構成では **Button 本体に Text は無く子に付いている**
-        /// （その子は `raycastTarget=false` のことが多い）。子は押せないので `hittables` の
-        /// `items` には出ず、本体の `text` も null になる ― 結果として
-        /// **「押せる要素を一覧してラベルで目的のボタンを探す」という自然な書き方が、
-        /// 例外もエラーも出さずに空振りする**（2026-09-11 に導入先が実機で実測。
+        /// <para>**判定はコンポーネントの存在**であって `interactable == true` ではない。
+        /// 無効化した子ボタンも境界になる（無効なボタンの文字を外側が名乗らない）。</para>
+        ///
+        /// <para>**`raycastTarget` では判定しない**（0.1.19 の欠陥）。uGUI の `Graphic.raycastTarget` は
+        /// 既定 true で、`DefaultControls.CreateButton` が作る子 Text も true。
+        /// そこを境界にすると **Unity 標準の Button 本体に label が付かない**（公開後に実測:
+        /// `interactable` を持つ 10 件のうち label は 0 件）。`hittables` の `interactable` は
+        /// `Selectable` 由来なのに、ガードだけ別の基準で判定したのが原因。
+        /// なお `hittables` の**列挙元は `RectTransform`（uGUI）／`UIWidget` ∪ コライダー（NGUI）**で、
+        /// `raycastTarget` は当たり判定側の性質 ― 列挙元とも一致していなかった。</para>
+        ///
+        /// <para>**「押せる要素と完全に揃えた」わけではない。** `Selectable` を持たない独自ハンドラ
+        /// （`IPointerClickHandler` を直接実装した `Image` など）は対象外で、その要素の label は
+        /// 自身の文字だけになる。**uGUI では `interactable` が付く範囲と同じ**。NGUI は `UIButton` の有無だけを
+        /// 見る（`interactable` はさらに `isEnabled` が読めることと `UIWidget`/コライダーの矩形を要求するので、
+        /// そのぶん範囲がずれる。`UIToggle` 等は NGUI の `interactable` にも付かないので、ここでも対象外）。</para>
+        /// </remarks>
+        private static bool IsKnownControl(GameObject go)
+        {
+            if (go.GetComponent<Selectable>() != null) return true;
+            return NguiAdapter.Available && NguiAdapter.HasUiButton(go);
+        }
+
+        /// <summary>既知のコントロールの**ラベル**を子孫から 1 つ拾う。無ければ null。</summary>
+        ///
+        /// <remarks>
+        /// <para>**なぜ要るか**: uGUI の一般的な構成では **Button 本体に Text は無く子に付いている**。
+        /// 本体の `text` は null になり、**「押せる要素を一覧してラベルで目的のボタンを探す」という
+        /// 自然な書き方が、例外もエラーも出さずに空振りする**（2026-09-11 に導入先が実機で実測。
         /// **押せる 74 件のうち `text` を持つのは 11 件**だった）。</para>
         ///
         /// <para>**`text` とは別のキーで返す。** `text` に子の値を混ぜると
         /// 「誰のテキストか」が壊れ、`dump` のノードとの対応も崩れる。</para>
         ///
-        /// <para>**別の押せる要素の配下へは降りない** ― 降りると、複数のボタンを含むパネルが
-        /// **最初の子ボタンのラベルを名乗る**。深さにも上限を置く（病的な階層で走査が伸びない）。</para>
+        /// <para>**別の既知のコントロールの配下へは降りない** ― 降りると、複数のボタンを含む
+        /// パネルが**最初の子ボタンのラベルを名乗る**。深さにも上限を置く（病的な階層で走査が伸びない）。
+        /// **借りられた子孫（`Button > Text` の Text / `UIButton > UILabel` の UILabel）は `hittables` に出るが
+        /// `label` を持たない**（`IsLabelBorrowedByAncestor`）。label は押せる側にだけ付く。</para>
         ///
         /// <para>**非アクティブな子は見ない**。`hittables` はアクティブな要素の一覧なので、
         /// 隠れているラベルを返すと画面と食い違う。</para>
         /// </remarks>
         private static string DescendantLabel(GameObject go, int depth = LabelSearchDepth)
+            => DescendantLabelSource(go, depth).text;
+
+        /// <summary>子孫から借りる文字と、その**出所**（どの GameObject の文字か）。無ければ (null, null)。</summary>
+        private static (GameObject source, string text) DescendantLabelSource(GameObject go, int depth)
         {
-            if (depth <= 0) return null;
+            if (depth <= 0) return (null, null);
             var t = go.transform;
             for (var i = 0; i < t.childCount; i++)
             {
                 var child = t.GetChild(i).gameObject;
                 if (!child.activeInHierarchy) continue;
-                // **別の押せる要素の中は見ない**（パネルが子ボタンのラベルを名乗るのを防ぐ）
-                if (child.GetComponent<Selectable>() != null) continue;
-                if (NguiAdapter.Available && NguiAdapter.Interactable(child).HasValue) continue;
+                // **別の既知のコントロールの中は見ない**（パネルが子ボタンの文字を名乗るのを防ぐ）。
+                // 境界の判定は「借りてよい側」と同じ `IsKnownControl` ― 基準を 2 つ持たない
+                if (IsKnownControl(child)) continue;
 
                 var text = ExtractText(child);
-                if (!string.IsNullOrEmpty(text)) return text;
+                if (!string.IsNullOrEmpty(text)) return (child, text);
 
-                var nested = DescendantLabel(child, depth - 1);
-                if (nested != null) return nested;
+                var nested = DescendantLabelSource(child, depth - 1);
+                if (nested.source != null) return nested;
+            }
+            return (null, null);
+        }
+
+        /// <summary>
+        /// この要素の**自身の文字**を、最も近い既知のコントロールの祖先が `label` として借りているか。
+        /// 真なら、この要素の item には `label` を付けない（`text` は残る）＝ **label は押せる側にだけ付く**。
+        /// </summary>
+        ///
+        /// <remarks>
+        /// <para>**なぜ要るか**: Unity 既定の Button は子 Text も hittable（`raycastTarget=true`）なので、親が借りると
+        /// **親子が同じ label で `hittables` に並ぶ**（2026-09-12 に mac が実画面で実測。NGUI の `UIButton > UILabel` も同じ）。
+        /// 「label で探す」呼び手が毎回 2 件から選ぶことになる。**items から子を落とすことはできない**
+        /// （`hittables` の集合は `dump` の hittable 集合と一致するのが契約）ので、label の側で 1 つにする。</para>
+        ///
+        /// <para>**判定は借りる側と同じ経路**: 上へ `LabelSearchDepth` まで辿り、**最初の既知のコントロール**で止まる
+        /// （その先は境界なので借りられない）。そのコントロールに自身の文字があれば借りていない。無ければ
+        /// `DescendantLabelSource` の出所がこの要素かどうかで決まる（同じ関数を使うので食い違わない）。
+        /// 兄弟に別の文字があって親がそちらを借りたなら、この要素の label は残る（重複ではない）。</para>
+        ///
+        /// <para>**同じ文字を持つ別のコントロールが 2 つある重複は残る**（2 つの「OK」ボタン）。それは別の要素なので正しい。
+        /// 呼び手は一意を仮定しない。</para>
+        /// </remarks>
+        public static bool IsLabelBorrowedByAncestor(GameObject go, string ownText)
+        {
+            return LabelBorrowedFrom(go, ownText) != null;
+        }
+
+        /// <summary>
+        /// この要素の文字を `label` として借りている祖先のコントロール。居なければ `null`。
+        /// </summary>
+        ///
+        /// <remarks>
+        /// **判定は文字の一致で行う**（出所の参照の一致ではない）。`DescendantLabelSource` は
+        /// **最初に見つかった 1 つ**で止まるので、参照で見ると**同じ文字の 2 つ目の兄弟が残って重複する**
+        /// （影・縁取り・押下時表示の重ね Text は普通にある。2026-09-12 のレビューが発見）。
+        /// 借り手が実際に応答へ出るかは**ここでは見ない** ― それは呼び手（`SuppressBorrowedLabels`）の仕事。
+        /// </remarks>
+        private static GameObject LabelBorrowedFrom(GameObject go, string ownText)
+        {
+            if (string.IsNullOrEmpty(ownText)) return null;   // 借りられる文字が無い
+            if (IsKnownControl(go)) return null;              // コントロール自身は境界なので誰も借りない
+            var t = go.transform.parent;
+            for (var distance = 1; t != null && distance <= LabelSearchDepth; distance++, t = t.parent)
+            {
+                var ancestor = t.gameObject;
+                if (!IsKnownControl(ancestor)) continue;
+                if (!string.IsNullOrEmpty(ExtractText(ancestor))) return null;   // 自身の文字を優先する＝借りない
+                var borrowed = DescendantLabelSource(ancestor, LabelSearchDepth).text;
+                return string.Equals(borrowed, ownText, StringComparison.Ordinal) ? ancestor : null;
             }
             return null;
         }
 
+        /// <summary>
+        /// Text / TMP_Text / InputField 系から表示テキストを取り出す。
+        /// TMP への直接依存を避けるためリフレクションで "text" プロパティを探す。
+        /// </summary>
         private static string ExtractText(GameObject go)
+        {
+            // **1 回の応答の中では同じ GameObject を 2 度読まない**。`hittables` は item 自身の読み取りに加えて
+            // 親コントロールの借用・「借りられているか」の判定でも同じ子孫を読むので、memo が無いと
+            // `readErrors` の count が経路によって膨らむ（`dump` / `texts` と食い違う）
+            if (_textCache != null && _textCache.TryGetValue(go.GetInstanceID(), out var cached)) return cached;
+            var result = ExtractTextUncached(go);
+            if (_textCache != null) _textCache[go.GetInstanceID()] = result;
+            return result;
+        }
+
+        private static string ExtractTextUncached(GameObject go)
         {
             foreach (var component in go.GetComponents<Component>())
             {

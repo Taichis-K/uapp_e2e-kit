@@ -259,8 +259,9 @@ copy config\local.sample.json config\local.json   # 各自の環境に合わせ�
 ```powershell
 cd <プロジェクト>\uapp_e2e
 pip install -r driver\requirements.txt
-.\scripts\start-emulator.ps1
-.\scripts\build-android.ps1        # キットがプロジェクト内にある場合は -ProjectPath 不要（自動検出）
+.\scripts\build-android.ps1        # キットがプロジェクト内にある場合は -ProjectPath 不要（自動検出）。
+                                   # エミュレーターは止めた状態で（動いていると始まらない。-AllowRunningEmulator で外せる）
+.\scripts\start-emulator.ps1       # ビルドが終わってから起動する
 .\scripts\run-e2e.ps1              # まだテストが無ければ次の1行で疎通だけ確認：
 cd driver
 python -c "from e2e_driver import BridgeClient; print(BridgeClient(port=<ホスト側ポート>).connect().ping())"

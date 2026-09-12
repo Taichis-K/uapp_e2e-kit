@@ -488,6 +488,220 @@ function Get-UappAndroidTool {
     return $null
 }
 
+function Get-UappUnityBundledAndroidTool {
+    <#
+      .SYNOPSIS
+      Unity 本体に同梱された Android SDK のツール（adb / emulator）の実体パス。無ければ $null。
+
+      .NOTES
+      配置は OS で違う: Windows は `<Editor>\Data\PlaybackEngines\AndroidPlayer\SDK`、
+      mac は `Unity.app/Contents/PlaybackEngines/AndroidPlayer/SDK`。$UnityPath は
+      Resolve-UappEditor が返す実体（`Unity.exe` / `Unity.app/Contents/MacOS/Unity`）。
+      **ビルドだけの環境**（PATH にも ANDROID_* にも adb が無い）で、エミュレーターの稼働判定に使う。
+    #>
+    param([Parameter(Mandatory)][string]$UnityPath,
+          [Parameter(Mandatory)][ValidateSet("emulator", "adb")][string]$Name)
+    $sub = if ($Name -eq "adb") { "platform-tools" } else { "emulator" }
+    $exe = if (Test-UappWindows) { "$Name.exe" } else { $Name }
+    $base = if (Test-UappWindows) { Join-UappPath (Split-Path $UnityPath -Parent) "Data" }
+            else { Split-Path (Split-Path $UnityPath -Parent) -Parent }   # …/Contents
+    $candidate = Join-UappPath $base "PlaybackEngines" "AndroidPlayer" "SDK" $sub $exe
+    if (Test-Path -LiteralPath $candidate -ErrorAction SilentlyContinue) { return $candidate }
+    return $null
+}
+
+function Get-UappEmulatorProcess {
+    <#
+      .SYNOPSIS
+      Android エミュレーターの実体プロセス（qemu-system-*）を列挙する（Id / Name）。
+
+      .NOTES
+      `emulator(.exe)` は起動ラッパーで、実体は `qemu-system-x86_64` / `qemu-system-aarch64`。
+      **列挙できないときは例外にする**（空配列を返すと呼び出し側が「動いていない」と解釈し、
+      ビルド開始ガードが fail-open になる。Get-UappUnityProcess と同じ理由）。
+    #>
+    $result = @()
+    if (Test-UappWindows) {
+        # **ワイルドカード指定なら該当なしはエラーにならない**ので、-ErrorAction Stop で
+        # 「列挙そのものの失敗」だけを例外にできる（SilentlyContinue だと失敗が 0 件に化ける）
+        foreach ($p in @(Get-Process -Name "qemu-system*" -ErrorAction Stop)) {
+            $result += [pscustomobject]@{ Id = [int]$p.Id; Name = $p.ProcessName }
+        }
+        return $result
+    }
+    $psExe = Get-UappCommandPath "ps"
+    if (-not $psExe) {
+        throw [System.InvalidOperationException]::new(
+            "ps コマンドが見つからないためエミュレーターのプロセスを列挙できません")
+    }
+    # **`comm=`（引数を含まない実行ファイル）で判定する**。`command=` の先頭トークンで見ると、
+    # 実行ファイルのパスに空白がある（`/Volumes/Android SDK/…/qemu-system-aarch64`）とき
+    # 稼働中を捨てて none に化ける（codex レビューが模擬出力で再現）
+    $psLines = @(& $psExe -axww -o "pid=,comm=" 2>$null)
+    if ($LASTEXITCODE -ne 0) {
+        throw [System.InvalidOperationException]::new(
+            "ps が失敗しました（終了コード $LASTEXITCODE）。エミュレーターのプロセスを列挙できていません")
+    }
+    return @(Select-UappQemuProcess -Lines $psLines)
+}
+
+function Select-UappQemuProcess {
+    <#
+      .SYNOPSIS
+      `ps -o pid=,comm=` の行から qemu-system-* を選ぶ（Id / Name）。Windows でも対照を取れるよう分離してある。
+
+      .NOTES
+      `comm` は実行ファイルのパスだけで引数を含まないので、**パスに空白があってもよい**（行末までが実行ファイル）。
+      引数の中の `qemu-system-…`（ログを tail しているだけ等）には当たらない。
+      Linux の `comm` は 15 文字に切り詰められる（`qemu-system-x86`）ので、接頭辞で見る。
+    #>
+    param([string[]]$Lines)
+    $result = @()
+    foreach ($line in @($Lines)) {
+        if ($line -notmatch '^\s*(\d+)\s+(.+?)\s*$') { continue }
+        $procId = [int]$Matches[1]
+        $comm = $Matches[2]
+        if ($comm -notmatch '(^|/)(qemu-system[^/]*)$') { continue }
+        $result += [pscustomobject]@{ Id = $procId; Name = $Matches[2] }
+    }
+    return $result
+}
+
+function Invoke-UappAdb {
+    <#
+      .SYNOPSIS
+      adb を**期限つき**で実行し、@{ TimedOut; ExitCode; Lines } を返す。超過したら kill する。
+
+      .NOTES
+      `adb devices` / `emu kill` / `kill-server` を同期で呼ぶと、**adb server が接続を受け付けたまま
+      応答を返さないとき関数から戻らず**、unknown の返却にも停止待ちの期限判定にも届かない
+      （codex レビュー。「接続だけ成立して応答が返らない相手に無言」型 ― `BridgeClient.connect()` と同じ）。
+      期限超過は「失敗」として呼び出し側が unknown / 停止未確認に倒す。
+      **`$p.Handle` に先に触る**（触らないと WaitForExit 後の ExitCode が null になる PowerShell の癖）。
+
+      期限は呼び出しの性質で決める（2026-09-12・run-e2e の移行時に決めた目安。短い期限で一括移行しない）:
+        即応（devices / forward / settings / logcat -c / df）= 20 秒 /
+        接続待ち（wait-for-device）・起動待ち（am start -W）= 120 秒 /
+        転送（install）= 600 秒 / 証跡（logcat -d）= 60 秒。
+      **超過は「応答が無かった」という観測**で、adb server が固まったのかデバイスが応答しないのかは
+      この関数では分からない（呼び出し側も断定しない）。
+      -StdOutFile を渡すと標準出力をそのファイルへ直接書く（logcat の証跡など。Lines は空）。
+      ErrLines は標準エラー（adb install の失敗理由はこちらに出る）。
+
+      **引数は ConvertTo-UappProcessArgument で 1 個ずつ引用してから渡す**（空白を含む APK パスが
+      割れるため。2026-09-12 のレビューで実測）。**TimeoutSeconds は 1 秒以上・24 日未満**に丸める
+      （0 は「期限なし」ではなく即 kill になり、大きすぎる値は WaitForExit の int オーバーフローで
+      例外になる ― どちらも「制限を外すつもり」の入力が事故になる形）。
+    #>
+    param(
+        [Parameter(Mandatory)][string]$AdbPath,
+        [Parameter(Mandatory)][string[]]$ArgumentList,
+        [int]$TimeoutSeconds = 20,
+        [string]$StdOutFile
+    )
+    if ($TimeoutSeconds -lt 1) {
+        Write-Warning "Invoke-UappAdb: TimeoutSeconds=$TimeoutSeconds は使えません（0 以下は即 kill になる）。1 秒として続けます"
+        $TimeoutSeconds = 1
+    }
+    $maxSeconds = 2000000   # WaitForExit(ms) が int を超えない範囲（約 23 日）
+    if ($TimeoutSeconds -gt $maxSeconds) {
+        Write-Warning "Invoke-UappAdb: TimeoutSeconds=$TimeoutSeconds は大きすぎます。$maxSeconds 秒として続けます"
+        $TimeoutSeconds = $maxSeconds
+    }
+    $outFile = if ($StdOutFile) { $StdOutFile } else { [System.IO.Path]::GetTempFileName() }
+    $errFile = [System.IO.Path]::GetTempFileName()
+    try {
+        $p = Start-Process -FilePath $AdbPath -ArgumentList (ConvertTo-UappProcessArgument $ArgumentList) -NoNewWindow -PassThru `
+                           -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+        $null = $p.Handle
+        if (-not $p.WaitForExit($TimeoutSeconds * 1000)) {
+            try { $p.Kill() } catch { }
+            # **途中までの出力も返す**（期限超過の案内に「出力（途中まで）」と書くのに空だった）
+            $partial = if ($StdOutFile) { @() } else { @(Get-Content -LiteralPath $outFile -ErrorAction SilentlyContinue) }
+            $errLines = @(Get-Content -LiteralPath $errFile -ErrorAction SilentlyContinue)
+            return [pscustomobject]@{ TimedOut = $true; ExitCode = $null; Lines = $partial; ErrLines = $errLines }
+        }
+        $lines = if ($StdOutFile) { @() } else { @(Get-Content -LiteralPath $outFile -ErrorAction SilentlyContinue) }
+        $errLines = @(Get-Content -LiteralPath $errFile -ErrorAction SilentlyContinue)
+        return [pscustomobject]@{ TimedOut = $false; ExitCode = $p.ExitCode; Lines = $lines; ErrLines = $errLines }
+    } finally {
+        if (-not $StdOutFile) { Remove-Item -LiteralPath $outFile -Force -ErrorAction SilentlyContinue }
+        Remove-Item -LiteralPath $errFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Get-UappEmulatorState {
+    <#
+      .SYNOPSIS
+      Android エミュレーターの稼働状態を **none / running / unknown の 3 値**で返す
+      （State / Serials / ProcessIds / Reason）。
+
+      .DESCRIPTION
+      **ビルドを始めてよいのは State が none のときだけ**。unknown は「いない」ではない ―
+      adb の失敗・未接続・プロセス列挙の失敗を「いない」に化けさせると、
+      **見逃し経路**（adb server が落ちているだけで qemu は動いている等）で
+      エミュレーターを動かしたままビルドを始めてしまう。
+
+      信号は 2 つ（`adb devices` の `emulator-N` と、qemu-system-* プロセス）で、
+      **どちらかが「いる」なら running / 両方が「いない」と言えて初めて none / それ以外は unknown**。
+      adb だけだと、ブート中や adb が死んだ状態のエミュレーターを取りこぼす。
+
+      .NOTES
+      なぜ要るか: Unity ビルドはディスク律速で、動いているエミュレーターは同じ HDD の I/O と
+      メモリを奪い、ゲスト側も system_server が ANR に落ちる（2026-09-08 / 09-11 に実測）。
+      **`build-android.ps1`（手動ビルドの開始拒否）と `verify-all.ps1`（停止確認）の両方が
+      この 1 つの判定を使う**。防げるのは「起動したままビルドを始める」事故だけで、
+      ビルド途中の起動は防げない。
+    #>
+    param(
+        [string]$AdbPath,    # 解決済みの adb（無ければ PATH → SDK → Unity 同梱 SDK の順に探す）
+        [string]$UnityPath   # Unity 本体の実体。あれば同梱 SDK の adb も候補にする（ビルドだけの環境向け）
+    )
+    $reasons = @()
+    $serials = @()
+    $adbOk = $false
+    $adbExe = $null
+    if ($AdbPath) {
+        if (Test-Path -LiteralPath $AdbPath -PathType Leaf) { $adbExe = $AdbPath }
+        else { $reasons += "指定された adb が存在しない（$AdbPath）" }
+    } else {
+        $adbExe = Get-UappCommandPath "adb"
+        if (-not $adbExe) { $adbExe = Get-UappAndroidTool -Name adb }
+        if (-not $adbExe -and $UnityPath) { $adbExe = Get-UappUnityBundledAndroidTool -UnityPath $UnityPath -Name adb }
+        if (-not $adbExe) {
+            $reasons += "adb が見つからない（PATH・SDK の platform-tools・Unity 同梱 SDK のいずれにも無い）"
+        }
+    }
+    if ($adbExe) {
+        # **期限つき**（adb server が応答しないと関数から戻らず、unknown にも停止待ちの期限にも届かない）
+        $r = Invoke-UappAdb -AdbPath $adbExe -ArgumentList @("devices") -TimeoutSeconds 20
+        $lines = @($r.Lines | ForEach-Object { "$_" })
+        if ($r.TimedOut) {
+            $reasons += "adb devices が 20 秒以内に応答しない（adb server が固まっている可能性。adb kill-server を試す）"
+        } elseif ($r.ExitCode -ne 0) {
+            $reasons += "adb devices が終了コード $($r.ExitCode)"
+        } elseif (-not @($lines | Where-Object { $_ -match '^List of devices attached' })) {
+            $reasons += "adb devices の出力に見出し行が無い（" + (($lines | Select-Object -First 1) -join "") + "）"
+        } else {
+            $adbOk = $true
+            $serials = @($lines | ForEach-Object { if ($_ -match '^(emulator-\d+)\s') { $Matches[1] } })
+        }
+    }
+    $procs = $null
+    try { $procs = @(Get-UappEmulatorProcess) }
+    catch { $reasons += "エミュレーターのプロセスを列挙できない（$($_.Exception.Message)）" }
+    $procIds = @(if ($null -ne $procs) { $procs | ForEach-Object { $_.Id } })
+    $state = if ($serials.Count -gt 0 -or $procIds.Count -gt 0) { "running" }
+             elseif ($adbOk -and $null -ne $procs) { "none" }
+             else { "unknown" }
+    return [pscustomobject]@{
+        State      = $state
+        Serials    = $serials
+        ProcessIds = $procIds
+        Reason     = ($reasons -join " / ")
+    }
+}
+
 function Get-UappEditorLogPath {
     <#
       .SYNOPSIS
@@ -636,24 +850,47 @@ function Save-UappNativeOutput {
       **`>` でバイナリをリダイレクトしない**。PowerShell の版によっては、ネイティブコマンドの
       標準出力がテキストとして解釈され、**PNG が静かに壊れる**（失敗証跡は壊れて初めて困る）。
       ここでは標準出力ストリームを直接ファイルへコピーするので、版にも OS にも依存しない。
+
+      **期限つき**（2026-09-12・レビュー 2 本の指摘）。この関数が使われるのは
+      `adb exec-out screencap`＝**失敗時の証跡収集の 1 本目**で、そこは定義上「端末が重い / ANR」の
+      場面。期限が無いと、後続の logcat に付けた期限へ一度も到達せず無言で止まる
+      （**`&` で呼ばないので check-portability の adb 規則にも見えなかった**）。
+      超過したら kill し、**途中まで書いたファイルは残す**（壊れた PNG も「壊れている」という観測）。
+      戻り値は終了コードで、**超過したときは $null**（呼び手が区別できるように）。
     #>
     param(
         [Parameter(Mandatory)][string]$Exe,
         [string[]]$Arguments = @(),
-        [Parameter(Mandatory)][string]$OutFile
+        [Parameter(Mandatory)][string]$OutFile,
+        [int]$TimeoutSeconds = 30
     )
+    if ($TimeoutSeconds -lt 1) { $TimeoutSeconds = 1 }
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $Exe
-    foreach ($a in $Arguments) { $psi.ArgumentList.Add($a) }
+    foreach ($a in $Arguments) { $psi.ArgumentList.Add($a) }   # .NET が正しく引用する（自作の規則を使わない）
     $psi.RedirectStandardOutput = $true
     $psi.UseShellExecute = $false
     $proc = [System.Diagnostics.Process]::Start($psi)
     $fs = [System.IO.File]::Create($OutFile)
+    $timedOut = $false
     try {
-        $proc.StandardOutput.BaseStream.CopyTo($fs)
+        # **非同期でコピーして待つ**（同期の CopyTo だと、相手が応答しない間ずっと戻らない）
+        $copy = $proc.StandardOutput.BaseStream.CopyToAsync($fs)
+        if (-not $copy.Wait($TimeoutSeconds * 1000)) {
+            $timedOut = $true
+            try { $proc.Kill() } catch { }
+            try { $null = $copy.Wait(5000) } catch { }   # kill でストリームが閉じ、コピーは終わる
+        }
+    } catch {
+        $timedOut = $true
+        try { $proc.Kill() } catch { }
     } finally {
         $fs.Dispose()
-        $proc.WaitForExit()
+        if (-not $proc.WaitForExit(5000)) { try { $proc.Kill() } catch { } }
+    }
+    if ($timedOut) {
+        Write-Warning "$([System.IO.Path]::GetFileName($Exe)) が $TimeoutSeconds 秒以内に返りませんでした（途中までを $OutFile に残しました）"
+        return $null
     }
     return $proc.ExitCode
 }
@@ -873,7 +1110,8 @@ function Get-UappDevOnlyScript {
         # （SETUP の iOS 節・スキルの導線・E2EBridge.Editor.BuildEntry の iOS エントリ・
         # oslayer/ の同梱と揃えて解除した。issue #27）
         "install-to-project.ps1", "package-kit.ps1", "publish-kit.ps1", "verify-all.ps1",
-        "check-portability.ps1", "check-kit-docs.ps1"
+        "check-portability.ps1", "check-kit-docs.ps1", "run-mutation.ps1",
+        "check-release-evidence.ps1", "new-release-evidence.ps1", "check-platform-helpers.ps1"
     )
 }
 
@@ -987,6 +1225,32 @@ function Copy-UappKitDoc05 {
     Set-Content -LiteralPath $Destination -Value $text -NoNewline -Encoding utf8BOM
 }
 
+function ConvertTo-UappProcessArgument {
+    <#
+      .SYNOPSIS
+      `Start-Process -ArgumentList` へ渡す前に、引数を 1 個ずつ引用する。
+
+      .NOTES
+      **`Start-Process -ArgumentList` は配列を空白で結合するだけで引用しない**ので、
+      空白を含む引数（`D:\Proj With Space\app.apk` など）は**そのまま渡すと割れる**。
+      規則は Format-CliArg と同じ: `"` の直前の `\` は連続ぶんだけ倍にして `\"` で退避し、
+      末尾の `\` も倍にする（.NET の引数文字列の解釈規則は Unix でも同じ）。
+
+      **この関数を作った理由**（2026-09-12・レビュー 2 本が独立に実測）: 同じ規則が
+      `Start-UappBackgroundProcess` の中にだけ書かれていて、あとから作った `Invoke-UappAdb` へ
+      適用されていなかった。`adb install` の APK パスに空白があると 3 引数に割れ、
+      **導入先の Unity プロジェクトのパスに空白があるだけで必ず失敗する**（この開発リポの
+      パスには空白が無いので、ここでは絶対に踏めない）。**引用が要る場所は 1 か所にまとめる**。
+    #>
+    param([Parameter(Mandatory)][AllowEmptyCollection()][string[]]$ArgumentList)
+    $out = foreach ($a in $ArgumentList) {
+        $escaped = [regex]::Replace($a, '(\\*)"', { param($m) ($m.Groups[1].Value * 2) + '\"' })
+        $escaped = [regex]::Replace($escaped, '(\\+)$', { param($m) $m.Groups[1].Value * 2 })
+        '"' + $escaped + '"'
+    }
+    return @($out)
+}
+
 function Start-UappBackgroundProcess {
     <#
       .SYNOPSIS
@@ -1006,20 +1270,44 @@ function Start-UappBackgroundProcess {
         [Parameter(Mandatory)][string[]]$ArgumentList,
         [Parameter(Mandatory)][string]$LogPath
     )
-    # **`Start-Process -ArgumentList` は配列を空白で結合するだけ**（引用しない）ので、
-    # 空白を含む引数は割れる。ここで 1 個ずつ引用してから渡す（Format-CliArg と同じ規則:
-    # `"` の直前の `\` は連続ぶんだけ倍にして `\"` で退避、末尾の `\` も倍にする。
-    # .NET の引数文字列の解釈規則は Unix でも同じ）
-    $quoted = foreach ($a in $ArgumentList) {
-        $escaped = [regex]::Replace($a, '(\\*)"', { param($m) ($m.Groups[1].Value * 2) + '\"' })
-        $escaped = [regex]::Replace($escaped, '(\\+)$', { param($m) $m.Groups[1].Value * 2 })
-        '"' + $escaped + '"'
-    }
+    $quoted = ConvertTo-UappProcessArgument $ArgumentList
     if (Test-UappWindows) {
         return Start-Process -FilePath $FilePath -ArgumentList $quoted -PassThru -WindowStyle Hidden
     }
     return Start-Process -FilePath $FilePath -ArgumentList $quoted -PassThru `
         -RedirectStandardOutput $LogPath -RedirectStandardError ($LogPath + ".err")
+}
+
+function Merge-UappErrLog {
+    <#
+      .SYNOPSIS
+      Start-UappBackgroundProcess が分けて書いた <LogPath>.err を <LogPath> の末尾へ畳み、.err を消す。
+      畳む中身があったときだけ $true。
+
+      .NOTES
+      Unix では標準出力と標準エラーを同じファイルへ向けられない（.NET の仕様）ので 2 本になる。
+      **呼び手が .log だけを読むと、子が投げた例外の本文がどこにも現れない** ―
+      mac の観測（2026-09-12）: iOS 相が失敗したのに verify-ios-*.log は 5 行で終わっており、
+      エラー文は案内もされないまま .err にあった。**子の終了後に必ずこれを通す**。
+      Windows 分岐は出力を捨てるので .err は無く、何もしないで $false を返す。
+    #>
+    param([Parameter(Mandatory)][string]$LogPath)
+    $errPath = $LogPath + ".err"
+    if (-not (Test-Path -LiteralPath $errPath)) { return $false }
+    try {
+        $text = [System.IO.File]::ReadAllText($errPath)
+        $hasText = -not [string]::IsNullOrWhiteSpace($text)
+        if ($hasText) {
+            $name = Split-Path $errPath -Leaf
+            Add-Content -LiteralPath $LogPath -Value ("`n--- 標準エラー（$name より。子プロセスの例外はここに出る） ---`n" + $text)
+        }
+        Remove-Item -LiteralPath $errPath -Force -ErrorAction SilentlyContinue
+        return $hasText
+    } catch {
+        # 畳めなくても本流を壊さない。ただし場所は伝える（黙って消さない）
+        Write-Warning "標準エラーのログを畳めませんでした: $errPath（$_）"
+        return $false
+    }
 }
 
 function Resolve-UappFsPath {

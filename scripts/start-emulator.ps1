@@ -41,10 +41,13 @@ if (-not $script:adbExe) {
 # **初回もポーリングも同じ関数を通す**（片方だけ厳格にしても意味がない）
 function Get-EmulatorSerial {
     param([string]$StatePattern = "^emulator-\d+\s+device")
-    $output = @(& $script:adbExe devices)
-    if ($LASTEXITCODE -ne 0) {
-        throw "adb devices が失敗しました（終了コード $LASTEXITCODE）。adb server の状態を確認してください"
+    # **期限つき**（応答しない adb server に掴まると起動待ちが無期限になる。codex レビューの型）
+    $r = Invoke-UappAdb -AdbPath $script:adbExe -ArgumentList @("devices") -TimeoutSeconds 20
+    if ($r.TimedOut) { throw "adb devices が 20 秒以内に応答しません（adb server が固まっている可能性。adb kill-server を試してください）" }
+    if ($r.ExitCode -ne 0) {
+        throw "adb devices が失敗しました（終了コード $($r.ExitCode)）。adb server の状態を確認してください"
     }
+    $output = @($r.Lines)
     return @($output -match $StatePattern | ForEach-Object { ($_ -split "\s+")[0] })
 }
 
@@ -55,14 +58,15 @@ $serials = Get-EmulatorSerial
 foreach ($serial in $serials) {
     $name = $null
     foreach ($attempt in 1..2) {
-        $raw = (& $script:adbExe -s $serial emu avd name 2>$null | Select-Object -First 1 | Out-String).Trim()
-        if ($LASTEXITCODE -eq 0 -and $raw) { $name = $raw; break }
+        $r = Invoke-UappAdb -AdbPath $script:adbExe -ArgumentList @("-s", $serial, "emu", "avd", "name") -TimeoutSeconds 20
+        $raw = ($r.Lines | Select-Object -First 1 | Out-String).Trim()
+        if (-not $r.TimedOut -and $r.ExitCode -eq 0 -and $raw) { $name = $raw; break }
         if ($attempt -eq 1) { Start-Sleep -Seconds 1 }   # 起動直後は console がまだ応答しないことがある
     }
     if ($null -eq $name) {
         Write-Warning ("$serial の AVD 名を取得できませんでした。" +
                        "この端末が '$Avd' かどうか判定できないため、二重起動を避けて中止します" +
-                       "（`adb -s $serial emu avd name` を手で確認してください）")
+                       "（adb -s $serial emu avd name を手で確認してください）")
         exit 1
     }
     if ($name -eq $Avd) {
@@ -83,7 +87,7 @@ while ((Get-Date) -lt $deadline) {
     $now = Get-EmulatorSerial -StatePattern "^emulator-\d+\s+"   # 失敗は即座に例外（5 分待って誤診しない）
     $newSerial = $now | Where-Object { $before -notcontains $_ } | Select-Object -First 1
     if ($newSerial) {
-        $boot = (& $script:adbExe -s $newSerial shell getprop sys.boot_completed 2>$null | Out-String).Trim()
+        $boot = ((Invoke-UappAdb -AdbPath $script:adbExe -ArgumentList @("-s", $newSerial, "shell", "getprop", "sys.boot_completed") -TimeoutSeconds 20).Lines | Out-String).Trim()
         if ($boot -eq "1") {
             Write-Host "ブート完了: $newSerial（AVD: $Avd）"
             exit 0
