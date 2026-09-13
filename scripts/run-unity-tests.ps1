@@ -480,7 +480,7 @@ if ($Editor) {
             Start-Sleep -Seconds 5
             $st = Get-UnityCliStatus -Cli $unityCli -ProjectDir $projectDir -TimeoutSeconds $UnityCliProbeSeconds -GlobalArgs $cliGlobalArgs
             if ((Test-CliConnected -Status $st) -and $st.Json.data.instances[0].state -eq "ready") { break }
-            if ($sw.Elapsed.TotalSeconds -gt 600) { throw "エディタの Pipeline 接続待ちがタイムアウト（600秒）。Editor.log を確認" }
+            if ($sw.Elapsed.TotalSeconds -gt 600) { throw "エディタの Pipeline 接続待ちがタイムアウト（600秒）。Editor.log を確認（macOS なら画面ロック中でもこうなる。docs/ai-loop.md）" }
         }
         Write-Host "[$projectName] エディタ接続完了（$([int]$sw.Elapsed.TotalSeconds)秒）"
     }

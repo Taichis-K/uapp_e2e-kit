@@ -1169,7 +1169,7 @@ if (Test-Path -LiteralPath $configDest) {     # 既存・新規生成のどち�
 }
 
 Write-Host ""
-Write-Host "=== 残りの手動手順（[済]=導入済みを検出。詳細: docs/05-install-to-project.md） ==="
+Write-Host "=== 残りの手動手順（[済]=導入済みを検出 / [任意]=使う機能によって要る。詳細: docs/05-install-to-project.md） ==="
 if ($Mode -eq "editor") {
     Write-Host "モード: editor（エディタ直結E2Eのみ。Android ビルド・adb・AVD は使わない）"
 }
@@ -1179,8 +1179,9 @@ if ($Mode -eq "ios") {
         Write-Host "     ※ iOS の実行（build-ios / run-ios-e2e）は macOS のみ。このマシンでは導入までで、実行はチームの mac で行う"
     }
 }
-Write-Host "1. Packages/manifest.json に以下を追加（Unityバージョンに応じて）:"
-Write-Host "     $(Mark $inputSystemVer) com.unity.inputsystem（2022.3系:1.7.0 / Unity6系:1.14+）$(if ($inputSystemVer) { " → $inputSystemVer 導入済み" })"
+Write-Host "1. Packages/manifest.json のパッケージ（[未] は追加が要る。版は Unity バージョンに応じて）:"
+# inputsystem は任意（無くても計装は動く）。[未] と出すと、manifest を編集してはいけない導入先でも追加を促してしまう（#70）
+Write-Host "     $(if ($inputSystemVer) { '[済]' } else { '[任意]' }) com.unity.inputsystem（2022.3系:1.7.0 / Unity6系:1.14+。要るのは tap / pinch とキー・マウス・パッドの注入を使うときだけ）$(if ($inputSystemVer) { " → $inputSystemVer 導入済み" })"
 Write-Host "     $(Mark $newtonsoftVer) com.unity.nuget.newtonsoft-json: 3.2.1$(if ($newtonsoftVer) { " → $newtonsoftVer 導入済み" })（既存 Newtonsoft DLL があれば不要）"
 if ($Mode -eq "editor") {
     # [済] が意味するのは「tests の指すパスが実在する」だけ。既定 `tests` のままでも動くので

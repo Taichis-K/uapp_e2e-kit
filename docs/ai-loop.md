@@ -46,6 +46,7 @@ Android ビルドは1回十数分かかるため、③を回す頻度が高い�
   `starting-or-blocked`＝**起動途中かモーダルダイアログ待ちでどちらも失敗する**（画面を確認する）/
   `unknown`＝**プロセスを列挙できず判定できない**（理由は `warnings`。開いていない証拠が無いので
   占有されている前提で扱う＝どちらも実行しない）
+- **`-Editor` 系でエディタが応答しないとき（macOS）の候補**: ①Mac の画面ロック中 ― エディタが進まず pipeline のコマンドがタイムアウトする。ロックを解除すれば戻る ②WindowServer との接続が切れた ― `Editor.log` に `WindowServer event port death` が出る。モーダルが閉じないので、エディタを終了して開き直す。エディタを起動し直す前に `Editor.log`（`~/Library/Logs/Unity/`）を退避する（直前の 1 世代は `Editor-prev.log` に残るが、次の起動で上書きされる）
 - Unity CLI があればそれを、無ければ Unity 本体の `-batchmode -runTests` を自動で使う
   （エディタは `uapp_e2e/config/local.json` の editorRoots ＋ `ProjectVersion.txt` から解決）
 - **Unity CLI 側だけが壊れている場合は `-NoUnityCli`** で Unity 本体の経路に直接入る
