@@ -175,27 +175,22 @@ if ($defineFound) {
 Write-Host "2. com.unity.inputsystem / com.unity.nuget.newtonsoft-json が他で不要なら Packages\manifest.json から削除"
 # **com.unity.pipeline は案内から漏れていた**（導入先の指摘 2026-09-12）。run-e2e -Editor / run-unity-tests -Editor の
 # 初回に自動追加されるので、エディタ直結を使ったプロジェクトには残る。製品コードが参照しないなら消してよい
-# **「測れなかった」を「無い」にしない**（2026-09-12 のレビューが実測で指摘）。
-# manifest が壊れている / 読めないときに [済] と書くと、導入先は見に行かず残り続ける
-# ― `Get-UappEmulatorState` で none / running / unknown を分けたのと同じ理由
-$pipelineState = "none"   # none / present / unknown
-$pipelineWhy = ""
+# **「測れなかった」を「無い」にしない**（`Get-UappEmulatorState` と同じ理由）。
+# 判定は `Get-UappPipelinePackageState`（uapp-platform）へ寄せてある ―
+# **ここに埋めると象限を当てるのに実際の撤去が要る**（同じプロジェクトを 2 度測れない）
 $manifestForPipeline = Join-UappPath $target "Packages\manifest.json"
-if (Test-Path -LiteralPath $manifestForPipeline) {
-    try {
-        $mj = Get-Content -LiteralPath $manifestForPipeline -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-        if ($mj.dependencies -and ($mj.dependencies.PSObject.Properties.Name -contains "com.unity.pipeline")) { $pipelineState = "present" }
-    } catch {
-        $pipelineState = "unknown"
-        $pipelineWhy = $_.Exception.Message
-    }
-}
+$pipeline = Get-UappPipelinePackageState -ManifestPath $manifestForPipeline
+$pipelineState = $pipeline.State
+$pipelineWhy = $pipeline.Why
 if ($pipelineState -eq "present") {
     Write-Host "3. [残] com.unity.pipeline が Packages\manifest.json にある（run-e2e -Editor / run-unity-tests -Editor が初回に自動追加したもの）。"
     Write-Host "     エディタ直結を使わないなら行ごと削除してよい（製品コードは参照しない。Unity が packages-lock.json を整理する）"
 } elseif ($pipelineState -eq "unknown") {
-    Write-Host "3. [不明] Packages\manifest.json を読めませんでした（$pipelineWhy）。"
-    Write-Host "     com.unity.pipeline の行が残っていないか、中身を見て確かめてください"
+    # **観測と違う原因を書かない**（2026-09-13 のレビュー）。「ファイルが無い」を
+    # 「読めませんでした」と書くと、読み手は「あるが壊れている」と受け取り、
+    # さらに**存在しないファイルの中身を見ろ**という案内になる
+    Write-Host "3. [不明] com.unity.pipeline があるか判定できませんでした（$pipelineWhy）: $manifestForPipeline"
+    Write-Host "     パスが Unity プロジェクトのルートか、manifest が壊れていないかを確かめてください"
 } else {
     Write-Host "3. [済] com.unity.pipeline は Packages\manifest.json に見つからない"
 }

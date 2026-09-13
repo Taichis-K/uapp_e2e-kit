@@ -571,9 +571,9 @@ namespace E2EBridge
             // **同じ読み取り失敗を `readErrors` に 2 回数える**。`dump` / `texts` は 1 回なので
             // 口によって件数が食い違う ― レビューの実測で見つけた退行）。
             // 判定は `resolve` と**同じ 1 つの実装**を通す（口ごとに基準を持たない）
-            // **label は押せる側にだけ付ける**。親のコントロールがこの要素の文字を借りているなら、
-            // この item には付けない（`text` は残す）。付けると `Button > Text` の親子が同じ label で並び、
-            // 「label で探す」呼び手が毎回 2 件から選ぶことになる（2026-09-12 に mac が実画面で実測、ユーザー指摘）
+            // **ここでは候補を付けるだけ**。借りられた子の `label` を落とすのは 2 パス目（`SuppressBorrowedLabels`）で、
+            // **同じ応答の中に借り手が居るときだけ**落とす。ここで落とすと、借り手が hittable にならない構成で
+            // その文字を label から引けなくなる（1 パスだった版の欠陥。codex の設計選定）
             var label = LabelOf(go, text);
             if (!string.IsNullOrEmpty(label)) item["label"] = label;
 
@@ -1151,7 +1151,8 @@ namespace E2EBridge
         /// <para>**別の既知のコントロールの配下へは降りない** ― 降りると、複数のボタンを含む
         /// パネルが**最初の子ボタンのラベルを名乗る**。深さにも上限を置く（病的な階層で走査が伸びない）。
         /// **借りられた子孫（`Button > Text` の Text / `UIButton > UILabel` の UILabel）は `hittables` に出るが
-        /// `label` を持たない**（`IsLabelBorrowedByAncestor`）。label は押せる側にだけ付く。</para>
+        /// `label` を持たない** ― ただし**落とすのは借り手が同じ応答に居るときだけ**
+        /// （`SuppressBorrowedLabels`）。親が hittable にならない構成では子の `label` が残る。</para>
         ///
         /// <para>**非アクティブな子は見ない**。`hittables` はアクティブな要素の一覧なので、
         /// 隠れているラベルを返すと画面と食い違う。</para>
@@ -1183,7 +1184,9 @@ namespace E2EBridge
 
         /// <summary>
         /// この要素の**自身の文字**を、最も近い既知のコントロールの祖先が `label` として借りているか。
-        /// 真なら、この要素の item には `label` を付けない（`text` は残る）＝ **label は押せる側にだけ付く**。
+        /// **これは木だけの判定**で、`resolve` はこれで決める。`hittables` は**さらに「借り手が同じ応答に
+        /// 居るか」まで見てから**落とす（`IsLabelSuppressed`）ので、**借り手が hittable でない構成では
+        /// 結果が違う**（`resolve` だけが落とす）。
         /// </summary>
         ///
         /// <remarks>

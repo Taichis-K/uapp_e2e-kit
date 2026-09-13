@@ -49,10 +49,10 @@
 #   - **飛ばしたときの安全網はターゲットで違う（重要）**:
 #     - **シミュレータ**: ポートを待ち受けるプロセスを探し、**無ければ明示エラーで止まる**。
 #       待ち受けが指定 UDID 配下のアプリかどうかまで照合する（fail-closed）
-#     - **実機**: **その照合は無い**。確認しているのは**ホスト側の iproxy が LISTEN したこと**だけで、
-#       **端末上のアプリが待ち受けているかは pytest の前に見ていない**。
-#       アプリが起動していない場合、**接続するテストが落ちる形でしか現れない**
-#       （issue #46 の報告はこれ。`test_bridge_ping` の 1 件だけが失敗した）
+#     - **実機**: プロセスの照合は無い（**iproxy はアプリが起動していなくても LISTEN する**）ので、
+#       **トンネル越しに ping を 1 往復させて確かめる**（issue #53）。**-SkipInstall では応答が無ければ
+#       明示エラーで止まる**（20 秒）。通常経路は警告に留めて pytest に判断させる
+#       （issue #46 の報告は、この確認が無かった頃に `test_bridge_ping` の 1 件だけが失敗したもの）
 #   - **起動し直したいときは -SkipInstall を外す**（install も走る）。
 #     -Build との併用は禁止（旧ビルドを検証する偽の緑になるため、明示エラーで止まる）
 #
@@ -170,9 +170,9 @@ if ($Build -and $SkipInstall) {
 # **起動も行わない**ので、起動されている前提が崩れていると接続だけが失敗して原因が見えにくい
 # （導入先では test_bridge_ping の 1 件だけが落ちた）
 if ($SkipInstall) {
-    # **安全網はターゲットで違う**ので、そこも一緒に出す（実機には待ち受けの照合が無い）
+    # **安全網はターゲットで違う**ので、そこも一緒に出す（実機はプロセスの照合ではなく ping で確かめる）
     $skipNote = if ($Target -eq "device") {
-        "**実機では待ち受けの照合をしていません** — 起動していないと、接続するテストが落ちる形でしか現れません"
+        "実機ではトンネル越しに ping を確かめ、応答が無ければ明示エラーになります"
     } else {
         "起動していない場合は、待ち受けの照合で明示エラーになります"
     }
@@ -396,10 +396,9 @@ if ($isDevice) {
     if (@(& (Get-UappCommandPath "lsof") -nP "-iTCP:$HostPort" -sTCP:LISTEN -t 2>$null).Count) {
         throw "ホスト側ポート $HostPort は既に使用中です。-HostPort で別番号を指定してください"
     }
-    # **案内する .log は必ず畳んでから案内する**（Unix では標準エラーが <log>.err へ分かれる。
-    # 2026-09-12 に verify-all 側で塞いだのと同じ型が、こちらの 3 か所に残っていた）
+    # **入口の掃除は Start-UappBackgroundProcess がやる**（呼び手はしない。2026-09-13 に
+    # 「呼び手も消す」が完全な重複だと分かったので消した）。**呼び手に残るのは終了後に畳むことだけ**
     $script:tunnelLog = Join-UappPath $buildsDir "iproxy-$projectName.log"
-    $null = Merge-UappErrLog -LogPath $script:tunnelLog
     $tunnelProc = Start-UappBackgroundProcess -FilePath $iproxy `
         -ArgumentList @("$HostPort`:$port", "-u", $udid) `
         -LogPath $script:tunnelLog
@@ -415,7 +414,7 @@ if ($isDevice) {
         while ((Get-Date) -lt $deadline) {
             if ($tunnelProc.HasExited) {
                 throw ("iproxy が起動直後に終了しました（exit=$($tunnelProc.ExitCode)）。" +
-                       "詳細: $(Join-UappPath $buildsDir "iproxy-$projectName.log")")
+                       "詳細: $script:tunnelLog")
             }
             $listenPids = @(& $lsofPath -nP "-iTCP:$HostPort" -sTCP:LISTEN -t 2>$null)
             if ($listenPids.Count) {
@@ -429,10 +428,12 @@ if ($isDevice) {
             }
             Start-Sleep -Seconds 1
         }
-        if (-not $ready) { throw "iproxy がホスト側ポート $HostPort を待ち受けません（20 秒）" }
+        if (-not $ready) { throw "iproxy がホスト側ポート $HostPort を待ち受けません（20 秒）。詳細: $script:tunnelLog" }
     }
     catch {
-        Stop-UappProcessTree -ProcessId $tunnelProc.Id
+        # **止める → 終了を待つ → 1 回だけ畳む**（停止直後に畳むと最後の stderr を取りこぼす）。
+        # ここを飛ばすと「詳細: …log」と言われたファイルに理由が無い ― mac が v0.1.20 で観測した型
+        $null = Stop-UappChildAndFold -Proc $tunnelProc -LogPath $script:tunnelLog
         $tunnelProc = $null
         throw
     }
@@ -507,8 +508,10 @@ if ($isDevice) {
     }
     catch {
         # **この区間で落ちたら iproxy を残さない**（末尾の finally はここより後ろから有効になる。
-        # 直上のトンネル待機ループと同じ約束）。**Ctrl+C はここでは捕まらない**のも同じ性質
-        Stop-UappProcessTree -ProcessId $tunnelProc.Id
+        # 直上のトンネル待機ループと同じ約束）。**Ctrl+C はここでは捕まらない**のも同じ性質。
+        # **畳んでから変数を空にする** ― 空にすると末尾の finally も畳まないので、
+        # `.err` は次回の起動で消え、疎通失敗の理由がどこにも残らない（codex 2026-09-13）
+        $null = Stop-UappChildAndFold -Proc $tunnelProc -LogPath $script:tunnelLog
         $tunnelProc = $null
         throw
     }
@@ -724,19 +727,33 @@ function Stop-OsAgentAndFoldResult {
         # **エージェント側の失敗を結果へ合成する**。/stop で行儀よく終われば 0 になるので、
         # 非ゼロは「途中でクラッシュした」「XCTest が失敗を記録した」を意味する。
         # ここを見ないと、撮影や操作が壊れていても pytest の結果だけで成功表示になる
-        if ($script:agentProc.HasExited) {
-            if ($script:agentProc.ExitCode -ne 0) {
+        # **終了の仕方によらず、止めて・待ってから 1 回だけ畳む**（正常終了した回も stderr に
+        # 何か出ていることがある。先に畳んでから止めると最後の分を取りこぼし、二重追記にもなる）
+        # **分岐の材料は止める前に控える**。`Stop-UappChildAndFold` は終了を待つので、後で `HasExited` を見ると
+        # 強制終了した回も真になり「停止要求に応じず強制終了」に届かない（観測と違う原因を書く。2026-09-13 の差分読み）
+        $hadExited = $script:agentProc.HasExited
+        $exitedCleanly = $hadExited -and $script:agentProc.ExitCode -eq 0
+        $null = Stop-UappChildAndFold -Proc $script:agentProc -LogPath $script:agentLog
+        # **止めたあとも生きているかを見てから文言を選ぶ**（ヘルパは待っても終わらない子を畳まずに false を返す。
+        # それを捨てて「停止しました」と書くと観測と違う。読解レビュー 2026-09-13）
+        $stillRunning = $false
+        try { $stillRunning = -not $script:agentProc.HasExited } catch { }
+        if (-not $exitedCleanly) {
+            if ($hadExited) {
                 Write-Warning "OS エージェントが異常終了しました（exit=$($script:agentProc.ExitCode)。詳細: $script:agentLog）"
-                $script:agentFailed = $true
+            } elseif ($stillRunning) {
+                Write-Warning "OS エージェントが停止要求にも強制終了にも応じず、終了を確認できていません（PID $($script:agentProc.Id)。標準エラーは畳まずに $($script:agentLog).err に残しています）"
+            } else {
+                # 「停止要求から待っても終わっていなかった」は控えた時点の観測。その直後に自力で終わった可能性は残る
+                Write-Warning "OS エージェントが停止要求から 10 秒待っても終了していなかったため、強制終了しました（詳細: $script:agentLog）"
             }
-        } else {
-            Stop-UappProcessTree -ProcessId $script:agentProc.Id
-            Write-Warning "OS エージェントが停止要求に応じず強制終了しました（詳細: $script:agentLog）"
             $script:agentFailed = $true
         }
-        Write-Host "OS エージェントを停止しました"
+        if ($stillRunning) { Write-Host "OS エージェントの終了を確認できませんでした" } else { Write-Host "OS エージェントを停止しました" }
     }
-    if ($script:agentTunnel) { Stop-UappProcessTree -ProcessId $script:agentTunnel.Id }
+    if ($script:agentTunnel) {
+        $null = Stop-UappChildAndFold -Proc $script:agentTunnel -LogPath $script:agentTunnelLog
+    }
 }
 
 # --------------------------------------------------------------- OS レイヤーエージェント
@@ -747,6 +764,7 @@ $script:agentTunnel = $null
 $script:agentUrl = $null
 $script:agentToken = $null
 $script:agentLog = $null
+$script:agentTunnelLog = $null
 $script:agentFailed = $false
 $script:agentStopped = $false
 if ($OsAgent) {
@@ -861,7 +879,7 @@ if ($OsAgent) {
         # 早期終了はすべて配備の失敗とみなしてよい
         $agentAttempts = if ($isDevice) { 5 } else { 1 }
         for ($i = 1; $i -le $agentAttempts; $i++) {
-            $null = Merge-UappErrLog -LogPath $script:agentLog   # 前回の残骸を持ち越さない
+            # 入口の掃除は Start-UappBackgroundProcess がやる
             $script:agentProc = Start-UappBackgroundProcess -FilePath (Get-UappCommandPath "xcodebuild") `
                 -ArgumentList $agentArgs -LogPath $script:agentLog
             if (-not $agentProc) { break }
@@ -869,7 +887,13 @@ if ($OsAgent) {
             while ((Get-Date) -lt $earlyDeadline -and -not $agentProc.HasExited) { Start-Sleep -Seconds 3 }
             if (-not $agentProc.HasExited) { break }
             if ($i -lt $agentAttempts) {
-                Write-Warning "OS エージェントの配備に失敗（$i/$agentAttempts）。5 秒後に再試行します"
+                # **失敗した回の理由を退避する**（次の起動が .log を truncate するので、
+                # 畳んだだけでは消える。実機は 5 回試すので、残さないと読めるのは最後の 1 回だけ）。
+                # 2026-09-13 の実験レビューが遷移で実測した
+                $null = Stop-UappChildAndFold -Proc $script:agentProc -LogPath $script:agentLog
+                $attemptLog = "$script:agentLog.attempt$i"
+                try { Copy-Item -LiteralPath $script:agentLog -Destination $attemptLog -Force -ErrorAction Stop } catch { $attemptLog = $script:agentLog }
+                Write-Warning "OS エージェントの配備に失敗（$i/$agentAttempts）。5 秒後に再試行します（この回の詳細: $attemptLog）"
                 Start-Sleep -Seconds 5
             }
         }
@@ -885,7 +909,7 @@ if ($OsAgent) {
         # 実機はシミュレータと違いホストから直接届かないので USB トンネルを張る
         if ($isDevice) {
             $agentTunnelLog = Join-UappPath $buildsDir "iproxy-osagent-$projectName.log"
-            $null = Merge-UappErrLog -LogPath $agentTunnelLog
+            $script:agentTunnelLog = $agentTunnelLog
             $script:agentTunnel = Start-UappBackgroundProcess -FilePath (Get-UappCommandPath "iproxy") `
                 -ArgumentList @("$agentHostPort`:$OsAgentPort", "-u", $udid) `
                 -LogPath $agentTunnelLog
@@ -918,9 +942,12 @@ if ($OsAgent) {
     }
     catch {
         # **ここで失敗したらエージェントを残さない**（末尾の finally はまだ有効でない）
-        if ($agentTunnel) { Stop-UappProcessTree -ProcessId $agentTunnel.Id }
-        if ($agentProc) { Stop-UappProcessTree -ProcessId $agentProc.Id }
-        $script:agentProc = $null; $agentTunnel = $null
+        # **変数を空にする前に、止めて・待ってから畳む**。空にすると末尾の Stop-OsAgentAndFoldResult が
+        # 両方の `if` を素通りして**一度も畳まれない** ― この経路（起動直後の終了・6 分無応答）は
+        # いちばん失敗しやすいのに、案内した .log に理由が残らなかった（2026-09-13 の読解レビューが再現）
+        $null = Stop-UappChildAndFold -Proc $agentTunnel -LogPath $script:agentTunnelLog
+        $null = Stop-UappChildAndFold -Proc $agentProc -LogPath $script:agentLog
+        $script:agentProc = $null; $script:agentTunnel = $null
         throw
     }
 }
@@ -1062,8 +1089,17 @@ finally {
     }
     # **このスクリプトが張ったトンネルは必ず落とす**
     if ($tunnelProc) {
-        Stop-UappProcessTree -ProcessId $tunnelProc.Id
-        Write-Host "USB トンネルを停止しました (localhost:$HostPort)"
+        # **正常系でも畳む** ― 「動いたが stderr に何か出ていた」回を残す。
+        # mac が iPhone 8 で実測: **全件通った正常系で `.err` に 47 バイト**（Connection refused）、
+        # `.log` は 0 バイトだった。異常時だけ畳む形では残らない
+        $null = Stop-UappChildAndFold -Proc $tunnelProc -LogPath $script:tunnelLog
+        $tunnelAlive = $false
+        try { $tunnelAlive = -not $tunnelProc.HasExited } catch { }
+        if ($tunnelAlive) {
+            Write-Warning "USB トンネル（iproxy PID $($tunnelProc.Id)）の終了を確認できませんでした (localhost:$HostPort)"
+        } else {
+            Write-Host "USB トンネルを停止しました (localhost:$HostPort)"
+        }
     }
     # 例外で本文を抜けた場合の保険（正常系では pytest 直後に済んでいる。冪等なので二重呼び出し可）
     Stop-OsAgentAndFoldResult

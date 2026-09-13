@@ -1086,6 +1086,91 @@ function Get-UappKitTest {
       "test_bridge_smoke.py", "test_metrics_unit.py", "test_gestures_unit.py")
 }
 
+function Get-UappPipelinePackageState {
+    <#
+      .SYNOPSIS
+      `Packages\manifest.json` に `com.unity.pipeline` があるかを **none / present / unknown** で返す
+      （`@{ State; Why }`）。
+
+      .NOTES
+      **「測れなかった」を「無い」にしない**（`Get-UappEmulatorState` と同じ理由）。
+      unknown になるのは ①ファイルが無い ②読めない・JSON として壊れている
+      ③**JSON として読めたが中身が空／`dependencies` が無い**（`"" | ConvertFrom-Json` は
+      **例外を投げずに $null を返す**ので、これを catch 頼りにすると「無い」に化ける。
+      2026-09-13 の実験レビューが 8 象限で実測）。
+      **判定を関数にしてあるのは検証台を作るため** ― 呼び手（uninstall.ps1）の中に埋めると、
+      象限を当てるのに実際の撤去が要る（同じプロジェクトを 2 度測れない）。
+    #>
+    param([Parameter(Mandatory)][string]$ManifestPath)
+    if (-not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) {
+        return @{ State = "unknown"; Why = "ファイルが見つかりません" }
+    }
+    try {
+        $raw = Get-Content -LiteralPath $ManifestPath -Raw -ErrorAction Stop
+        $json = $raw | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        return @{ State = "unknown"; Why = $_.Exception.Message }
+    }
+    if ($null -eq $json) { return @{ State = "unknown"; Why = "中身が空です" } }
+    # **ルートが配列かは生の文字列で見る**。PowerShell は**1 要素の配列を展開する**ので、
+    # `[{...}]` は単一のオブジェクトとして代入され、型の検査では捕まらない（実測 2026-09-13）
+    if ($raw.TrimStart().StartsWith("[")) {
+        return @{ State = "unknown"; Why = "JSON のルートが配列です" }
+    }
+    # **型まで見る**（codex 2026-09-13）。`{"dependencies":"x"}` / `1` / `true` / 非空配列は
+    # **truthy なので素通りし、プロパティ名に無いから none** になっていた ―
+    # 「壊れた manifest を『無い』と断定する」を型違いで再生産する形
+    if ($json -isnot [System.Management.Automation.PSCustomObject]) {
+        return @{ State = "unknown"; Why = "JSON のルートがオブジェクトではありません（$($json.GetType().Name)）" }
+    }
+    $dep = $json.dependencies
+    if ($null -eq $dep) { return @{ State = "unknown"; Why = "dependencies がありません" } }
+    if ($dep -isnot [System.Management.Automation.PSCustomObject]) {
+        return @{ State = "unknown"; Why = "dependencies がオブジェクトではありません（$($dep.GetType().Name)）" }
+    }
+    if ($dep.PSObject.Properties.Name -contains "com.unity.pipeline") {
+        return @{ State = "present"; Why = "" }
+    }
+    return @{ State = "none"; Why = "" }
+}
+
+function Stop-UappChildAndFold {
+    <#
+      .SYNOPSIS
+      子プロセスを止め、**終了を待ってから** `<LogPath>.err` を**1 回だけ**畳む。
+
+      .NOTES
+      **停止要求の直後に畳むと取りこぼす**（codex 2026-09-13）。`Stop-UappProcessTree` は
+      終了を待たないので、Unix では**削除済みの inode へ書き続ける子の最後の stderr が失われる**。
+      逆に「畳んでから止めて、また畳む」形にすると二重に追記されうる。
+      **止める → 待つ → 1 回畳む**に統一する。`$Proc` が null でも `$LogPath` だけ畳める。
+      **待っても終わらなければ畳まない**（警告して `.err` を残し、`$false` を返す）。
+    #>
+    param(
+        [System.Diagnostics.Process]$Proc,
+        [string]$LogPath,
+        [int]$WaitSeconds = 10
+    )
+    # 待ち時間は 1 秒以上・ミリ秒換算で int に収まる範囲へ丸める（0 以下や桁あふれで WaitForExit が
+    # 例外になり、終わっている子まで「終わらない」扱いになっていた。実験レビュー 2026-09-13）
+    if ($WaitSeconds -lt 1) { $WaitSeconds = 1 }
+    if ($WaitSeconds -gt 2000000) { $WaitSeconds = 2000000 }
+    if ($Proc) {
+        try { if (-not $Proc.HasExited) { Stop-UappProcessTree -ProcessId $Proc.Id } } catch { }
+        $exited = $false
+        try { $exited = $Proc.WaitForExit($WaitSeconds * 1000) } catch { }
+        if (-not $exited) {
+            # **終わっていない子のログは畳まない**（mac の実測 2026-09-13）。生きている子の `.err` を畳むと、
+            # そのあと子が書いた分は移して消したファイルへ行き、**どこにも残らない**（`.err` は作り直されない）。
+            # 畳まずに残せば、子が終わったあとに読める（次の起動で消えるまでは）
+            try { Write-Warning "子プロセス（PID $($Proc.Id)）が $WaitSeconds 秒で終了しないので、標準エラーは畳まずに残します: $LogPath.err（.log には入りません。次に同じログで起動すると消えます）" } catch { }
+            return $false
+        }
+    }
+    if ($LogPath) { return [bool](Merge-UappErrLog -LogPath $LogPath) }
+    return $false
+}
+
 function Get-UappDevOnlyScript {
     <#
       .SYNOPSIS
@@ -1111,7 +1196,8 @@ function Get-UappDevOnlyScript {
         # oslayer/ の同梱と揃えて解除した。issue #27）
         "install-to-project.ps1", "package-kit.ps1", "publish-kit.ps1", "verify-all.ps1",
         "check-portability.ps1", "check-kit-docs.ps1", "run-mutation.ps1",
-        "check-release-evidence.ps1", "new-release-evidence.ps1", "check-platform-helpers.ps1"
+        "check-release-evidence.ps1", "new-release-evidence.ps1", "check-platform-helpers.ps1",
+        "check-all.ps1"
     )
 }
 
@@ -1271,6 +1357,15 @@ function Start-UappBackgroundProcess {
         [Parameter(Mandatory)][string]$LogPath
     )
     $quoted = ConvertTo-UappProcessArgument $ArgumentList
+    # **前回の標準エラーは、ここで消す**（2026-09-12・mac の提案）。呼び手の責務にしておくと
+    # 「入口で畳む」という誤りを書く動機が残る ― 実際に一度書いて、畳んだ本文が直後の
+    # -RedirectStandardOutput の truncate で消えた。**規則で禁じるより、書く理由を無くす**。
+    # 呼び手に残るのは「終了後に Merge-UappErrLog で畳む」1 つだけになる
+    Remove-Item -LiteralPath ($LogPath + ".err") -Force -ErrorAction SilentlyContinue
+    # **作業ファイル（`.err.merging`）も消す**（mac の指摘 2026-09-13）。`Merge-UappErrLog` は残っていた作業ファイルを
+    # 畳むので、ここで消さないと**前の走行が中断で残した標準エラーが、今回の走行の `.log` に混ざる**
+    # （読み手は走行を見分けられない）。「入口で両方消す／終了後に両方畳む」で揃える
+    Remove-Item -LiteralPath ($LogPath + ".err.merging") -Force -ErrorAction SilentlyContinue
     if (Test-UappWindows) {
         return Start-Process -FilePath $FilePath -ArgumentList $quoted -PassThru -WindowStyle Hidden
     }
@@ -1290,24 +1385,72 @@ function Merge-UappErrLog {
       mac の観測（2026-09-12）: iOS 相が失敗したのに verify-ios-*.log は 5 行で終わっており、
       エラー文は案内もされないまま .err にあった。**子の終了後に必ずこれを通す**。
       Windows 分岐は出力を捨てるので .err は無く、何もしないで $false を返す。
+
+      **起動の前に呼んではいけない**（mac の実測 2026-09-12）。畳んだ本文は `.log` の末尾に入るが、
+      次の `Start-UappBackgroundProcess` が `-RedirectStandardOutput` で**その `.log` を truncate する**ので
+      消える。**入口の掃除は `Start-UappBackgroundProcess` 自身がやる**ので、
+      **呼び手がすることは「子が終わってから畳む」だけ**（2026-09-13 に呼び手側の掃除を撤去した）。
     #>
     param([Parameter(Mandatory)][string]$LogPath)
     $errPath = $LogPath + ".err"
-    if (-not (Test-Path -LiteralPath $errPath)) { return $false }
+    # **消費は 1 回で確定させる**（codex 2026-09-13）。以前は「読む → 追記 → 削除（失敗は黙殺）」で、
+    # **削除に失敗しても true を返していた**ので、もう一度呼ばれると同じ本文を二重に追記した。
+    # **先に作業名へ移す**と、移せた回だけが消費した回になる（移せなければ `.err` は手つかずで残る＝情報を失わない）。
+    # `Test-Path` も try の中に入れる（外で例外になると呼び手へ漏れる）
+    $foldedAny = $false   # catch からも返すので try の外で初期化する
     try {
-        $text = [System.IO.File]::ReadAllText($errPath)
+        $consumed = $errPath + ".merging"
+        $name = Split-Path $errPath -Leaf
+        # **中断で残った作業ファイルは、読まずに消さない**（移してから削除するまでの間に落ちた回の
+        # 標準エラーはここにしか無い。以前は黙って消していた。2026-09-13 の差分読み）。
+        # 起動時に `Start-UappBackgroundProcess` が `.err` と一緒に消すので、**ふつうは同じ走行の中で畳みが中断したぶん**。
+        # ただしその削除は失敗を黙殺するので、**別の走行のぶんではないと断定しない**（区切り行にもそう書く。mac の指摘）。
+        # 時系列どおり `.merging` → `.err` の順に畳む。
+        # **先に畳みきってから消す**ので、追記に失敗すれば作業ファイルはそのまま残る。
+        # **追記には必ず -ErrorAction Stop を付ける** ― 呼び手の `$ErrorActionPreference` が Continue（verify-all）だと
+        # Add-Content の失敗が catch に入らず次の削除へ進み、**本文を .log に入れないまま消していた**（実験レビューが実測 2026-09-13）
+        if (Test-Path -LiteralPath $consumed) {
+            $stale = [System.IO.File]::ReadAllText($consumed)
+            if (-not [string]::IsNullOrWhiteSpace($stale)) {
+                Add-Content -LiteralPath $LogPath -Value ("`n--- 標準エラー（畳みが中断して残ったぶん。起動時に消せなかった場合は直前の走行のものの可能性があります。$name.merging より） ---`n" + $stale) -ErrorAction Stop
+                $foldedAny = $true
+            }
+            Complete-UappConsumedErrLog -Path $consumed
+        }
+        if (-not (Test-Path -LiteralPath $errPath)) { return $foldedAny }
+        Move-Item -LiteralPath $errPath -Destination $consumed -Force -ErrorAction Stop
+        $text = [System.IO.File]::ReadAllText($consumed)
         $hasText = -not [string]::IsNullOrWhiteSpace($text)
         if ($hasText) {
-            $name = Split-Path $errPath -Leaf
-            Add-Content -LiteralPath $LogPath -Value ("`n--- 標準エラー（$name より。子プロセスの例外はここに出る） ---`n" + $text)
+            Add-Content -LiteralPath $LogPath -Value ("`n--- 標準エラー（$name より。子プロセスの例外はここに出る） ---`n" + $text) -ErrorAction Stop
+            $foldedAny = $true
         }
-        Remove-Item -LiteralPath $errPath -Force -ErrorAction SilentlyContinue
-        return $hasText
+        Complete-UappConsumedErrLog -Path $consumed
+        return [bool]$foldedAny
     } catch {
-        # 畳めなくても本流を壊さない。ただし場所は伝える（黙って消さない）
-        Write-Warning "標準エラーのログを畳めませんでした: $errPath（$_）"
-        return $false
+        # **畳めなくても本流を壊さない**。`finally` から呼ばれることがあるので、
+        # **警告そのものが例外にならないようにする**（`$WarningPreference = 'Stop'` だと
+        # Write-Warning が送出し、本来の結果や例外を上書きする。codex 2026-09-13）
+        try { Write-Warning "標準エラーのログを畳めませんでした: $errPath（$_）" } catch { }
+        # 途中まで畳めていたらそれを返す（残っていた作業ファイルは入ったのに false、という食い違いを出さない）
+        return [bool]$foldedAny
     }
+}
+
+function Complete-UappConsumedErrLog {
+    <#
+      .SYNOPSIS
+      畳み終えた作業ファイル（`<log>.err.merging`）を片付ける。消せなければ別名へ退避する。
+
+      .NOTES
+      **消せないまま `.merging` の名前で残すと、次の `Merge-UappErrLog` が同じ本文をもう一度畳む**
+      （実験レビューが実測 2026-09-13。ウイルス対策ソフト等が一時的に掴んだとき）。
+      別名（`.done-<guid>`）へ移せれば二度と拾われない。移すこともできなければ、二重になりうることを警告で残す。
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    try { Remove-Item -LiteralPath $Path -Force -ErrorAction Stop; return } catch { }
+    try { Move-Item -LiteralPath $Path -Destination ($Path + ".done-" + [guid]::NewGuid().ToString("N")) -Force -ErrorAction Stop; return } catch { }
+    try { Write-Warning "畳み終えた作業ファイルを片付けられませんでした（次に畳むとき同じ本文がもう一度入ります）: $Path" } catch { }
 }
 
 function Resolve-UappFsPath {

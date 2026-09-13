@@ -152,7 +152,8 @@ Android ネイティブ座標（左上原点・物理ピクセル）へ変換が
   iOS はシミュレータが `simctl io`、実機は **iOS 16 以前なら `idevicescreenshot`**、
   **iOS 17 以降は OS レイヤーエージェント（自前の XCUITest ランナー）**
   （後者は端末側で「設定 → デベロッパ → UI オートメーションを有効」が要る）。
-  **ただし iOS の実行経路と OS エージェントは配布キットに未収録**（開発リポジトリ側の実装）。
+  **iOS の実行経路（`build-ios.ps1` / `run-ios-e2e.ps1`）と OS エージェント（`oslayer/`。
+  `run-ios-e2e.ps1 -OsAgent` が導入先でビルドする）は配布キットに同梱している**（どちらも macOS 専用）。
   **エディタ直結は OS 層ではなく Unity CLI 経由の撮影**で、Unity のフレームを撮る点はこのコマンドと
   同じ（ネイティブビューは写らない）。**このコマンドはそれらが使えない場合の代替**であって、
   上位互換ではない（撮影手段の選択順は docs/07-viewer.md の表）
@@ -227,8 +228,10 @@ UI 階層をツリー JSON で返す。AI がテストを書くための「地�
     借りない ― 「押せる要素」の集合（下の表）と完全には揃っておらず、`interactable` が付く範囲と同じ。
     **0.1.19 は境界を `raycastTarget` で判定していた**ため、Unity 標準の Button（子 Text の
     `raycastTarget` は既定 true）に label が付かなかった
-  - **`label` は押せる側にだけ付く。** コントロールが子孫の文字を借りたとき、**その子孫の item には
-    `label` を付けない**（`text` は残る）。Unity 標準の Button は子 Text（`raycastTarget=true`）自身も
+  - **同じ応答の中に借り手が居るときだけ、借りられた側の `label` を落とす**（`text` は残る）。
+    **「押せる側にだけ付く」と言い切れるのは、押せる親がその応答に出ているときだけ** ―
+    親の中心を別の要素が覆っていて親が hittable にならない構成では、**子の `label` は残る**
+    （落とすとその文字が `label` から引けなくなるため）。Unity 標準の Button は子 Text（`raycastTarget=true`）自身も
     hittable なので、両方に付けると親子が同じ label で並び、呼び手が毎回 2 件から選ぶことになる
     （2026-09-12 に実画面で実測）。NGUI の `UIButton > UILabel` も同じ扱い（UILabel は `text` だけ）。
     コントロールでない容器の下の文字（`Panel > Text`）は誰にも借りられないので自身の label を持つ。
@@ -338,11 +341,22 @@ uGUI を独自のルートでまとめていることもある。だから**型�
 
 ### resolve
 
-**`resolve` も `label` を返す**（`hittables` と同じ規則で決まる。借用と抑止の説明は `hittables` の節）。
 単一オブジェクトの位置と到達可能性。
+
+**`label` も返す**。**候補の作り方は `hittables` と同じ**（自身の文字、無ければ
+既知のコントロールだけが子孫から借りる）が、**重複をならす条件が違う**:
+
+- `hittables` … **同じ応答の中に借り手が居るときだけ**、借りられた側の `label` を落とす
+  （借り手が当たり判定に出ない構成では、子の `label` を残す ― 落とすと**その文字を `label` から引けなくなる**。
+  `text` は item に残り、`dump` / `texts` からも引けるので、失われるのは `label` での探索だけ）
+- `resolve` … **1 件しか返さないので応答の中を見られない**。祖先が借りていれば落とす
+
+したがって**借り手が hittable でない構成では、`resolve` だけが `label` を落とす**。
+`label` で探すときは `hittables` の結果を使い、`resolve` は確認に使うこと。
+
 ```json
 → {"cmd": "resolve", "args": {"path": "StartButton"}}
-← {"path": "Canvas/StartButton", "active": true,
+← {"path": "Canvas/StartButton", "active": true, "label": "はじめる",
    "rect": {...}, "center": {"x": 390, "y": 230},
    "hittable": true}
 ```

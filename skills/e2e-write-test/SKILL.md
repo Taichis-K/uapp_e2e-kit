@@ -68,9 +68,11 @@ description: UnityアプリのE2Eテストを規約に沿って新規作成す�
      候補を絞ったら `resolve` の `hittable` / `interactable` で操作対象として確かめる
    - **子孫の文字を借りるのは自身に `Selectable`（uGUI）／`UIButton`（NGUI）がある要素だけ**。
      コントロールでない容器（`Panel > Card(Image) > Text`）は借りない
-   - **`label` は押せる側にだけ付く** ― コントロールが子孫の文字を借りたら、その子孫（Unity 標準の Button の
-     子 Text / NGUI の UILabel）の item には `label` が付かない（`text` は残る）。`Button > Text` を label で
-     探すと親の 1 件だけが出る
+   - **同じ応答の中に借り手が居るときだけ、借りられた側の `label` が落ちる**（`text` は残る）。
+     `Button > Text` を label で探すと親の 1 件だけが出る。**ただし親が hittable にならない構成では
+     子の `label` が残る**（落とすとその文字を label から引けなくなるため）。
+     **`resolve` は 1 件しか返せないので祖先が借りていれば落とす** ＝ その構成では
+     `hittables` に label があるのに `resolve` では消える。**探すのは `hittables`、確かめるのは `resolve`**
    - **それでも一意ではない** ― 同じ文字のコントロールが 2 つあれば 2 件並ぶ。
      **`path` の長さ・深さ・center で機械的に 1 つへ決めない**。`interactable` の有無と `path` の意味で選び、
      **同名候補が残るときは自動で確定せず失敗させる**
