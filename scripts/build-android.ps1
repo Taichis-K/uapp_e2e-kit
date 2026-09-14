@@ -6,7 +6,8 @@ param(
     [string]$Project = "unity-nis",   # このリポジトリ内のサンプル名（uapp_e2e開発用）
     [string]$ProjectPath,             # 任意の場所のUnityプロジェクト（実プロジェクト導入時はこちら）
     [string]$UnityPath,
-    [string]$Output,
+    [string]$Output,                  # 成果物のパス（既定 Builds/<名前>.apk）。Gradle プロジェクトを書き出す構成では
+                                      # 書き出し先ディレクトリを渡す（中のファイルの日時と計装の登録簿を検査する）
     [string]$ExecuteMethod,           # ビルドメソッドの明示指定（自前パイプラインを使う場合）
     [switch]$Release,
     [switch]$VerifyApkOnly,           # ビルドせず、既存 APK のブリッジ登録検査だけ行う
@@ -110,28 +111,56 @@ function Assert-BridgeRegisteredInApk {
                    "ありません: $ApkPath`n  ビルド生成物が壊れています。ビルドキャッシュを削除して再ビルドしてください")
         }
         $reader = New-Object System.IO.StreamReader($entry.Open())
-        try { $json = $reader.ReadToEnd() | ConvertFrom-Json } finally { $reader.Dispose() }
-        # **アセンブリと名前空間まで照合する**。導入先プロジェクトに同名の BridgeBootstrap.Init が
-        # あると、E2EBridge の登録が欠けていても素通りしてしまう（この検査の目的が消える）
-        $hit = @($json.root | Where-Object {
-            $_.assemblyName -eq "E2EBridge.Runtime" -and $_.nameSpace -eq "E2EBridge" -and
-            $_.className -eq "BridgeBootstrap" -and $_.methodName -eq "Init"
-        })
-        if ($hit.Count -eq 0) {
-            throw ("計装入りビルドなのに、起動時メソッド登録簿に E2EBridge.Runtime の BridgeBootstrap.Init がありません: $ApkPath`n" +
-                   "  このままでは E2EBridge が起動せず、テストは全件接続エラーになります。`n" +
-                   "  原因は「計装アセンブリがコンパイル対象から外れたまま player が作られた」こと。既知の経路は 2 つ:`n" +
-                   "   (1) エディタのアクティブターゲットが Android でないまま起動した" +
-                   "（`UAPP_E2E_BRIDGE` は Android 限定 define のため）。このスクリプトは `-buildTarget Android` を" +
-                   "渡して防いでいるので、自前パイプライン（-ExecuteMethod）を使う場合は同じ引数を渡すこと。`n" +
-                   "   (2) 直前に失敗したビルドの Library キャッシュ汚染。以下を削除して再ビルドしてください:`n" +
-                   "    <プロジェクト>/Library/Bee, ScriptAssemblies, BuildPlayerData, PlayerDataCache と <プロジェクト>/Temp")
-        }
-        Write-Host "[$projectName] 計装の起動登録を確認（E2EBridge.Runtime / BridgeBootstrap.Init）"
+        try { $jsonText = $reader.ReadToEnd() } finally { $reader.Dispose() }
+        Assert-BridgeRegistryJson -JsonText $jsonText -Source $ApkPath
     }
     finally {
         $zip.Dispose()
     }
+}
+
+function Assert-BridgeRegisteredInExport {
+    <#
+      .SYNOPSIS
+      書き出した Gradle プロジェクト（exportAsGoogleAndroidProject）の起動時メソッド登録簿に
+      E2EBridge の自動起動が載っていることを検査する（APK の検査と同じ照合）。
+
+      .NOTES
+      登録簿の場所は `unityLibrary/src/main/assets/bin/Data/RuntimeInitializeOnLoads.json`
+      （2026-09-14 に Unity 6000.3.6f1 の書き出しで実在を確認。他の版では未確認）。
+      無ければ止める ― 書き出しでないディレクトリを渡している、または書き出しが壊れている候補がある。
+    #>
+    param([Parameter(Mandatory)][string]$ExportDir)
+    $registry = Join-UappPath $ExportDir "unityLibrary" "src" "main" "assets" "bin" "Data" "RuntimeInitializeOnLoads.json"
+    if (-not [System.IO.File]::Exists($registry)) {
+        throw ("-Output のディレクトリに起動時メソッド登録簿がありません: $registry`n" +
+               "  Gradle プロジェクトの書き出し先ならここにあります（Unity 6000.3.6f1 で確認）。候補: 書き出し先でないディレクトリを渡している / " +
+               "書き出しが途中で壊れている / Unity の版で置き場所が違う。`n" +
+               "  データを外へ置く非標準構成を意図している場合のみ -SkipBridgeCheck で検査を外し、run-e2e の疎通テストで実接続を確認してください")
+    }
+    Assert-BridgeRegistryJson -JsonText ([System.IO.File]::ReadAllText($registry)) -Source $registry
+}
+
+function Assert-BridgeRegistryJson {
+    param([Parameter(Mandatory)][string]$JsonText, [Parameter(Mandatory)][string]$Source)
+    $json = $JsonText | ConvertFrom-Json
+    # **アセンブリと名前空間まで照合する**。導入先プロジェクトに同名の BridgeBootstrap.Init が
+    # あると、E2EBridge の登録が欠けていても素通りしてしまう（この検査の目的が消える）
+    $hit = @($json.root | Where-Object {
+        $_.assemblyName -eq "E2EBridge.Runtime" -and $_.nameSpace -eq "E2EBridge" -and
+        $_.className -eq "BridgeBootstrap" -and $_.methodName -eq "Init"
+    })
+    if ($hit.Count -eq 0) {
+        throw ("計装入りビルドなのに、起動時メソッド登録簿に E2EBridge.Runtime の BridgeBootstrap.Init がありません: $Source`n" +
+               "  このままでは E2EBridge が起動せず、テストは全件接続エラーになります。`n" +
+               "  原因は「計装アセンブリがコンパイル対象から外れたまま player が作られた」こと。既知の経路は 2 つ:`n" +
+               "   (1) エディタのアクティブターゲットが Android でないまま起動した" +
+               "（`UAPP_E2E_BRIDGE` は Android 限定 define のため）。このスクリプトは `-buildTarget Android` を" +
+               "渡して防いでいるので、自前パイプライン（-ExecuteMethod）を使う場合は同じ引数を渡すこと。`n" +
+               "   (2) 直前に失敗したビルドの Library キャッシュ汚染。以下を削除して再ビルドしてください:`n" +
+               "    <プロジェクト>/Library/Bee, ScriptAssemblies, BuildPlayerData, PlayerDataCache と <プロジェクト>/Temp")
+    }
+    Write-Host "[$projectName] 計装の起動登録を確認（E2EBridge.Runtime / BridgeBootstrap.Init）"
 }
 
 # Unity バージョンは ProjectVersion.txt（Unity自身が維持する正）から読む
@@ -230,10 +259,11 @@ if (-not $AllowRunningEmulator -and $env:UAPP_E2E_ALLOW_RUNNING_EMULATOR -ne "1"
 
 # ビルドメソッド: サンプル（本リポジトリ配置）は Sample.Editor、
 # 実プロジェクトはキット同梱の汎用エントリ（E2EBridge/Editor/BuildEntry.cs）
-if (-not $ExecuteMethod) {
-    $ExecuteMethod = if ($isSample) { "Sample.Editor.BuildScript.BuildAndroid" }
-                     else { "E2EBridge.Editor.BuildEntry.BuildAndroid" }
-}
+$defaultExecuteMethod = if ($isSample) { "Sample.Editor.BuildScript.BuildAndroid" }
+                        else { "E2EBridge.Editor.BuildEntry.BuildAndroid" }
+if (-not $ExecuteMethod) { $ExecuteMethod = $defaultExecuteMethod }
+# 既定のメソッドは必ず -buildOutput へ書く（BuildEntry / サンプルの BuildScript）ので、成果物が無ければ異常として扱える
+$usesDefaultMethod = ($ExecuteMethod -eq $defaultExecuteMethod)
 
 # **`-buildTarget Android` を必ず渡す**。これが無いと Unity は「最後に使った構成」で起動し、
 # **プラットフォーム固有の条件付きコンパイルとロードされるアセンブリがその構成に従う**（Unity 公式マニュアル）。
@@ -264,23 +294,69 @@ $process = Start-Process -FilePath $UnityPath -ArgumentList $unityArgs -Wait -Pa
 # **成果物の鮮度を見る**。終了コードと登録簿だけでは「今回のビルドが作ったもの」であることを言えない ―
 # Unity が 0 で終わったのに何も書かなければ、前回の APK がそのまま「ビルド成功」になる
 # （2026-09-12 に mac が偽 Unity で実測: 08-05 の APK で緑が出た。「成果物の鮮度を見ない」型は以前にも踏んでいる）
+# **自前のメソッドで成果物が無いことは失敗にしない**（#73）。Gradle プロジェクトを書き出す構成（exportAsGoogleAndroidProject）では
+# Unity は APK を出さず、自前のメソッドは -buildOutput を読まないこともある。偽の緑になるのは「古い成果物が残っている」
+# ときなので、**あるものはタイムスタンプで今回更新されたかを確かめ、無いものは推測しない**。
+# ただし**既定のメソッドは必ず -buildOutput へ書く**ので、無ければ従来どおり失敗にする（レビューの指摘）。
+# -Output がディレクトリ（書き出した Gradle プロジェクト）なら**中の最新ファイル**で見る ―
+# 実測（2026-09-14・テストプロジェクト）: 再書き出しでディレクトリ自体の更新日時は変わらず、中のファイルは毎回新しくなる。
+# なお再書き出しは launcher/build を消さないので、gradlew の APK を -Output に渡すと（2 回目以降は）前回の APK を見て「古い」になる。
+# 存在の判定は .NET で行う（PowerShell のプロバイダは大小文字だけ違う隣を拾うことがある。uapp-platform.ps1 の注記）
 $freshnessFailure = $null
+$outputFull = Resolve-UappFsPath $Output
+$outputIsFile = [System.IO.File]::Exists($outputFull)
+$outputIsDir = (-not $outputIsFile) -and [System.IO.Directory]::Exists($outputFull)
 if ($process.ExitCode -eq 0) {
-    $apkItem = Get-Item -LiteralPath $Output -ErrorAction SilentlyContinue
-    if (-not $apkItem) {
-        $freshnessFailure = "Unity は終了コード 0 で終わりましたが、成果物がありません: $Output（ログ: $logFile）"
-    } elseif ($apkItem.LastWriteTime -lt $buildStarted) {
-        $freshnessFailure = ("Unity は終了コード 0 で終わりましたが、成果物がビルド開始（" + $buildStarted.ToString("HH:mm:ss") +
-                             "）より古いままです: $Output（" + $apkItem.LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss") +
-                             "）。今回のビルドは何も書いていません（ログ: $logFile）")
+    if (-not $outputIsFile -and -not $outputIsDir) {
+        if ($usesDefaultMethod) {
+            $freshnessFailure = "Unity は終了コード 0 で終わりましたが、成果物がありません: $Output（ログ: $logFile）"
+        } else {
+            Write-Host ("[$projectName] 成果物がありません: $Output。自前のメソッド（-ExecuteMethod）なので失敗にはせず、" +
+                        "成果物の鮮度と計装の登録簿は検査していません（Unity の終了コード 0 で判定）。" +
+                        "Gradle プロジェクトを書き出す構成なら -Output に書き出し先ディレクトリを渡すと検査します。" +
+                        "run-e2e へは後段で作った APK を -Apk で渡すこと")
+        }
+    } elseif ($outputIsDir -and $outputFull.TrimEnd('\', '/') -match '\.(apk|aab)$') {   # 末尾の区切り（foo.apk/）でも判定する
+        $freshnessFailure = ("-Output は .apk / .aab の名前なのに、ディレクトリができています: $Output。" +
+                             "APK としては使えません（run-e2e は入れられない）。候補: Gradle プロジェクトの書き出し設定" +
+                             "（exportAsGoogleAndroidProject）が有効なまま APK を出すメソッドでビルドした（ログ: $logFile）")
+    } else {
+        $stamp = $null
+        try {
+            if ($outputIsDir) {
+                $stamp = (Get-UappTreeFile -Path $outputFull | ForEach-Object { [System.IO.File]::GetLastWriteTime($_) } |
+                          Measure-Object -Maximum).Maximum
+            } else {
+                $stamp = [System.IO.File]::GetLastWriteTime($outputFull)
+            }
+        } catch {
+            $freshnessFailure = "成果物の更新日時を読めませんでした: $Output（$($_.Exception.Message)）"
+        }
+        if (-not $freshnessFailure) {
+            if ($outputIsDir -and -not $stamp) {
+                $freshnessFailure = "Unity は終了コード 0 で終わりましたが、-Output のディレクトリの中にファイルが 1 つもありません: $Output（ログ: $logFile）"
+            } elseif ($stamp -lt $buildStarted) {
+                $freshnessFailure = ("Unity は終了コード 0 で終わりましたが、成果物" + $(if ($outputIsDir) { "（ディレクトリの中の最新ファイル）" } else { "" }) +
+                                     "の更新日時がビルド開始（" + $buildStarted.ToString("yyyy-MM-dd HH:mm:ss") + "）より前です: $Output（" +
+                                     $stamp.ToString("yyyy-MM-dd HH:mm:ss") + "）。ビルド開始以降に更新されたファイルがありません（ログ: $logFile）" +
+                                     $(if ($outputIsFile) { "。APK を後段（gradlew 等）で作る構成なら、-Output には Gradle プロジェクトの書き出し先ディレクトリを渡してください" } else { "" }))
+            } elseif ($outputIsDir) {
+                Write-Host ("[$projectName] 成果物はディレクトリ: $Output（中の最新ファイル " + $stamp.ToString("yyyy-MM-dd HH:mm:ss") +
+                            "＝ビルド開始以降に更新されたファイルがある）")
+            }
+        }
     }
 }
 $bridgeCheckFailure = $null
-if ($process.ExitCode -eq 0 -and -not $freshnessFailure -and -not $Release -and -not $SkipBridgeCheck) {
-    try { Assert-BridgeRegisteredInApk -ApkPath $Output }
+$hasArtifact = $outputIsFile -or $outputIsDir
+if ($process.ExitCode -eq 0 -and $hasArtifact -and -not $freshnessFailure -and -not $Release -and -not $SkipBridgeCheck) {
+    try {
+        if ($outputIsDir) { Assert-BridgeRegisteredInExport -ExportDir $outputFull }
+        else { Assert-BridgeRegisteredInApk -ApkPath $outputFull }
+    }
     catch { $bridgeCheckFailure = $_ }
 }
-elseif ($SkipBridgeCheck -and -not $Release) {
+elseif ($SkipBridgeCheck -and -not $Release -and $hasArtifact) {
     Write-Host "[$projectName] ブリッジ登録検査をスキップ（-SkipBridgeCheck 指定。run-e2e の疎通テストで実接続を確認すること）"
 }
 
@@ -288,7 +364,8 @@ elseif ($SkipBridgeCheck -and -not $Release) {
 $emitHelper = Join-UappPath $PSScriptRoot "emit-status.ps1"
 if (Test-Path -LiteralPath $emitHelper -PathType Leaf) {
     . $emitHelper
-    $apkSize = if (Test-Path -LiteralPath $Output -PathType Leaf) { (Get-Item -LiteralPath $Output).Length } else { $null }
+    $artifactPath = if ($hasArtifact) { $Output } else { $null }   # 無い成果物のパスを残さない
+    $apkSize = if ($outputIsFile) { ([System.IO.FileInfo]::new($outputFull)).Length } else { $null }
     # exitCode には登録簿検査の結果まで反映する（Unity が 0 でも検査で落ちれば失敗として記録）
     $reportedExit = if ($process.ExitCode -ne 0) { $process.ExitCode }
                     elseif ($freshnessFailure -or $bridgeCheckFailure) { 1 }
@@ -298,7 +375,7 @@ if (Test-Path -LiteralPath $emitHelper -PathType Leaf) {
         project      = $projectName
         exitCode     = $reportedExit
         durationSec  = [math]::Round(((Get-Date) - $buildStarted).TotalSeconds, 1)
-        artifactPath = $Output
+        artifactPath = $artifactPath
         sizeBytes    = $apkSize
         logPath      = $logFile
     }
@@ -311,4 +388,5 @@ if ($process.ExitCode -ne 0) {
 }
 if ($freshnessFailure) { throw $freshnessFailure }
 if ($bridgeCheckFailure) { throw $bridgeCheckFailure }
-Write-Host "[$projectName] ビルド成功: $Output"
+if ($hasArtifact) { Write-Host "[$projectName] ビルド成功: $Output" }
+else { Write-Host "[$projectName] ビルド成功（Unity の終了コード 0。成果物は無い）" }

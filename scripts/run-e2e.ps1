@@ -1134,7 +1134,7 @@ if ($r.TimedOut) {
 if ($r.ExitCode -ne 0) { throw "デバイスが接続されていません (adb devices で確認。exit=$($r.ExitCode))" }
 
 if (-not $SkipInstall) {
-    if (-not (Test-Path -LiteralPath $Apk)) { throw "APK がありません: $Apk （先に build-android.ps1 -Project $projectName を実行）" }
+    if (-not (Test-Path -LiteralPath $Apk)) { throw "APK がありません: $Apk （先に build-android.ps1 -Project $projectName を実行。APK を後段の gradlew 等で作る構成なら、その APK を -Apk で渡す）" }
     $apkBytes = (Get-Item -LiteralPath $Apk).Length
     Write-Host "[$projectName] インストール中: $Apk （$([math]::Round($apkBytes / 1MB)) MB）"
 

@@ -324,7 +324,10 @@ Unity CLI が無い / Unity 6 未満の場合は以下の手動手順で行う�
 
 1. ビルド: `uapp_e2e\scripts\build-android.ps1`（初回はIL2CPPで10分超。**エミュレーターは止めた状態で始める** ―
    動いていると開始を拒否する。AVD とプロジェクトが別ディスクにある等、奪い合いが無い環境なら
-   `-AllowRunningEmulator`（または `UAPP_E2E_ALLOW_RUNNING_EMULATOR=1`）で外せる）
+   `-AllowRunningEmulator`（または `UAPP_E2E_ALLOW_RUNNING_EMULATOR=1`）で外せる）。
+   **Gradle プロジェクトを書き出す構成**（`exportAsGoogleAndroidProject`。APK は後段の gradlew が作る）では、
+   自前のメソッドを `-ExecuteMethod` で渡し、`-Output` に書き出し先ディレクトリを渡す（中のファイルの日時と計装の登録簿を検査する）。
+   gradlew で作った APK は `run-e2e.ps1 -Apk <APK>` で渡す
 2. エミュレーター起動 → `uapp_e2e\scripts\run-e2e.ps1`（テスト未作成なら ping 疎通のみ。
    5a で Player Settings に足した define をビルドスクリプト付与へ戻す場合はここで外す）
 
