@@ -438,7 +438,7 @@ Set-Content -LiteralPath (Join-UappPath $scriptsLocal "README.md") -Encoding utf
   ただし `uninstall.ps1 -Purge` は uapp_e2e\ 全体を消すので、そこには含まれる
 - 逆に `uapp_e2e\scripts\` はキット所有で、**更新で上書き・uninstall で丸ごと削除**される。
   自作分をそこへ置かないこと
-- 自作テストの置き場は `uapp_e2e\driver	ests\`（同じくプロジェクト所有）
+- 自作テストの置き場は `uapp_e2e\driver\tests\<名前>\`（例 project\。同じくプロジェクト所有。直下はキット同梱テスト）
 '@
 Write-Host "  [OK] uapp_e2e\scripts-local（導入先の自作スクリプト置き場・更新と削除の対象外）"
 # **配るスクリプトを列挙しない**。v0.1.6 で追加した unity-editor-status.ps1 が
@@ -997,6 +997,9 @@ $localJsonDone = Test-Path -LiteralPath (Join-UappPath $kit "config\local.json")
 function Test-GitignoreEntries([string]$file, [string]$relPrefix) {
     if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { return $false }
     $p = [regex]::Escape($relPrefix)
+    # docs/05 の「キットをコミットしない」例は /uapp_e2e/* でまとめて除外するので、その行も [済] と数える
+    # （その例では local.json も Builds/ も否定パターンで戻していない。#75 のレビュー）
+    if (Select-String -Path $file -Pattern "^/?${p}uapp_e2e/\*\s*$" -Quiet) { return $true }
     ((Select-String -Path $file -Pattern "^/?${p}uapp_e2e/config/local\.json\s*$" -Quiet) -and
      (Select-String -Path $file -Pattern "^/?${p}uapp_e2e/Builds/?\s*$" -Quiet))
 }
@@ -1253,6 +1256,7 @@ Write-Host "5. $(Mark $gitignoreDone) .gitignore に追加: uapp_e2e/config/loca
 # 再包含されることもある。判定できないことを [済] に含めて読ませない
 Write-Host "     （判定はパターンの有無まで。既にコミット済みのファイルは行を足しても追跡され続けるので、"
 Write-Host "     その場合は git rm --cached が別途必要）"
+Write-Host "     ほかに何をコミットするか（キットをコミットしない運用の例・自作テストの置き場所）: uapp_e2e\docs\05-install-to-project.md「複数のマシンで使う・コミットの判断材料」"
 Write-Host "6. $(Mark (-not $portNote)) 待受ポートが他と重ならないこと（devicePort / editorBridgePort / iosSimulatorPort）"
 if ($portNote) { Write-Host "     → $portNote" }
 Write-Host "     （同一デバイスに計装アプリを複数入れる場合も devicePort をアプリごとに分ける）"

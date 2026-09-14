@@ -50,16 +50,17 @@ Homebrew python の `pip install --user --break-system-packages` だけで、ス
 ├── .agents/skills/              Codex用スキル（同一内容。$e2e-setup 等で呼び出し。Codex CLI v0.94.0以降）※-Agents codex/both
 ├── .claude/rules/uapp-e2e.md    軽量ルール（uapp_e2e/CLAUDE.md への参照。本体CLAUDE.mdの書き換え不要）※-Agents claude/both
 ├── AGENTS.md                    （任意・-RootAgentsMd 指定時のみ新規作成。既存があれば一切変更しない）
-└── uapp_e2e/                    E2Eキット（git管理。ただし下記gitignore対象を除く）
+└── uapp_e2e/                    E2Eキット（何をコミットするかは「複数のマシンで使う・コミットの判断材料」の節）
     ├── CLAUDE.md                AI向け運用ガイド（エージェント共通。プロジェクトのCLAUDE.mdから @uapp_e2e/CLAUDE.md で参照）
     ├── AGENTS.md                Codex等向けポインタ（uapp_e2e/ をCWDに起動した場合に読まれる）※-Agents codex/both
-    ├── e2e-config.json          プロジェクト仕様（git管理）
+    ├── e2e-config.json          プロジェクト仕様（プロジェクト所有）
     ├── docs/                    プロトコル仕様・AI運用・導入マニュアル
     ├── scripts/                 build-android / run-e2e / start-emulator
-    ├── driver/                  Pythonドライバ + tests/（自アプリのテストをここに書く）
+    ├── scripts-local/           自作の運用スクリプト（プロジェクト所有）
+    ├── driver/                  Pythonドライバ + tests/（自アプリのテストは tests/<名前>/ に分けて置く）
     ├── config/local.sample.json 実行環境設定テンプレ
-    ├── config/local.json        ← 各自コピーして作成（gitignore）
-    └── Builds/                  ← ビルド成果物（gitignore）
+    ├── config/local.json        ← 各自コピーして作成（マシンごと・コミットしない）
+    └── Builds/                  ← ビルド成果物（マシンごと・コミットしない）
 ```
 
 ## 一番簡単な導入方法（AIに任せる）
@@ -252,7 +253,7 @@ copy config\local.sample.json config\local.json   # 各自の環境に合わせ�
 | `editorRoots` | Unity のインストール先ルート（C/D混在可、配列で列挙） |
 | `editorOverrides` | プロジェクト別のエディタパス個別指定（Hub管理外の配置向け） |
 
-`.gitignore` に `uapp_e2e/config/local.json` と `uapp_e2e/Builds/` を追加すること。
+`uapp_e2e/config/local.json` と `uapp_e2e/Builds/` はコミットしない（`.gitignore` の例は「複数のマシンで使う・コミットの判断材料」の節）。
 
 ### 6. 疎通確認
 
@@ -336,7 +337,7 @@ AVDとエディタ、複数エディタの同時運用のポート設計は [doc
   （導入はせず照合だけ）。終了コードは 改変・不在なし=0 / あり=1 / manifest が無い=2。
   判定は更新時の警告とまったく同じ関数を使う（表示と警告で数え方が違わない）
 - **manifest のハッシュはテキストの改行を LF に正規化してから取っている**。
-  Windows で導入・記録 → commit → mac で LF チェックアウト → 更新、の経路で
+  Windows で導入・記録 → commit → mac で LF チェックアウト → 更新、の経路で（manifest はマシンごとのファイルなのでコミットしない運用を勧めるが、コミットしていた場合も誤発火しない）
   編集していないファイルが一斉に「改変された」になるのを防ぐため。
   **素の `Get-FileHash` / `sha256sum` の値と直接比べても、CRLF を含むファイルは一致しない** —
   自前で突き合わせると「ほぼ全件が不一致」に見えるので、照合は上の `-VerifyManifest` で行うこと
@@ -347,8 +348,10 @@ AVDとエディタ、複数エディタの同時運用のポート設計は [doc
 
 | 区分 | 対象 | 更新時の挙動 |
 |---|---|---|
-| **キット所有** | `Assets/uapp_e2e/E2EBridge/`・`uapp_e2e/driver/e2e_driver/`・`uapp_e2e/scripts/`・`uapp_e2e/docs/`・`uapp_e2e/CLAUDE.md`/`AGENTS.md`/`SETUP.md`/`VERSION`・`.claude/skills/e2e-*`・`.agents/skills/e2e-*`・`.claude/rules/uapp-e2e.md`・`uapp_e2e/driver/tests/test_journey_unit.py`/`test_adb_ui.py`/`test_client_unit.py`/`test_bridge_smoke.py` | **上書き更新**（手を入れない前提。変更したい場合はキット側へ還元する） |
-| **プロジェクト所有** | `uapp_e2e/e2e-config.json`・`uapp_e2e/driver/tests/` の自作テスト・**`uapp_e2e/scripts-local/` の自作運用スクリプト**・`uapp_e2e/config/local.json`・`uapp_e2e/Builds/`（ジャーニー記録含む）・ルート `AGENTS.md`（`-RootAgentsMd` で作成した場合も以後は触らない） | **触らない** |
+| **キット所有** | `Assets/uapp_e2e/E2EBridge/`・`uapp_e2e/driver/e2e_driver/`・`uapp_e2e/driver/pytest.ini`/`requirements.txt`・`uapp_e2e/scripts/`・`uapp_e2e/docs/`・`uapp_e2e/oslayer/`・`uapp_e2e/CLAUDE.md`/`AGENTS.md`/`SETUP.md`/`VERSION`・`uapp_e2e/config/local.sample.json`・`uapp_e2e/scripts-local/README.md`・`.claude/skills/e2e-*`・`.agents/skills/e2e-*`・`.claude/rules/uapp-e2e.md`・キット同梱テスト `uapp_e2e/driver/tests/test_journey_unit.py`/`test_adb_ui.py`/`test_client_unit.py`/`test_bridge_smoke.py`/`test_metrics_unit.py`/`test_gestures_unit.py`（版で増えることがある） | **上書き更新**（手を入れない前提。変更したい場合はキット側へ還元する） |
+| **初回のみ生成** | `uapp_e2e/e2e-config.json`・`uapp_e2e/driver/tests/conftest.py`（キット取り込みの1行＋プロジェクト追記領域）・`-IncludeSampleTests` で入れたサンプルテスト（`driver/tests/test_smoke.py` 等。テストの内訳では自作に数えられる。既定の uninstall でも残る） | 既存があれば**保持**（フィクスチャの実体は `e2e_driver` パッケージ側にあるため、conftest を更新しなくてもキットの新機能が届く） |
+| **プロジェクト所有** | 自作テスト（`uapp_e2e/driver/tests/<名前>/` に分けて置く）・**`uapp_e2e/scripts-local/` の自作運用スクリプト**・ルート `AGENTS.md`（`-RootAgentsMd` で作成した場合も以後は触らない） | **触らない** |
+| **マシンごと** | `uapp_e2e/config/local.json`・`uapp_e2e/Builds/`（ジャーニー記録含む）・`uapp_e2e/kit-manifest.json`（`-Agents`・OS・版で中身が変わる）・`uapp_e2e/oslayer/UappOsAgent/DerivedData/` | 触らない（manifest は毎回作り直す）。**コミットしない** |
 
 ### キットが配布をやめたファイル（issue #42）
 
@@ -371,8 +374,6 @@ AVDとエディタ、複数エディタの同時運用のポート設計は [doc
 - **例外は開発専用スクリプト**（キットには同梱されない、開発リポジトリだけの `.ps1`）です。
   あれは**キット自身が置いたと分かっていて、かつ未改変のときだけ**削除します
   （配らないものが導入先に残り続けないため）
-
-| **初回のみ生成** | `uapp_e2e/driver/tests/conftest.py`（キット取り込みの1行＋プロジェクト追記領域） | 既存があれば**保持**（フィクスチャの実体は `e2e_driver` パッケージ側にあるため、conftest を更新しなくてもキットの新機能が届く） |
 
 **自作の運用スクリプトは `uapp_e2e/scripts-local/` へ置く**（installer が README つきで作る）。
 `uapp_e2e/scripts/` はキット所有で、**更新で上書きされ、`uninstall.ps1` はディレクトリごと削除する** —
@@ -412,6 +413,96 @@ AVDとエディタ、複数エディタの同時運用のポート設計は [doc
 
 `Assets/uapp_e2e/E2EBridge` はプロトコル互換（`ping.bridge` のバージョン、後方互換の追加のみ）を
 保って更新されるため、計装入りビルドの再ビルドは「ブリッジに新機能が必要になったとき」だけでよい。
+
+## 複数のマシンで使う・コミットの判断材料（issue #75）
+
+**キットが決めるのは次の 3 つだけ。何をコミットするかは導入先が決める**（構成・CI・チームの事情はキットには分からないため）。
+
+1. **マシンごとに違うものはコミットしない**: `uapp_e2e/config/local.json`・`uapp_e2e/Builds/`・`uapp_e2e/kit-manifest.json`・`uapp_e2e/oslayer/UappOsAgent/DerivedData/`・`__pycache__/`・`.pytest_cache/`
+2. **自分のものはキットのものと分けて置く**（下の表）。分けてあれば、コミットするかどうかをディレクトリ単位で決められる
+3. キット所有のファイル（上の所有権の表）は更新で上書きされる
+
+### 自分のものを置く場所
+
+| 自分のもの | 置き場所 | 理由 |
+|---|---|---|
+| テスト | `uapp_e2e/driver/tests/<名前>/`（例 `project/`）。**`<名前>` は Python の識別子**（ハイフン不可。`from tests.<名前>.<モジュール> import` が使えなくなる）。**`<名前>` も、テストと補助モジュールのファイル名（拡張子を除く）も、キット同梱テストの名前（`test_client_unit` 等）と重ねない** | `driver/tests/` 直下はキット同梱テストの場所で、版で増える。サブディレクトリでも `tests` の指定のまま収集される。pytest の既定の import モードはモジュール名をファイル名だけで決めるので、同じ名前が 2 つあると `import file mismatch` で収集ごと止まる。run-e2e のテストの内訳は名前でキット同梱かを判定するので、ディレクトリ名が重なると自作を同梱に数える |
+| fixture の追加・差し替え | `uapp_e2e/driver/tests/<名前>/conftest.py`。**`from e2e_driver.pytest_journey import *` を書かない** | 直下の `tests/conftest.py` が既に読み込んでいる。2 か所に書くと `option names {'--journey'} already added` で pytest が起動しないか収集で止まる。サブディレクトリの conftest の fixture は自分のテストにだけ効き、キット同梱テストの前提を変えない |
+| コマンドラインオプションの追加・セッション単位や収集のフック | 直下の `uapp_e2e/driver/tests/conftest.py` の追記領域（初回のみ生成なので更新で消えない） | サブディレクトリの conftest に書くと、`tests` の指定しだいで読まれる時期が変わり、オプションが `unrecognized arguments` になったりフックが呼ばれなかったりする。収集のフックはキット同梱テストも受け取る |
+| 自分のテストだけを回す | `e2e-config.json` の `tests` を `tests/<名前>` に。一時的に絞るなら `run-e2e -PytestArgs` で `-k`、または `--ignore` / `--deselect` に**収集ルートの配下のパス**（`tests/test_xxx.py`） | `-PytestArgs` にパスを渡しても、run-e2e は `tests` の値も渡すので絞れない。`--ignore=tests` のように収集ルート自体を渡しても効かない |
+| 運用スクリプト | `uapp_e2e/scripts-local/` | `scripts/` はキット所有 |
+| アセット | `Assets/uapp_e2e/` の外 | `Assets/uapp_e2e/` はキットの置き場所 |
+| 共有しない私物 | `.git/info/exclude` か、リポジトリの外 | exclude のパターンは**リポジトリのルートが起点**（`.gitignore` の例とは起点が違う。Unity プロジェクトがサブディレクトリなら `/<Unity プロジェクトのディレクトリ>/uapp_e2e/scripts-local/<名前>` の形）。**exclude した私物は、同じ名前のファイルが後でコミットされると checkout / pull で警告なしに上書きされる**ので、消えて困るものはリポジトリの外へ |
+
+既存の導入先で自作テストを `driver/tests/` 直下に置いているなら、サブディレクトリへ移す。順序:
+
+1. 自作テストと補助モジュールを `tests/<名前>/` へ移す
+2. `tests/conftest.py` に足した **fixture** は `tests/<名前>/conftest.py` へ移してよい（star-import の行は移さない）。**オプションの追加やフックは `tests/conftest.py` に残す**
+3. `e2e-config.json` の `tests` がファイルを名指ししていたら、移した先のパスに直す（installer を実行し直すと、実在しないパスを [未] で知らせる）
+4. `-IncludeSampleTests` のサンプルを育てて移したなら、以後の installer に `-IncludeSampleTests` を付けない（直下に同じ名前ができて収集が止まる）
+
+### 判断の材料
+
+- **`package` と iOS の bundle id**: `e2e-config.json` の `package` は、Android の起動（`am start`）と iOS（シミュレータの `.app` との照合、`build-ios -Target device` の bundle id の既定）の両方が使う。
+  Android と iOS で値が違うなら、iOS の実機ビルドは `config/local.json` の `iosDeviceAppId`（マシンごと）か `-AppId` で渡す。
+  iOS のシミュレータは `package` と `.app` の bundle id が一致しないと止まるので、その場合は `e2e-config.json` をマシンごとに持つ（コミットしない）
+- **Android のフレーバーで package が変わる**: `e2e-config.json` の `package` を回すフレーバーに合わせる。コミットした値と違うなら、マシンごとに持つ
+- **`e2e-config.json` をマシンごとに持つと**、共通の値（ポート・`orientation`・`uiType`・`tests`・`productionGuard.devDefine`）も各マシンで揃える運用になる。
+  `productionGuard.devDefine` を書き忘れたマシンでは本番混入ガードが効かない。1 ファイルをコミットして、iOS 実機の bundle id だけ `iosDeviceAppId` で渡す選び方もある（この場合 `package` は Android の値なので、iOS のシミュレータは使えず、installer の `-Mode ios` は ProjectSettings の iOS の bundle id と合わないと案内する）
+- **define**: キットのビルドスクリプト（`build-android.ps1` / `build-ios.ps1` の既定エントリ）を通らずに自前のビルドメニュー等でビルドするなら、`UAPP_E2E_BRIDGE` を自分で付ける（付けないと計装が入らず、接続エラーになる）
+- **キット一式をコミットするか**:
+  - コミットする: どのマシンも同じ版になる。計装のコードがリポジトリに入る（CI のビルドに `UAPP_E2E_BRIDGE` が入らないかを確認する）
+  - コミットしない: マシンごとに installer を実行する。**版をマシン間で揃えるのは人の運用**（`uapp_e2e/VERSION` を見る）。clone したら最初に installer（キットが無いと pytest は動かない）
+- **`-Agents` と `kit-manifest.json`**: `-Agents` の選び方で `.claude/`・`.agents/` の有無と manifest の中身が変わる。manifest はコミットしない
+- **`Assets/uapp_e2e.meta`（フォルダの .meta）**: キットは配らないので Unity がマシンごとに別の GUID で作る。キットをコミットしないなら無視する。
+  **中身をコミットしないのに .meta だけコミットしない**（キットの無いマシンで Unity が「asset can't be found」として消し、その削除がコミットされうる）
+- **`.gitignore` の置き場所**: パターンの先頭の `/` は、その `.gitignore` があるディレクトリが起点。Unity プロジェクトがリポジトリのサブディレクトリにあるなら、Unity プロジェクトのディレクトリの `.gitignore` に書く
+
+### 例: キットをコミットしないで運用する（複数のマシン・プラットフォーム）
+
+1. 各マシンで zip から installer を実行する（`-Agents` はマシンごとに選んでよい）。キットの版はマシン間で揃える
+2. 自分のテストを `uapp_e2e/driver/tests/project/`、fixture を `tests/project/conftest.py`、運用スクリプトを `scripts-local/` に置く
+3. Unity プロジェクトのディレクトリの `.gitignore` に下の例を書き、`tests/conftest.py`・`tests/project/`・`scripts-local/`・`e2e-config.json` をコミットする
+4. `e2e-config.json` の値がマシン（プラットフォーム）で違うなら、コミットせずマシンごとに持つ。**そのときは例の `!/uapp_e2e/e2e-config.json` の行を消す**（残すとマシンごとの値がコミットされる）
+5. ほかのマシンは pull してから installer を実行する
+
+```gitignore
+# Unity プロジェクトのディレクトリの .gitignore（先頭の / はこのディレクトリが起点）
+/Assets/uapp_e2e/
+/Assets/uapp_e2e.meta
+/uapp_e2e/*
+!/uapp_e2e/e2e-config.json
+!/uapp_e2e/scripts-local/
+/uapp_e2e/scripts-local/README.md
+!/uapp_e2e/driver/
+/uapp_e2e/driver/*
+!/uapp_e2e/driver/tests/
+/uapp_e2e/driver/tests/*
+!/uapp_e2e/driver/tests/conftest.py
+!/uapp_e2e/driver/tests/project/
+__pycache__/
+.pytest_cache/
+.DS_Store
+/.claude/skills/e2e-*/
+/.agents/skills/e2e-*/
+/.claude/rules/uapp-e2e.md
+```
+
+否定パターン（`!`）は、親ディレクトリが除外されていると効かない（git の仕様）。上の順序はそのためで、入れ替えない。
+確かめるときは `git check-ignore -q <パス>` の**終了コード**（0＝無視される・1＝無視されない）で見る。`-v` の出力と終了コードは「どれかの規則に当たったか」を表す（否定パターンに当たって無視されないパスでも 0、どの規則にも当たらなければ 1）ので、無視されるかの判定には使わない。
+
+### 例: キット一式をコミットする
+
+この構成でも**各マシンで installer を実行する**（`kit-manifest.json` は installer が作るマシンごとのファイル。無いと run-e2e のテストの内訳が出ず、`-RequireProjectTests` は判定できずに失敗し、`-VerifyManifest` は 2 を返す）。
+
+```gitignore
+/uapp_e2e/config/local.json
+/uapp_e2e/Builds/
+/uapp_e2e/kit-manifest.json
+/uapp_e2e/oslayer/UappOsAgent/DerivedData/
+__pycache__/
+.pytest_cache/
+```
 
 ## 注入モード（1 つのキットを多数の clone で使い回す）
 

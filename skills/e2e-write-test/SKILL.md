@@ -5,7 +5,9 @@ description: UnityアプリのE2Eテストを規約に沿って新規作成す�
 
 # E2Eテストの新規作成
 
-`uapp_e2e/driver/tests/` に pytest でテストを書く。規約は `uapp_e2e/CLAUDE.md` 参照。
+`uapp_e2e/driver/tests/<名前>/`（例 `project/`。既にあればそこ）に pytest でテストを書く。規約は `uapp_e2e/CLAUDE.md` 参照。
+`driver/tests/` 直下はキット同梱テストの場所なので置かない。`<名前>` は Python の識別子（ハイフン不可）。テストと補助モジュールのファイル名はキット同梱のものと重ならないものにする（ディレクトリが違っても同じ名前が 2 つあると pytest の収集が止まる）。
+fixture を足すときはそのサブディレクトリの `conftest.py` に書き、`from e2e_driver.pytest_journey import *` は書かない（直下の conftest が読み込み済みで、二重に書くと pytest が起動しない）。
 
 ## 手順（この順番を守る）
 

@@ -185,9 +185,16 @@ if ($isDevice) {
         # e2e-config.json はプロジェクト直下ではなく uapp_e2e\ 直下にある）
         $cfgPath = Join-UappPath $root "e2e-config.json"
         if (-not (Test-Path -LiteralPath $cfgPath)) { $cfgPath = Join-UappPath $projectPath "e2e-config.json" }
-        if (Test-Path -LiteralPath $cfgPath) { $AppId = (Get-Content -LiteralPath $cfgPath -Raw | ConvertFrom-Json).package }
+        if (Test-Path -LiteralPath $cfgPath) {
+            $AppId = (Get-Content -LiteralPath $cfgPath -Raw | ConvertFrom-Json).package
+            # package は Android の起動にも使う値。Android と iOS で違う構成では、ここで食い違う（issue #75）
+            if ($AppId) {
+                Write-Host ("[$projectName] 実機の bundle id に e2e-config.json の package（$AppId）を使います" +
+                            "（-AppId も local.json の iosDeviceAppId も無いため。Android と値が違うなら iosDeviceAppId に書く）")
+            }
+        }
     }
-    if (-not $AppId) { throw "実機ビルドの bundle id を決められません（-AppId か e2e-config.json の package）" }
+    if (-not $AppId) { throw "実機ビルドの bundle id を決められません（-AppId / config\local.json の iosDeviceAppId / e2e-config.json の package のどれか）" }
 }
 
 # エディタ解決: local.json の editorOverrides → editorRoots から探索（build-android.ps1 と同型）

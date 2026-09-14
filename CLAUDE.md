@@ -26,7 +26,9 @@ Codex 等は `uapp_e2e/AGENTS.md`（同）から参照される。
 ```
 
 **自作の運用スクリプトは `scripts-local\` へ置く**（`scripts\` はキット所有で、更新の上書きと
-`uninstall.ps1` の削除対象。自作分を置くと消える）。自作テストの `driver\tests\` と同じ扱い。
+`uninstall.ps1` の削除対象。自作分を置くと消える）。**自作テストは `driver\tests\<名前>\`（例 `project\`）に分けて置く**
+（直下はキット同梱テストの場所。fixture はそのサブディレクトリの `conftest.py` に書き、`from e2e_driver.pytest_journey import *` は書かない）。
+何をコミットするかの判断材料と `.gitignore` の例は `docs\05-install-to-project.md` の「複数のマシンで使う・コミットの判断材料」。
 
 **`scripts\` などに自作を置いても改変警告は出ない**（v0.1.14 から。`kit-manifest.json` へは
 **キットが実際に配ったファイルだけ**が載る）。**ただし `uninstall.ps1` は今もディレクトリごと消す**
@@ -146,9 +148,10 @@ python -m e2e_driver.journey ..\Builds\journey    # → report.html 生成（詳
 
 ## 設定
 
-- `e2e-config.json` — プロジェクト仕様（package / tests / 画面向き / devicePort / editorBridgePort）。git管理。
+- `e2e-config.json` — プロジェクト仕様（package / tests / 画面向き / devicePort / editorBridgePort）。プロジェクト所有
+  （値がマシンやプラットフォームで違うならマシンごとに持つ。docs/05 の「複数のマシンで使う・コミットの判断材料」）。
   同一デバイスに計装アプリが複数あるときは devicePort をアプリごとに分ける
-- `config/local.json` — 実行環境（AVD名 / ホスト側ポート / Unityエディタの場所）。**git管理外**。無ければ `local.sample.json` をコピーして作る
+- `config/local.json` — 実行環境（AVD名 / ホスト側ポート / Unityエディタの場所）。**マシンごと・コミットしない**。無ければ `local.sample.json` をコピーして作る
 
 ## E2Eテスト規約（AI向け・必読）
 

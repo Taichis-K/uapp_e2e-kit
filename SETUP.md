@@ -255,7 +255,8 @@ Codex ユーザーでルート `AGENTS.md` が無いプロジェクトは `-Root
      **例外はエディタ直結**: iOS プラットフォームのまま Play で使うなら iOS ターゲットへの
      付与が要る（エディタはアクティブターゲットの define でコンパイルするため。Windows でも可）。
      その場合、**BuildEntry を通さない本番 iOS ビルドには計装が混入する**ので本番前に外す運用を明確に。**運用に頼らず機械で止める**なら `e2e-config.json` に `"productionGuard": { "devDefine": "<開発版ビルドの目印 define>" }` を書く （`UAPP_E2E_BRIDGE` があるのにその define が無いビルドをプリプロセスで失敗させる。**既定は無効**・外すときは環境変数 `UAPP_E2E_SKIP_PRODUCTION_GUARD=1`。詳細は docs/05）
-4. `.gitignore` に `uapp_e2e/config/local.json` と `uapp_e2e/Builds/` を追加
+4. `uapp_e2e/config/local.json` と `uapp_e2e/Builds/` はコミットしない。**ほかに何をコミットするかは導入先が決める**
+   （判断材料・自作テストの置き場所・`.gitignore` の例は `uapp_e2e/docs/05-install-to-project.md` の「複数のマシンで使う・コミットの判断材料」）
 5. `.claude/rules/uapp-e2e.md` と `uapp_e2e/AGENTS.md` が配置されていることを確認（installer が配置する。
    これらが `uapp_e2e/CLAUDE.md` への参照導線となるため、**プロジェクト本体の CLAUDE.md は書き換えない**。
    既存のルート AGENTS.md への自動追記もしない — 統合はユーザーに提案し判断を仰ぐ）

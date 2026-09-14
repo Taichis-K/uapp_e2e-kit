@@ -108,12 +108,12 @@ if ($Purge) {
             Remove-Reported $oslayerDir "uapp_e2e\oslayer"
         }
     }
+    # キット同梱テストは一覧を installer / package-kit と共有する（固定で書くと test_gestures_unit.py のように漏れる）。
+    # conftest.py はキットが初回だけ作り導入先が拡張するので消さない
+    $kitTestRels = @(Get-UappKitTest | Where-Object { $_ -ne "conftest.py" } | ForEach-Object { "driver\tests\$_" })
     foreach ($rel in @("scripts", "driver\e2e_driver", "docs",
                        "CLAUDE.md", "AGENTS.md", "SETUP.md", "VERSION", "kit-manifest.json",
-                       "driver\pytest.ini", "driver\requirements.txt",
-                       "driver\tests\test_journey_unit.py", "driver\tests\test_adb_ui.py",
-                       "driver\tests\test_client_unit.py", "driver\tests\test_bridge_smoke.py",
-                       "driver\tests\test_metrics_unit.py",
+                       "driver\pytest.ini", "driver\requirements.txt") + $kitTestRels + @(
                        "config\local.sample.json", "config\e2e-config.sample.json",
                        # scripts-local は README だけキット所有。**ディレクトリは消さない**
                        # （中身は導入先の自作スクリプト＝プロジェクト所有。上の一覧に
