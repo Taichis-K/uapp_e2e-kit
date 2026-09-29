@@ -587,7 +587,7 @@ sequenceDiagram
 | `NO_EVENTSYSTEM` | `ugui_event` の送出先が無い（シーンに EventSystem が無い）。**同じ文字列が `resolve` の `blockedBy` 値としても使われる**が、そちらはエラーではなく「押せない理由」 |
 | `NGUI_NOT_PRESENT` | `ngui_event` を呼んだが NGUI がビルドに入っていない |
 | `INPUT_BACKEND_LEGACY` | Input System への注入が届かない（パッケージはあるが `activeInputHandler: 0`）。**直し方は Player Settings の変更** |
-| `INPUT_SYSTEM_NOT_PRESENT` | Input System への注入が使えない（`com.unity.inputsystem` 未導入）。**直し方はパッケージの追加**。UI 操作だけなら不要（`ugui_event` / `ngui_event` を使う） |
+| `INPUT_SYSTEM_NOT_PRESENT` | Input System への注入が使えない（`com.unity.inputsystem` 未導入）。**直し方はパッケージの追加**。UI 操作だけなら不要（`ugui_event` / `ngui_event` を使う）。**アプリが `Input.GetKey` を直読みしていて UI 操作だけでは足りないなら `ai-loop.md` の「アプリ独自の入力層へ届かせる」** |
 | `PROPERTY_NOT_READABLE` | プロパティは在るが**読めない**（getter が無い）。`NOT_FOUND` とは**直し方が違う** ― 名前ではなく、書き込み専用か、**IL2CPP の Managed Stripping で getter だけ落とされている**。後者は `link.xml` でその型を保持すれば読める |
 | `TIMEOUT` | メインスレッド 30 秒無応答 |
 | `INTERNAL` | 予期しない例外（message にスタックトレース） |

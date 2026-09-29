@@ -310,8 +310,8 @@ function Get-PipelineVersion {
         } catch { }
     }
     # 配布キットのハブには unity-nis が無いので、ここへ落ちるのが通常経路。
-    # **キットが検証した版を既定にする**（docs/05 の記載と揃える）
-    return "0.4.0-exp.1"
+    # **キットが検証した版を既定にする**（run-e2e.ps1 の版差メッセージの「検証済みの組み合わせ」と揃える。docs/05 は版を書いていない）
+    return "0.7.0-exp.1"
 }
 
 function Test-PipelinePackagePresent([string]$Target) {

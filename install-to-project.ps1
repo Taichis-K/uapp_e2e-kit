@@ -998,8 +998,10 @@ function Test-GitignoreEntries([string]$file, [string]$relPrefix) {
     if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { return $false }
     $p = [regex]::Escape($relPrefix)
     # docs/05 の「キットをコミットしない」例は /uapp_e2e/* でまとめて除外するので、その行も [済] と数える
-    # （その例では local.json も Builds/ も否定パターンで戻していない。#75 のレビュー）
-    if (Select-String -Path $file -Pattern "^/?${p}uapp_e2e/\*\s*$" -Quiet) { return $true }
+    # （その例では local.json も Builds/ も否定パターンで戻していない。#75 のレビュー）。
+    # ディレクトリ丸ごと（/uapp_e2e/ または /uapp_e2e。どちらもディレクトリに一致する。後者はファイルにも一致）も [済]
+    # （v0.1.24 のリリース後に「表示だけ [未] のまま」と分かった。無視そのものは効いている）
+    if (Select-String -Path $file -Pattern "^/?${p}uapp_e2e(/\*|/|)\s*$" -Quiet) { return $true }
     ((Select-String -Path $file -Pattern "^/?${p}uapp_e2e/config/local\.json\s*$" -Quiet) -and
      (Select-String -Path $file -Pattern "^/?${p}uapp_e2e/Builds/?\s*$" -Quiet))
 }

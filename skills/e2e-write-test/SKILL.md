@@ -14,7 +14,7 @@ fixture を足すときはそのサブディレクトリの `conftest.py` に書
 1. **対象コードを読む**: テストしたい画面・機能のC#を読み、検証すべき状態（公開フィールド/プロパティ）を把握
 1.5 **ジャーニー記録があれば地図として先に読む**: `uapp_e2e/Builds/journey/journey.json` が
    存在すれば、画面id・ボタンpath・hittable・画面遷移・既存テストのカバレッジを最初にここから把握する
-   （どの画面に何があるか／どこが未テストかの索引になる。docs/07-viewer.md）。
+   （どの画面に何があるか／どこが未テストかの索引になる。uapp_e2e/docs/07-viewer.md）。
    **ただし記録は過去のスナップショット**。使うパスは次の手順の生 dump で必ず最終確認する
 2. **実物のUI階層を見る**: アプリを起動した状態で dump を取得（推測で書かない）:
    ```powershell
@@ -29,7 +29,7 @@ fixture を足すときはそのサブディレクトリの `conftest.py` に書
    既定の `probe="selectable"` では押せる対象が 1 件も出ず「操作待ちではない」と誤読する
 3. **テストを書く**。規約:
    - 使用する操作APIは `uapp_e2e/e2e-config.json` の `uiType` に従う
-     （`ngui-legacy`→`ngui_tap`系 / `ugui-legacy`→`ugui_tap`系 / それ以外→`tap`系。詳細は SETUP.md の判定表）
+     （`ngui-legacy`→`ngui_tap`系 / `ugui-legacy`→`ugui_tap`系 / それ以外→`tap`系。詳細は uapp_e2e/SETUP.md の判定表）
    - タップは `g.tap(path)`（hittable検証込み）。レガシーInput構成なら `g.ugui_tap(path)` / `g.ngui_tap(path)`
    - 待機は `g.wait_until_visible / gone / hittable / until`。`time.sleep` は使わない
    - 状態検証は `client.get(path, "コンポーネント名", "プロパティ名")`

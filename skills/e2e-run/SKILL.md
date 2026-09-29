@@ -12,7 +12,7 @@ description: UnityアプリのE2Eテストを実行し、失敗時は証跡（lo
 
 0. **内側ループで足りるか判断**: 変更がロジック（入力・描画に依存しない計算や状態遷移）なら
    `uapp_e2e\scripts\run-unity-tests.ps1 -Mode EditMode`（数分・ビルド不要）で先に検証する。
-   E2E は導線・入力・描画の確認に絞る（詳細 `docs/ai-loop.md`）
+   E2E は導線・入力・描画の確認に絞る（詳細 `uapp_e2e/docs/ai-loop.md`）
 0.5 **エディタ直結で足りるか判断**（導線・UI操作の検証で、adb を直接使うテストが対象外なら最速）:
    Unity CLI がインストール済み かつ 対象が Unity 6 以降なら
    `uapp_e2e\scripts\run-e2e.ps1 -Editor` の1コマンドで シーン→解像度→Play→pytest→Play終了 まで全自動
@@ -30,7 +30,7 @@ description: UnityアプリのE2Eテストを実行し、失敗時は証跡（lo
 **iOS で検証する場合（macOS のみ）**: `uapp_e2e\scripts\build-ios.ps1` → `run-ios-e2e.ps1`
 （実機は両方に `-Target device`。adb を使うテストは自動 deselect される。
 `-PytestArgs` は空白区切りで分割されるため追加除外は `--deselect` で書く。
-制約と前提は SETUP.md の「iOS で使う場合」を先に読む）
+制約と前提は uapp_e2e/SETUP.md の「iOS で使う場合」を先に読む）
 
 ## 失敗時の解析（この順で見る）
 
@@ -41,5 +41,6 @@ description: UnityアプリのE2Eテストを実行し、失敗時は証跡（lo
 4. **全テストが接続エラーの場合** `uapp_e2e/Builds/failure/crash.txt`（ネイティブクラッシュはUnityタグに出ない）。
    `adb shell pidof <package>` が空ならプロセス死亡。空のままアプリが生きていればエミュレーター疲弊を疑い `adb reboot`
 5. dump を再取得して期待とのUI差分を見る
+6. ここまでで絞れなければ `uapp_e2e/docs/ai-loop.md` の「失敗解析の優先順位」（4.5 / 5.5 / 6 / 7）と「よくある詰まり」を見る
 
 修正 → **手順 1（ビルドが必要かの判断）から**再実行。アプリコードとテストのどちらを直すべきかは、失敗が「実ユーザーにも起きるか」で判断する。

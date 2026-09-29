@@ -1,5 +1,5 @@
 # Unity の EditMode/PlayMode テスト（内側ループ）を実行し、結果を AI が読める要約で出力する。
-# E2E（外側ループ）はビルドや実機が要るため、ロジックの検証はまずこちらで回す（docs/04-ai-loop.md）。
+# E2E（外側ループ）はビルドや実機が要るため、ロジックの検証はまずこちらで回す（同梱の docs/ai-loop.md。開発リポでは docs/04-ai-loop.md）。
 # 使い方: .\scripts\run-unity-tests.ps1 [-Project unity-nis] [-Mode EditMode|PlayMode] [-Filter <pattern>]
 #
 # Unity CLI（https://docs.unity.com/en-us/unity-cli）があればそれを使い、無ければ Unity 本体の
@@ -366,8 +366,12 @@ function Send-TestEvidence {
 
 # --- 経路A: 開いているエディタの中で回す（-Editor）------------------------------
 # Unity をもう1つ起動しないので桁違いに速い（実測 EditMode 4件で 約3秒 / batchmode 約48秒）。
-# **PlayMode は使えない**（com.unity.pipeline 0.4.0-exp.1 では Summary.Total=0 のまま返る）ので、
-# PlayMode は batchmode 経路に任せる
+# **PlayMode は使えない**（com.unity.pipeline は Summary.Total=0 のまま返る。0.4.0-exp.1 と
+# 0.7.0-exp.1 で実測）ので、PlayMode は batchmode 経路に任せる。
+# **0.7.0-exp.1 では対照つきで測った**（2026-09-26）― PlayMode テストを 1 本置くと
+# `list_tests --mode play` はそれを見つけるのに `run_tests --mode play` は Total=0 を返す
+# （`--async_tests` の true/false どちらも同じ）。同じ走行の `--mode editor` は 68 件返るので、
+# 「テストが無い」でも「配線が死んでいる」でもなく、**PlayMode の結果だけが返らない**
 if ($Editor) {
     if ($Mode -ne "EditMode") {
         throw ("-Editor は EditMode のみ対応です（com.unity.pipeline がエディタ内 PlayMode 実行を" +

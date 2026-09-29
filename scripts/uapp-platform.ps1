@@ -1026,7 +1026,7 @@ function Get-UappUnityProjectLockState {
             }
             # **ウィンドウタイトルは実行可否に使わない（が、黙って素通りもしない）**。
             # 止めると同名の別プロジェクトで実行不能になり、止めないと起動途中を見落とす。
-            # 代償の小さい後者を選び、**警告だけ出して続行**する（意図的な非対称。docs/04-ai-loop.md）
+            # 代償の小さい後者を選び、**警告だけ出して続行**する（意図的な非対称）
             if ($p.MainWindowTitle -and $p.MainWindowTitle -match '^(.+?)\s+-\s' -and
                 $Matches[1] -ieq (Split-Path $target -Leaf)) {
                 Write-Warning ("同名のプロジェクトを開いている Unity があります（タイトル: $($p.MainWindowTitle)）。" +

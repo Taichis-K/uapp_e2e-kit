@@ -183,7 +183,9 @@ python -m e2e_driver.journey ..\Builds\journey    # → report.html 生成（詳
 5. **レガシーInput構成（`activeInputHandler: 0`）ではフレームワーク直送の API を使う** ―
    uGUI なら `ugui_tap / ugui_press / ugui_release / ugui_drag`、NGUI なら
    `ngui_tap / ngui_press / ngui_release`（どちらも `pointer_*` は届かない）。
-   構成は `ping` の `ngui` と、NGUI が `Input.touchCount` を直読みしているかで判断
+   構成は `ping` の `ngui` と、NGUI が `Input.touchCount` を直読みしているかで判断。
+   **アプリが `Input.GetKey` を直読みしていて UI 操作だけでは足りない（ゲームパッド等）なら**
+   `docs/ai-loop.md` の「アプリ独自の入力層へ届かせる」
 6. マルチタッチテストには logcat 例外アサート（`adb.clear_logcat()` → 操作 → `adb.unity_exceptions()` 空）を付ける
 7. 描画の検証は `adb.screencap()` で画像を取得して読む（エディタ直結では journey のスクリーンショットを見る）。
    **撮影は「OS 層優先・計装は保険」の 2 段構え** — `adb screencap` は画面に出ているものをそのまま残せるが、計装の `client.screenshot()` は **Unity の描画しか写らない**（WebView・ネイティブダイアログ・ソフトキーボードは欠ける）。後者は既定オフで、`UAPP_E2E_BRIDGE_SCREENSHOT=1` を宣言したときだけ使える（縮小は `UAPP_E2E_BRIDGE_SCREENSHOT_MAX_WIDTH`）
@@ -201,6 +203,7 @@ python -m e2e_driver.journey ..\Builds\journey    # → report.html 生成（詳
 5. **全テスト接続エラーなら `Builds/failure/crash.txt`**（ネイティブクラッシュはUnityタグに出ない）。
    `adb shell pidof <package>` が空ならプロセス死亡
 6. dump を再取得して期待とのUI差分を見る
+   絞れなければ `docs/ai-loop.md` の「失敗解析の優先順位」と「よくある詰まり」を見る（そちらが正）
 7. **エディタ直結で Unity CLI の呼び出しが失敗した**とき、run-e2e は生の応答を
    `Builds/failure/unity-cli-raw.txt` へ自動保存する。まずそれを見る。残るのは 2 種類:
    - **JSON にできなかった応答**（`ConvertFrom-Json` のエラーメッセージは原因と無関係な

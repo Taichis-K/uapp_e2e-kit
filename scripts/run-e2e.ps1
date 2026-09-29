@@ -826,9 +826,11 @@ if ($Editor) {
         if ($null -eq $probeClass -or $probeClass.Class -eq "permanent") {
             throw ("Unity CLI / com.unity.pipeline のバージョンが想定と異なります（eval の疎通に失敗: $detail）。" +
                    "'unity --version' と <プロジェクト>\Packages\manifest.json の com.unity.pipeline を確認する。" +
-                   "検証済みの組み合わせ: unity-cli 1.0.0-beta.3 または 1.0.0-beta.5 / " +
-                   "com.unity.pipeline 0.4.0-exp.1（3 サンプル）・0.5.0-exp.1（unity-ngui-nis で実走）。" +
-                   "0.6.0-exp.1 以降は未検証（レジストリの最新はそれより新しいことがある）")
+                   "検証済みの組み合わせ: unity-cli 1.0.0-beta.11 / com.unity.pipeline 0.7.0-exp.1" +
+                   "（3 サンプルともエディタ直結で実走。2026-09-26）。" +
+                   "過去に通った組み合わせ: unity-cli 1.0.0-beta.3 または 1.0.0-beta.5 / " +
+                   "com.unity.pipeline 0.4.0-exp.1・0.5.0-exp.1。" +
+                   "0.7.0-exp.1 より新しい版は未検証（レジストリの最新はそれより新しいことがある）")
         }
         # **ここで記録する** ― プローブは `-AllowFail` なので Invoke-UnityCli 側では書かれない
         # （書かせると、後始末の editor_stop でも書かれて緑の走行に証跡が出てしまう）。
