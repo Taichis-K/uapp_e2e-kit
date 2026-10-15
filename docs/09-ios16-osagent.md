@@ -246,7 +246,7 @@ iproxy 8201:8200 -u "$UDID" & IPROXY_PID=$!
 
 ```bash
 curl -sS -H "X-Uapp-Token: $TOKEN" http://127.0.0.1:8201/status
-# {"agent":"uapp-os-agent/1.0","platform":"iOS","screen":{...},"authenticated":true,"ok":true}
+# {"agent":"uapp-os-agent/1.0","platform":"iOS","screen":{...},"features":["bundleId"],"authenticated":true,"ok":true}
 ```
 
 **`authenticated: true` まで見る。**
@@ -255,8 +255,18 @@ curl -sS -H "X-Uapp-Token: $TOKEN" http://127.0.0.1:8201/status
 
 ### **HTTP の 200 を「操作が効いた証拠」にしない**
 
-`/tap` と `/swipe` は **XCUI の API を呼んだ直後に無条件で `{"ok":true}` を返します**
-（`UappOsAgent.swift`）。座標がどこであっても、画面上で何も起きなくても 200 です。
+`/tap` と `/swipe` は **XCUI の API を呼んだ直後に `{"ok":true,"base":"…"}` を返します**（`base` は押した基準。`springboard` か、送った `bundleId`）
+（`UappOsAgent.swift`）。座標がどこであっても、画面上で何も起きなくても 200 です
+（200 を返さない主なものは、認証の 401・引数の誤りの 400・`bundleId` のアプリが前面に無いときの 409。座標が画面のどこを指すかは検査しない）。
+**横画面のアプリを押すときは `bundleId` を渡す**（既定の基準は SpringBoard＝iPhone では縦。使い方は同梱の `ai-loop.md` の
+「OS レベルの UI オートメーション」）。curl なら:
+
+```bash
+curl -sS -H "X-Uapp-Token: $TOKEN" -H "Content-Type: application/json" \
+  -d '{"x":0.5,"y":0.5,"bundleId":"<アプリの bundle id>"}' http://127.0.0.1:8201/tap
+# {"ok":true,"base":"<アプリの bundle id>"}（前面に無ければ 409）
+```
+
 **効果は必ず観測で確かめること**:
 
 - `/screenshot` を操作の前後で撮って**画像として比べる**

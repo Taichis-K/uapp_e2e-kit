@@ -417,6 +417,151 @@ def test_os_agent_tap_unity_converts_coordinates(monkeypatch):
         os_agent.tap_unity(1, 1, (0, 0))
 
 
+def _os_agent_with_mocks(monkeypatch, *, features, base_echo=True):
+    """bundle_id のテスト用。`_post` の送信を記録し、`/status` の features と応答の base を差し替える。"""
+    from e2e_driver import os_agent
+
+    monkeypatch.setenv("UAPP_E2E_OS_AGENT_URL", "http://127.0.0.1:8200")
+    monkeypatch.setattr(os_agent, "_BUNDLE_ID_SUPPORTED", set())
+    calls = {"post": [], "status": 0}
+
+    def fake_post(path, payload, **k):
+        calls["post"].append((path, payload))
+        if "bundleId" in payload and base_echo is True:
+            return {"ok": True, "base": payload["bundleId"]}
+        if base_echo is True:
+            return {"ok": True, "base": "springboard"}
+        return base_echo  # 呼び手が指定した応答（古いエージェント・不一致を模す）
+
+    def fake_status(**k):
+        calls["status"] += 1
+        return {"agent": "uapp-os-agent/1.0", "authenticated": True, "features": features}
+
+    monkeypatch.setattr(os_agent, "_post", fake_post)
+    monkeypatch.setattr(os_agent, "status", fake_status)
+    return os_agent, calls
+
+
+def test_os_agent_bundle_id_omitted_sends_same_json_as_before(monkeypatch):
+    """**既定（bundle_id なし）は送る JSON が従来と同一**で、/status も呼ばない（後方互換）。"""
+    os_agent, calls = _os_agent_with_mocks(monkeypatch, features=[])
+    os_agent.tap(0.25, 0.75)
+    os_agent.tap_unity(100, 200, (1000, 2000))
+    os_agent.swipe(0.1, 0.2, 0.3, 0.4, duration=0.5)
+    os_agent.swipe_unity(0, 0, 500, 1000, (1000, 2000), duration=0.3)
+    assert calls["post"] == [
+        ("/tap", {"x": 0.25, "y": 0.75}),
+        ("/tap", {"x": 0.1, "y": pytest.approx(0.9)}),
+        ("/swipe", {"x1": 0.1, "y1": 0.2, "x2": 0.3, "y2": 0.4, "duration": 0.5}),
+        ("/swipe", {"x1": 0.0, "y1": 1.0, "x2": 0.5, "y2": pytest.approx(0.5), "duration": 0.3}),
+    ]
+    assert calls["status"] == 0
+    assert all("bundleId" not in p for _, p in calls["post"])
+
+
+def test_os_agent_bundle_id_is_sent_by_all_four_functions(monkeypatch):
+    """bundle_id を渡すと 4 関数とも bundleId を送る（swipe_unity だけ漏れる、を防ぐ）。"""
+    os_agent, calls = _os_agent_with_mocks(monkeypatch, features=["bundleId"])
+    app = "com.example.app"
+    os_agent.tap(0.5, 0.5, bundle_id=app)
+    os_agent.tap_unity(100, 200, (2000, 1000), bundle_id=app)      # 横長の screen（横画面のアプリ）
+    os_agent.swipe(0.1, 0.2, 0.3, 0.4, bundle_id=app)
+    os_agent.swipe_unity(0, 0, 1000, 500, (2000, 1000), bundle_id=app)
+    assert [p["bundleId"] for _, p in calls["post"]] == [app] * 4
+    # 換算は bundle_id の有無で変わらない（横長の screen で正規化されるだけ）
+    assert calls["post"][1][1]["x"] == pytest.approx(100 / 2000)
+    assert calls["post"][1][1]["y"] == pytest.approx(1 - 200 / 1000)
+    # /status での対応確認は URL ごとに 1 回だけ
+    assert calls["status"] == 1
+
+
+def test_os_agent_bundle_id_unsupported_agent_does_not_tap(monkeypatch):
+    """**古いエージェント（features に bundleId が無い）には押さずに止める**。
+
+    押してから応答で止めると、SpringBoard 基準の誤った位置をもう押し終えている。
+    """
+    os_agent, calls = _os_agent_with_mocks(monkeypatch, features=[])
+    with pytest.raises(os_agent.OsAgentError, match="対応していません"):
+        os_agent.tap(0.5, 0.5, bundle_id="com.example.app")
+    with pytest.raises(os_agent.OsAgentError, match="対応していません"):
+        os_agent.swipe_unity(0, 0, 10, 10, (100, 100), bundle_id="com.example.app")
+    assert calls["post"] == []          # 1 回も押していない
+
+
+def test_os_agent_bundle_id_empty_is_rejected_without_tapping(monkeypatch):
+    """空文字を「省略」扱いにしない（設定漏れで黙って SpringBoard 基準に落ちるため）。"""
+    os_agent, calls = _os_agent_with_mocks(monkeypatch, features=["bundleId"])
+    with pytest.raises(os_agent.OsAgentError, match="空か文字列ではありません"):
+        os_agent.tap(0.5, 0.5, bundle_id="")
+    assert calls["post"] == [] and calls["status"] == 0
+
+
+@pytest.mark.parametrize("response", [
+    {"ok": True},                                   # base が無い（古い版が入れ替わった）
+    {"ok": True, "base": "springboard"},            # SpringBoard 基準で押された
+    {"ok": True, "base": "COM.EXAMPLE.APP"},        # 大小文字だけ違う（エコーなので区別する）
+])
+def test_os_agent_bundle_id_base_mismatch_raises(monkeypatch, response):
+    """応答の base が送った値と完全一致しなければ止める（二重の安全）。tap と swipe の両方で見る。"""
+    os_agent, _ = _os_agent_with_mocks(monkeypatch, features=["bundleId"], base_echo=response)
+    with pytest.raises(os_agent.OsAgentError, match="base が送った bundle_id と一致しません"):
+        os_agent.tap(0.5, 0.5, bundle_id="com.example.app")
+    with pytest.raises(os_agent.OsAgentError, match="base が送った bundle_id と一致しません"):
+        os_agent.swipe(0.1, 0.1, 0.2, 0.2, bundle_id="com.example.app")
+
+
+def test_os_agent_bundle_id_support_is_checked_per_url(monkeypatch):
+    """対応の確認は URL ごと（プロセス全体で 1 回にすると、別のエージェントへ繋ぎ替えたときに確かめない）。"""
+    os_agent, calls = _os_agent_with_mocks(monkeypatch, features=["bundleId"])
+    os_agent.tap(0.5, 0.5, bundle_id="com.example.app")
+    os_agent.tap(0.5, 0.5, bundle_id="com.example.app")
+    assert calls["status"] == 1
+    monkeypatch.setenv("UAPP_E2E_OS_AGENT_URL", "http://127.0.0.1:8201")
+    os_agent.tap(0.5, 0.5, bundle_id="com.example.app")
+    assert calls["status"] == 2
+
+
+def test_os_agent_bundle_id_support_is_rechecked_when_token_changes(monkeypatch):
+    """同じ URL でもトークンが替われば別の起動なので確かめ直す（URL だけで覚えると、
+    繋ぎ替えた個体の版も認証も確かめずに押してしまう）。"""
+    os_agent, calls = _os_agent_with_mocks(monkeypatch, features=["bundleId"])
+    monkeypatch.setenv("UAPP_E2E_OS_AGENT_TOKEN", "token-a")
+    os_agent.tap(0.5, 0.5, bundle_id="com.example.app")
+    os_agent.tap(0.5, 0.5, bundle_id="com.example.app")
+    assert calls["status"] == 1
+    monkeypatch.setenv("UAPP_E2E_OS_AGENT_TOKEN", "token-b")
+    os_agent.tap(0.5, 0.5, bundle_id="com.example.app")
+    assert calls["status"] == 2
+
+
+def test_os_agent_bundle_id_support_is_forgotten_after_base_mismatch(monkeypatch):
+    """base が一致しなかったら、覚えていた「対応している」を捨てて次に確かめ直す。"""
+    os_agent, calls = _os_agent_with_mocks(monkeypatch, features=["bundleId"], base_echo={"ok": True})
+    with pytest.raises(os_agent.OsAgentError, match="base が送った bundle_id と一致しません"):
+        os_agent.tap(0.5, 0.5, bundle_id="com.example.app")
+    assert calls["status"] == 1
+    with pytest.raises(os_agent.OsAgentError, match="base が送った bundle_id と一致しません"):
+        os_agent.tap(0.5, 0.5, bundle_id="com.example.app")
+    assert calls["status"] == 2          # 捨てていなければ 1 のまま
+
+
+@pytest.mark.parametrize("bad", [123, b"com.example.app"])
+def test_os_agent_bundle_id_non_string_is_rejected_without_tapping(monkeypatch, bad):
+    """文字列でない bundle_id は送らずに止める。"""
+    os_agent, calls = _os_agent_with_mocks(monkeypatch, features=["bundleId"])
+    with pytest.raises(os_agent.OsAgentError, match="空か文字列ではありません"):
+        os_agent.tap(0.5, 0.5, bundle_id=bad)
+    assert calls["post"] == []
+
+
+def test_os_agent_features_must_be_a_list(monkeypatch):
+    """features が文字列だと `in` が部分一致で通ってしまうので、一覧であることまで見る。"""
+    os_agent, calls = _os_agent_with_mocks(monkeypatch, features="bundleIdX")
+    with pytest.raises(os_agent.OsAgentError, match="対応していません"):
+        os_agent.tap(0.5, 0.5, bundle_id="com.example.app")
+    assert calls["post"] == []
+
+
 def test_os_agent_screenshot_rejects_non_png(monkeypatch):
     """PNG 以外が返ったら失敗にする（壊れた画像を証跡として残さない）。"""
     from e2e_driver import os_agent

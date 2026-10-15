@@ -560,7 +560,8 @@ if ($Editor) {
             continue
         }
         $state = $probe.data.result
-        # recompile_status の result は**オブジェクトではなく JSON 文字列**で返る
+        # recompile_status の result は 0.7.0-exp.1 まで**オブジェクトではなく JSON 文字列**で返り、
+        # 0.8.0-exp.1 からオブジェクトで返る（パッケージのソースで確認し、2026-10-15 に実測）。両方を受ける
         if ($state -is [string]) {
             try { $state = $state | ConvertFrom-Json }
             catch { throw "recompile_status の応答を解釈できません: $($probe.data.result)" }

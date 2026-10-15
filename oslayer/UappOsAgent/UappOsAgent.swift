@@ -20,10 +20,12 @@
 // `/status` の `authenticated` で「認証つきの正しい相手か」をホスト側が判定できるようにする。
 //
 // 提供するコマンド（すべて `X-Uapp-Token` ヘッダが要る。トークン未設定時のみ無認証）:
-//   GET  /status                        … 生存確認・画面サイズ・認証状態
+//   GET  /status                        … 生存確認・画面サイズ・認証状態・対応機能（features）
 //   GET  /screenshot                    … 画面全体の PNG（**OS が合成した結果**）
-//   POST /tap      {"x":…,"y":…}        … 正規化座標（0〜1・左上原点）でタップ
-//   POST /swipe    {"x1":…,…}           … 正規化座標でスワイプ
+//   POST /tap      {"x":…,"y":…[,"bundleId":…]} … 正規化座標（0〜1・左上原点）でタップ
+//   POST /swipe    {"x1":…,…[,"bundleId":…]}    … 正規化座標でスワイプ
+//        **bundleId を省くと SpringBoard（iPhone では回転しない＝縦。iPad は未実測）基準**。渡すとそのアプリの画面基準で押す
+//        （横画面のアプリはこちらでないと当たらない。issue #80）。渡したときは前面でなければ 409
 //   POST /type     {"bundleId":…,"text":…} … **対象アプリを明示**して文字入力
 //   POST /alert    {"button":"…"}       … システムアラートのボタンを押す
 //   POST /activate {"bundleId":"…"}     … 実行中のアプリを前面へ（**未起動なら拒否**）
@@ -136,7 +138,11 @@ final class UappOsAgent: XCTestCase {
                 // トークン未設定のエージェント（別実行の残骸など）は false を返すので、
                 // ホストは自分が起動した個体でないと分かる
                 "authenticated": UappOsAgent.token != nil,
+                // **SpringBoard の frame**（回転しない）。横画面のアプリの画面サイズとしては使わない
                 "screen": ["w": Int(frame.width), "h": Int(frame.height)],
+                // ホストが**押す前に**対応を確かめるための一覧。古いエージェントは bundleId を
+                // 黙って無視して SpringBoard 基準で押すので、応答を見てからでは遅い（issue #80）
+                "features": ["bundleId"],
             ])
 
         case ("GET", "/screenshot"):
@@ -148,8 +154,22 @@ final class UappOsAgent: XCTestCase {
             guard let x = request.jsonDouble("x"), let y = request.jsonDouble("y") else {
                 return HttpResponse(status: 400, json: ["error": "x, y (0..1) が必要です"])
             }
-            coordinate(x, y).tap()
-            return HttpResponse(status: 200, json: ["ok": true])
+            // **判定順は 座標 → bundleId**（両方不正なら座標の 400）
+            let base: XCUIApplication
+            let baseName: String
+            switch bundleIdParam(request) {
+            case .absent:
+                base = springboard; baseName = "springboard"
+            case .invalid(let response):
+                return response
+            case .value(let bundleId):
+                let app = XCUIApplication(bundleIdentifier: bundleId)
+                if let response = notForegroundResponse(app) { return response }
+                base = app; baseName = bundleId
+            }
+            coordinate(x, y, on: base).tap()
+            // base は**送られた bundleId のエコー**（どちらの基準で押したかを呼び手が確かめる）
+            return HttpResponse(status: 200, json: ["ok": true, "base": baseName])
 
         case ("POST", "/swipe"):
             guard let x1 = request.jsonDouble("x1"), let y1 = request.jsonDouble("y1"),
@@ -157,8 +177,21 @@ final class UappOsAgent: XCTestCase {
                 return HttpResponse(status: 400, json: ["error": "x1, y1, x2, y2 (0..1) が必要です"])
             }
             let duration = request.jsonDouble("duration") ?? 0.2
-            coordinate(x1, y1).press(forDuration: duration, thenDragTo: coordinate(x2, y2))
-            return HttpResponse(status: 200, json: ["ok": true])
+            let base: XCUIApplication
+            let baseName: String
+            switch bundleIdParam(request) {
+            case .absent:
+                base = springboard; baseName = "springboard"
+            case .invalid(let response):
+                return response
+            case .value(let bundleId):
+                let app = XCUIApplication(bundleIdentifier: bundleId)
+                if let response = notForegroundResponse(app) { return response }
+                base = app; baseName = bundleId
+            }
+            // **始点と終点は同じ基準で作る**（基準を混ぜない）
+            coordinate(x1, y1, on: base).press(forDuration: duration, thenDragTo: coordinate(x2, y2, on: base))
+            return HttpResponse(status: 200, json: ["ok": true, "base": baseName])
 
         case ("POST", "/type"):
             // **対象アプリを明示させる**。`typeText` は「呼び出した要素かその子孫に
@@ -167,15 +200,18 @@ final class UappOsAgent: XCTestCase {
             guard let text = request.jsonString("text") else {
                 return HttpResponse(status: 400, json: ["error": "text が必要です"])
             }
-            guard let bundleId = request.jsonString("bundleId") else {
+            let app: XCUIApplication
+            switch bundleIdParam(request) {
+            case .absent:
                 return HttpResponse(status: 400, json: [
                     "error": "bundleId が必要です（入力欄を持つアプリを明示してください）"])
+            case .invalid(let response):
+                return response
+            case .value(let bundleId):
+                app = XCUIApplication(bundleIdentifier: bundleId)
             }
-            let app = XCUIApplication(bundleIdentifier: bundleId)
-            guard app.state == .runningForeground else {
-                return HttpResponse(status: 409, json: [
-                    "error": "対象アプリが前面にありません（state=\(app.state.rawValue)）。先に /activate してください"])
-            }
+            // 前面の確認は /tap・/swipe と同じ関数を通す（文言と state の表し方を揃える）
+            if let response = notForegroundResponse(app) { return response }
             app.typeText(text)
             return HttpResponse(status: 200, json: ["ok": true])
 
@@ -199,10 +235,17 @@ final class UappOsAgent: XCTestCase {
             return HttpResponse(status: 200, json: ["ok": true])
 
         case ("POST", "/activate"):
-            guard let bundleId = request.jsonString("bundleId") else {
+            // 空文字・非文字列の 400 だけ揃える。**前面の確認は通さない**
+            // （/activate は背面のアプリを前面へ出すための API。前面確認を入れると機能が壊れる）
+            let app: XCUIApplication
+            switch bundleIdParam(request) {
+            case .absent:
                 return HttpResponse(status: 400, json: ["error": "bundleId が必要です"])
+            case .invalid(let response):
+                return response
+            case .value(let bundleId):
+                app = XCUIApplication(bundleIdentifier: bundleId)
             }
-            let app = XCUIApplication(bundleIdentifier: bundleId)
             // **未起動なら拒否する**。`activate()` は未起動のアプリを**起動してしまう**
             // （Apple の仕様。「起動し直さない」のは既に動いている場合だけ）。
             // 黙って起動すると、クラッシュや OS による終了で状態が失われたことを隠し、
@@ -245,7 +288,59 @@ final class UappOsAgent: XCTestCase {
 
     /// 正規化座標（0〜1）を画面上の座標へ。**解像度に依存しない**ので、
     /// 機種が変わってもホスト側のテストを書き換えずに済む。
-    private func coordinate(_ x: Double, _ y: Double) -> XCUICoordinate {
-        springboard.coordinate(withNormalizedOffset: CGVector(dx: x, dy: y))
+    /// **基準を省くと SpringBoard**（iPhone では回転しない＝縦。iPad は未実測）。対照実験（performProbeGesture）はこちらのまま。
+    /// アプリを基準にすると、そのアプリの画面（横なら横）で正規化される。
+    /// 横画面のアプリは SpringBoard 基準では当たらない（導入先の実機観測。issue #80）。
+    /// 「XCUITest がアプリの向きで押す」という機序は推定で、Apple の文書に向きの記述は無い
+    private func coordinate(_ x: Double, _ y: Double, on base: XCUIApplication? = nil) -> XCUICoordinate {
+        (base ?? springboard).coordinate(withNormalizedOffset: CGVector(dx: x, dy: y))
+    }
+
+    /// `bundleId` の取り出し。**キーが無いときだけ省略扱い**にする
+    /// （`null`・数値・空文字を省略扱いにすると、黙って SpringBoard 基準に落ちるため）
+    private enum BundleIdParam {
+        case absent
+        case value(String)
+        case invalid(HttpResponse)
+    }
+
+    private func bundleIdParam(_ request: HttpRequest) -> BundleIdParam {
+        guard let raw = request.json["bundleId"] else { return .absent }
+        guard let bundleId = raw as? String else {
+            return .invalid(HttpResponse(status: 400, json: ["error": "bundleId は文字列で指定してください"]))
+        }
+        guard !bundleId.isEmpty else {
+            return .invalid(HttpResponse(status: 400, json: ["error": "bundleId が空です"]))
+        }
+        return .value(bundleId)
+    }
+
+    /// 対象アプリが前面でなければ 409 を返す（前面なら nil）。**前面でないアプリを基準にしない**ためのもので、
+    /// 前面アプリの上に重なったアラート・通知などを押すことまでは防げない。
+    /// 案内は状態で分ける ― 未起動のときに「/activate して」と言うと行き止まりになる（/activate は未起動を拒否する）
+    private func notForegroundResponse(_ app: XCUIApplication) -> HttpResponse? {
+        let state = app.state
+        if state == .runningForeground { return nil }
+        let name = UappOsAgent.stateName(state)
+        let message: String
+        if state == .notRunning || state == .unknown {
+            message = "対象アプリが起動していません（state=\(state.rawValue) \(name)）。" +
+                      "/activate では起動しません（起動中のアプリを前面へ出すためのもの）"
+        } else {
+            message = "対象アプリが前面にありません（state=\(state.rawValue) \(name)）。先に /activate してください"
+        }
+        return HttpResponse(status: 409, json: ["error": message, "state": state.rawValue, "stateName": name])
+    }
+
+    /// `XCUIApplication.State` の名前（rawValue だけだと読み手が対応表を要するため）
+    private static func stateName(_ state: XCUIApplication.State) -> String {
+        switch state {
+        case .unknown: return "unknown"
+        case .notRunning: return "notRunning"
+        case .runningBackgroundSuspended: return "runningBackgroundSuspended"
+        case .runningBackground: return "runningBackground"
+        case .runningForeground: return "runningForeground"
+        @unknown default: return "other(\(state.rawValue))"
+        }
     }
 }

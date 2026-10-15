@@ -386,6 +386,31 @@ adb.uninstall(pkg); adb.install(apk)                      # クリーンイン�
    lsof -nP -iTCP:<port> -sTCP:LISTEN
    ```
 
+6. **横画面のアプリを座標で押すなら、`bundle_id` を渡してアプリの画面を基準にする。**
+   既定（`bundle_id` なし）の基準は SpringBoard で、iPhone では**回転しない＝縦の画面**（iPad は未実測）。横画面のアプリには当たらない。
+
+   ```python
+   import os
+   from e2e_driver import os_agent
+
+   app = os.environ["UAPP_E2E_IOS_BUNDLE_ID"]   # run-ios-e2e.ps1 が渡す（それ以外から回すと KeyError。そのときは bundle id を直接書く）。
+                                                 # 実機では .app の CFBundleIdentifier
+                                                 # （署名の都合で e2e-config.json の package と違うことがある）
+   os_agent.tap_unity(cx, cy, (screen_w, screen_h), bundle_id=app)   # dump の center と、アプリ側の画面サイズ
+   os_agent.swipe_unity(x1, y1, x2, y2, (screen_w, screen_h), bundle_id=app)
+   ```
+
+   - `screen` には**アプリ側の画面サイズ**（ブリッジの `ping` の `screen`＝Unity の `Screen.width`・`height`。横なら横長）を渡す。
+     `os_agent.status()` の `screen` は SpringBoard の大きさ（縦のまま）なので使わない
+   - `bundle_id` のアプリが**前面に無ければ押さずに止まる**（HTTP 409。未起動と背面で案内が違う）
+   - **前面のアプリの上にアラートや通知が重なっていると、409 にならずにそちらを押しうる**（前面かどうかはアプリ単位で判定する）
+   - **システムダイアログ・ホーム画面を押すときは `bundle_id` を渡さない**（SpringBoard 基準）
+   - **外部ブラウザなど別のアプリでも、横画面ならそのアプリの bundle id を渡す**。上の `app`（Unity アプリ）とは別の値になる
+     （横画面の Safari は `bundle_id="com.apple.mobilesafari"` で検索欄に当たり、渡さないと外れた。シミュレータで実測）
+   - **エージェントが古い版だと、`bundle_id` を渡した時点で押さずに止まる**（`run-ios-e2e.ps1 -OsAgent` は毎回ビルドし直すので、キットを更新すれば次の実行で新しくなる。`docs/09-ios16-osagent.md` の手組みは手順 1 からやり直す）
+   - `/screenshot` は横画面でも**縦の寸法のまま、中身が回った画像**で返った（シミュレータで実測。実機は未実測）。
+     画像の座標をそのまま押す座標に使わない
+
 ### やること: mac 自身を見る側
 
 1. **`0` や空文字を「無い」と読まない。** mac のウィンドウ調査は**エラーではなく「無い」と答えて外れる**。
@@ -525,7 +550,8 @@ def test_stage1(client, metrics):
 
 一般化すると「**アプリが持つ真実の記録を読む口を 1 つ用意し、それを受け入れ条件にする**」。
 **操作の応答が 200 でも、それは操作が効いた証拠にはならない**
-（OS エージェントの `/tap` `/swipe` は無条件に `ok:true` を返す）。
+（OS エージェントの `/tap` `/swipe` は、押した位置に何があっても `ok:true` を返す。
+200 を返さない主なものは、認証（401）・引数の誤り（400）・`bundle_id` のアプリが前面に無いとき（409）。座標が画面のどこを指すかは検査しない）。
 **「接続できた」も同じ** ― iOS 実機では `iproxy` がアプリ未起動でもホスト側ポートを LISTEN し、
 **`connect()` も `send()` も成功して `recv()` で初めて切れる**（2026-08-26 に実測）。
 **握手が通ったことは、相手が生きている証拠にならない。**
