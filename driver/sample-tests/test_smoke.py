@@ -3,7 +3,7 @@
 このファイルは「AIが書くE2Eテスト」のリファレンス実装を兼ねる:
 - タップ前に hittable を検証（Gestures.tap が自動で行う）
 - sleep ではなく wait_until_* で待つ
-- マルチタッチテストでは logcat の例外もアサートする
+- マルチタッチテストではアプリの例外もアサートする（device_log。Android は logcat、iOS とエディタはブリッジのログ）
 - 画面の節目で journey.capture して画面地図を育てる（docs/07-viewer.md。
   記録先が無効なら no-op なのでテストは記録の有無を意識しない）
 """
@@ -11,7 +11,8 @@ import time
 
 import pytest
 
-from e2e_driver import BlockedError, BridgeClient, Gamepad, Keyboard, Mouse, adb
+from e2e_driver import BlockedError, BridgeClient, Gamepad, Keyboard, Mouse, device_log
+from e2e_driver.device_log import DeviceLogUnavailableError
 
 
 def test_ping_and_dump(client):
@@ -75,7 +76,12 @@ def test_fullscreen_blocker_blocks_and_releases(client, g):
 
 def test_hold_a_tap_b_then_release(client, g):
     """A を押し込んだまま B をタップして UI が開き、その後 A を離しても破綻しないこと。"""
-    adb.clear_logcat()
+    try:
+        device_log.clear(client)
+    except DeviceLogUnavailableError as e:
+        # iOS・エディタで、アプリのブリッジが古い・アプリがロガーを止めているか例外が届かないほど絞っている
+        # （clear の時点で判定される＝操作の前に止まる。例外を確かめられないので回さない）
+        pytest.skip(f"アプリのログを取れません: {e}")
 
     g.press("ButtonA", pointer_id=2)
     assert client.get("ButtonA", "HoldStateReporter", "isHeld") is True
@@ -87,7 +93,7 @@ def test_hold_a_tap_b_then_release(client, g):
     assert client.get("ButtonA", "HoldStateReporter", "isHeld") is False
 
     # UI 状態に現れない破綻（例外）も検出する
-    exceptions = adb.unity_exceptions()
+    exceptions = device_log.unity_exceptions(client)
     assert not exceptions, f"Unity 例外が発生: {exceptions[:5]}"
 
     g.tap("ButtonB")  # 後片付け: SubMenu を閉じる

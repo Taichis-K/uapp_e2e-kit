@@ -634,3 +634,13 @@ def test_has_control_with_child_text_requires_a_control_on_the_parent():
     assert not _has_control_with_child_text({"nodes": [empty]})
     # 深いところにいても見つける（木を再帰で見る）
     assert _has_control_with_child_text({"nodes": [node(hittable=False, children=[button])]})
+
+
+def test_logs_sends_only_given_arguments(monkeypatch):
+    """`logs` は渡した引数だけを送る（since を省くとバッファの先頭から。issue #85）。"""
+    client = BridgeClient(port=15000)
+    calls = []
+    monkeypatch.setattr(client, "call", lambda cmd, **args: calls.append((cmd, args)) or {"entries": []})
+    client.logs()
+    client.logs(since=3, max=10)
+    assert calls == [("logs", {}), ("logs", {"since": 3, "max": 10})]

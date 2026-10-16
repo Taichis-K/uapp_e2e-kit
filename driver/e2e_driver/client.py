@@ -597,6 +597,20 @@ class BridgeClient:
     def get(self, path: str, component: str, prop: str) -> Any:
         return self.call("get", path=path, component=component, property=prop)["value"]
 
+    def logs(self, since: int | None = None, max: int | None = None) -> dict:  # noqa: A002 (プロトコルの引数名)
+        """アプリのログ（ブリッジのリングバッファ）を読む（issue #85）。
+
+        `since` は含む（省くとバッファの先頭から）。1 回の応答は件数と大きさで切られるので、
+        全部読むときは `device_log` を使う（`next` に追いつくまで読み続け、溢れ・起動し直しを判定する）。
+        古いブリッジは `BridgeError`（`UNKNOWN_COMMAND`）。
+        """
+        args: dict[str, Any] = {}
+        if since is not None:
+            args["since"] = since
+        if max is not None:
+            args["max"] = max
+        return self.call("logs", **args)
+
     def pointer_down(self, pointer_id: int, x: float, y: float) -> dict:
         return self.call("pointer_down", pointerId=pointer_id, x=x, y=y)
 

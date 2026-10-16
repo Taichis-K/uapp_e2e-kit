@@ -56,8 +56,10 @@
 #   - **起動し直したいときは -SkipInstall を外す**（install も走る）。
 #     -Build との併用は禁止（旧ビルドを検証する偽の緑になるため、明示エラーで止まる）
 #
-# adb を直接使うテスト（logcat 断アサート等）は UAPP_E2E_IOS=1 で明示エラーになる。
-# -PytestArgs 未指定時は既知の該当テスト（現在 2 件）を除外して回す。
+# adb を直接使うテスト（adb タップ等）は UAPP_E2E_IOS=1 で明示エラーになる。
+# -PytestArgs 未指定時は既知の該当テスト（2 件＋古い見本の hold のテスト）を除外して回す。
+# 見本の hold のテストは device_log（iOS ではブリッジのログ）を使うので、新しい見本なら iOS でも回る（issue #85）。
+# 失敗したときは、ブリッジが溜めたアプリのログを Builds/failure/ios-app-log.txt に書く（iOS では Debug.Log が OS のログに出ない）。
 param(
     [string]$Project = "unity-nis",
     [string]$ProjectPath,
@@ -144,6 +146,10 @@ if ($null -eq $portRaw -or -not [int]::TryParse("$portRaw", [ref]$port) -or $por
            "**他プロジェクトの iosSimulatorPort・全プロジェクトの editorBridgePort・ホスト側 forward ポートの" +
            "どれとも別番号**にしてください（シミュレータはホストのポートを直接使うため、同番号だと取り合いになる）")
 }
+# アプリ（端末側）が待ち受けるポート。実機では $port がホスト側（iproxy の入口）に替わるので別に持つ。
+# テストが launch_app でアプリを起動し直すときは、こちらを UAPP_E2E_BRIDGE_PORT として渡す（issue #85）
+$appPort = $port
+$script:appLogWritten = $false   # 失敗時にアプリのログ（ios-app-log.txt）を書けたか（失敗証跡の案内で使う）
 
 $buildsDir = Join-UappPath $root "Builds"
 New-Item -ItemType Directory -Force $buildsDir | Out-Null
@@ -683,7 +689,6 @@ if ($PytestArgs) {
     # **テスト指定に含まれるファイルのぶんだけ**除外する — --deselect は収集されない id を
     # 指すと pytest がエラーになる
     $knownAdbTests = @(
-        "tests/test_smoke.py::test_hold_a_tap_b_then_release",
         "tests/test_ngui_legacy.py::test_real_tap_via_adb_reaches_legacy_ngui",
         # **サンプルを増やしたら、その adb 直叩きテストもここへ足すこと**。
         # 足し忘れても Windows は IOS_SKIP なので気づけず、mac の verify-all だけが落ちる
@@ -693,6 +698,15 @@ if ($PytestArgs) {
     # さらに**ファイルが実在するときだけ**除外を足す — --deselect は収集されない id を
     # 指すと pytest 自体がエラーになる（tests 指定でも該当ファイルが無い配置がある）
     $testsKey = ((ConvertTo-UappPathKey $testsPath) -replace '^\./', '').TrimEnd('/')
+    # **hold のテストは、見本が adb のログ関数を使っている古い版のときだけ除外する**（issue #85）。
+    # 新しい見本は device_log（iOS ではブリッジのログ）を使うので iOS でも回る。既存の導入先には新しい見本が
+    # 届かない（installer は初回だけ置く）ので、古い見本が残っていれば今どおり除外する。
+    # 照合は -match（大小文字を区別しない＝誤判定は除外する側に倒れる）
+    $smokeFile = Join-UappPath $driverDir "tests/test_smoke.py"
+    if ((Test-Path -LiteralPath $smokeFile) -and
+        ((Get-Content -LiteralPath $smokeFile -Raw) -match '\badb\.(clear_logcat|unity_log|unity_exceptions)\b|from\s+e2e_driver\.adb\s+import')) {
+        $knownAdbTests += "tests/test_smoke.py::test_hold_a_tap_b_then_release"
+    }
     foreach ($known in $knownAdbTests) {
         $file = ($known -split "::")[0]
         $covered = ($testsKey -eq "tests" -or $testsKey -eq $file)
@@ -965,6 +979,7 @@ $prevAgentClientToken = $env:UAPP_E2E_OS_AGENT_TOKEN
 # 新設の変数も**呼び出し元の値を壊さない**（無条件削除だと同じシェルの後続処理が変わる）
 $prevDeviceUdid = $env:UAPP_E2E_IOS_DEVICE_UDID
 $prevDeviceMajor = $env:UAPP_E2E_IOS_DEVICE_MAJOR
+$prevAppPort = $env:UAPP_E2E_IOS_APP_PORT
 $prevBridgeShot = $env:UAPP_E2E_BRIDGE_SCREENSHOT
 $prevBridgeShotWidth = $env:UAPP_E2E_BRIDGE_SCREENSHOT_MAX_WIDTH
 $testExit = 999
@@ -973,6 +988,7 @@ try {
     $env:UAPP_E2E_IOS = "1"
     $env:UAPP_E2E_BRIDGE_PORT = "$port"
     $env:UAPP_E2E_IOS_BUNDLE_ID = $package
+    $env:UAPP_E2E_IOS_APP_PORT = "$appPort"   # アプリが待ち受けるポート（実機ではホスト側の UAPP_E2E_BRIDGE_PORT と違う）
     # スクショの宛先を渡す。**シミュレータは simctl、実機は idevicescreenshot（OS 層）**で
     # 別経路なので環境変数も分ける（取り違えると存在しない個体を撮りにいく）。
     # 実機の `idevicescreenshot` は iOS 16 以前でのみ成立する。iOS 17 以降は
@@ -1005,6 +1021,27 @@ try {
     $global:LASTEXITCODE = 999
     & $pythonExe @pytestArgList
     $testExit = $LASTEXITCODE
+    # **失敗したらアプリのログ（ブリッジのリングバッファ）を残す**（issue #85 / #65。iOS では Debug.Log が
+    # OS のログに出ないので、シミュレータの統合ログにも実機の syslog にも Unity の行は無い）。
+    # 環境変数（ポート）が立っている間に読む。アプリが落ちていれば読めない
+    if ($testExit -ne 0) {
+        $appLogPath = Join-UappPath $buildsDir "failure/ios-app-log.txt"
+        New-Item -ItemType Directory -Force (Split-Path -Parent $appLogPath) | Out-Null
+        # 接続は短い上限つき（既定の再試行のままだと、接続だけ張れて応答しないアプリで十数分止まる）。
+        # 取れなかった理由は .err に残す（警告文は候補を並べるだけなので）
+        $appLogErr = "$appLogPath.err"
+        # **前回（別のプロジェクトを含む）のファイルを先に消す**。消さないと、アプリが落ちて今回は書けなかったときに
+        # 古いログが今回のものとして読まれる
+        Remove-Item -LiteralPath $appLogPath, $appLogErr -ErrorAction SilentlyContinue
+        $script:appLogWritten = $false
+        & $pythonExe -c "import sys; from e2e_driver import BridgeClient, device_log; c = BridgeClient().connect(retries=3, total_timeout=15); open(sys.argv[1], 'w', encoding='utf-8').write(device_log.dump_all(c))" $appLogPath 2> $appLogErr
+        if ($LASTEXITCODE -eq 0) { Write-Host "アプリのログ: $appLogPath"; Remove-Item -LiteralPath $appLogErr -ErrorAction SilentlyContinue; $script:appLogWritten = $true }
+        else {
+            # 接続はできたが書き出しの途中で落ちると、空や途中までのファイルが残るので消す
+            Remove-Item -LiteralPath $appLogPath -ErrorAction SilentlyContinue
+            Write-Warning "アプリのログを取れませんでした（アプリが落ちた・応答しない・ブリッジが古い のどれか。理由: $appLogErr）"
+        }
+    }
     # ジャーニーが記録されていれば自己完結レポートを更新する（失敗時も解析に使うため生成する）
     if ($JourneyDir -and (Test-Path -LiteralPath (Join-UappPath $JourneyDir "journey.json"))) {
         & $pythonExe -m e2e_driver.journey $JourneyDir
@@ -1026,6 +1063,7 @@ finally {
     if ($null -eq $prevAgentClientToken) { Remove-Item -LiteralPath Env:\UAPP_E2E_OS_AGENT_TOKEN -ErrorAction SilentlyContinue } else { $env:UAPP_E2E_OS_AGENT_TOKEN = $prevAgentClientToken }
     if ($null -eq $prevDeviceUdid) { Remove-Item -LiteralPath Env:\UAPP_E2E_IOS_DEVICE_UDID -ErrorAction SilentlyContinue } else { $env:UAPP_E2E_IOS_DEVICE_UDID = $prevDeviceUdid }
     if ($null -eq $prevDeviceMajor) { Remove-Item -LiteralPath Env:\UAPP_E2E_IOS_DEVICE_MAJOR -ErrorAction SilentlyContinue } else { $env:UAPP_E2E_IOS_DEVICE_MAJOR = $prevDeviceMajor }
+    if ($null -eq $prevAppPort) { Remove-Item -LiteralPath Env:\UAPP_E2E_IOS_APP_PORT -ErrorAction SilentlyContinue } else { $env:UAPP_E2E_IOS_APP_PORT = $prevAppPort }
     if ($null -eq $prevBridgeShot) { Remove-Item -LiteralPath Env:\UAPP_E2E_BRIDGE_SCREENSHOT -ErrorAction SilentlyContinue } else { $env:UAPP_E2E_BRIDGE_SCREENSHOT = $prevBridgeShot }
     if ($null -eq $prevBridgeShotWidth) { Remove-Item -LiteralPath Env:\UAPP_E2E_BRIDGE_SCREENSHOT_MAX_WIDTH -ErrorAction SilentlyContinue } else { $env:UAPP_E2E_BRIDGE_SCREENSHOT_MAX_WIDTH = $prevBridgeShotWidth }
 }
@@ -1046,13 +1084,15 @@ if ($testExit -ne 0) {
             # 実機は simctl の io / log show が使えない。devicectl でデバイス情報だけ残す
             # （スクリーンショットの取得手段は未整備＝issue #27 に残す）
             & $xcrun devicectl device info details --device $udid *> (Join-UappPath $failureDir "ios-device-info.txt")
-            Write-Host "失敗証跡: $failureDir（ios-device-info.txt。実機のスクショ・ログ収集は未整備）"
+            $appLogNote = if ($script:appLogWritten) { "アプリのログは ios-app-log.txt＝ブリッジ経由" } else { "アプリのログは取れなかった" }
+            Write-Host "失敗証跡: $failureDir（ios-device-info.txt。$appLogNote。実機のスクショは未整備）"
             $collected = $true
         }
         if (-not $isDevice) {
         & $xcrun simctl io $udid screenshot (Join-UappPath $failureDir "ios-screen.png") 2>$null | Out-Null
         & $xcrun simctl spawn $udid log show --last 5m --predicate "processImagePath CONTAINS `"$((Split-Path $App -Leaf) -replace '\.app$','')`"" *> (Join-UappPath $failureDir "ios-unity-log.txt")
-        Write-Host "失敗証跡: $failureDir（ios-screen.png / ios-unity-log.txt）"
+        $appLogNote = if ($script:appLogWritten) { " / ios-app-log.txt（アプリのログ＝ブリッジ経由）" } else { "" }
+        Write-Host "失敗証跡: $failureDir（ios-screen.png / ios-unity-log.txt$appLogNote。ios-unity-log.txt は OS の統合ログで、Unity の Debug.Log は出ない）"
         }
     } catch {
         Write-Warning "失敗証跡の収集に失敗しました（$($_.Exception.Message)）"

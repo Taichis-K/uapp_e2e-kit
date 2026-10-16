@@ -7,8 +7,9 @@
 Android における `adb`（uiautomator 経由）に相当する。
 
 **Unity の要素は見えない**（Unity は Metal のビュー 1 枚として現れ、アクセシビリティ
-ツリーに UI が出ない）。だから要素指定の操作はブリッジ側（path・hittable 判定つき）を使い、
-ここは**座標**で操作する。`tap_unity()` は dump の Unity 座標を正規化座標へ変換するので、
+ツリーに UI が出ない）。Unity の要素はブリッジ側（path・hittable 判定つき）で扱い、
+ここでは**座標**で操作する。**アクセシビリティの要素**（`find_elements` / `tap_element` / `type_into` …）は
+Unity の外（WebView・Safari・システム UI・ネイティブのダイアログ）のためのもの（issue #85）。`tap_unity()` は dump の Unity 座標を正規化座標へ変換するので、
 呼び出し側が解像度を意識せずに済む。
 
 接続先は環境変数 `UAPP_E2E_OS_AGENT_URL`（例: `http://127.0.0.1:8200`）、
@@ -22,6 +23,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import warnings
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -30,7 +33,15 @@ DEFAULT_TIMEOUT = 30.0
 
 
 class OsAgentError(RuntimeError):
-    """エージェントとの通信・操作が失敗した。"""
+    """エージェントとの通信・操作が失敗した。
+
+    `http_status` と `body` はエージェントが HTTP のエラーを返したときの状態コードと本文（それ以外は None）。
+    """
+
+    def __init__(self, message: str, *, http_status: int | None = None, body: str | None = None):
+        super().__init__(message)
+        self.http_status = http_status
+        self.body = body
 
 
 def base_url() -> str | None:
@@ -65,7 +76,8 @@ def _request(method: str, path: str, payload: dict | None = None,
             return response.read(), response.headers.get_content_type()
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
-        raise OsAgentError(f"{method} {path} が失敗（HTTP {e.code}）: {body}") from e
+        raise OsAgentError(f"{method} {path} が失敗（HTTP {e.code}）: {body}",
+                           http_status=e.code, body=body) from e
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         raise OsAgentError(
             f"OS エージェント（{url}）へ接続できません: {e}. "
@@ -189,12 +201,20 @@ def tap_unity(x: float, y: float, screen: tuple[int, int], bundle_id: str | None
 
     **横画面のアプリでは bundle_id を渡し、screen にはアプリ側の画面サイズ**（Unity の
     `Screen.width`・`Screen.height`＝横長の値）を渡す。`status()` の `screen` は SpringBoard の
-    大きさ（回転しない）なので、横画面の screen には使わない。
+    大きさ（iPhone では回転しない。iPad は未実測）なので、横画面の screen には使わない。
     """
     width, height = screen
     if width <= 0 or height <= 0:
         raise OsAgentError(f"画面サイズが不正です: {screen}")
     tap(x / width, 1.0 - (y / height), bundle_id=bundle_id)
+
+
+def _normalize_unity(x: float, y: float, screen: tuple[int, int]) -> tuple[float, float]:
+    """Unity の座標（左下原点・ピクセル）を正規化座標（左上原点）へ（`tap_unity` と同じ変換）。"""
+    width, height = screen
+    if width <= 0 or height <= 0:
+        raise OsAgentError(f"画面サイズが不正です: {screen}")
+    return x / width, 1.0 - (y / height)
 
 
 def swipe(x1: float, y1: float, x2: float, y2: float, duration: float = 0.2,
@@ -227,12 +247,33 @@ def swipe_unity(x1: float, y1: float, x2: float, y2: float, screen: tuple[int, i
           bundle_id=bundle_id)
 
 
+# typeFocusCheck を持たない（古い）エージェントへの案内を出した接続先（URL＋トークン）
+_TYPE_FOCUS_WARNED: set[tuple[str, str]] = set()
+
+
 def type_text(text: str, bundle_id: str) -> None:
     """**対象アプリを明示して**文字を送る（入力欄のタップは呼び出し側で行う）。
 
     XCUITest の `typeText` は「呼び出した要素かその子孫にキーボードフォーカスがあること」が
     前提なので、送り先のアプリを指定しないと入力は届かない。対象が前面にない場合はエラー。
+
+    **フォーカスを持つ要素が見えなければ 409**（`OsAgentError.http_status`）。本文の `keyboardVisible` が真なら
+    「キーボードは出ているがフォーカスの要素がアクセシビリティに見えない」（Unity の入力欄をシミュレータで押したとき。
+    XCUITest の typeText では入らない）、偽なら「先に入力欄を押す」。以前は見ずに送り、200 のあとエージェントごと
+    終了した（issue #81）。**この確認を持たない古いエージェント**（features に typeFocusCheck が無い）では、
+    フォーカスが無いまま送ると今もエージェントが終了するので、最初の呼び出しで警告する。
     """
+    key = _agent_key()
+    if key not in _TYPE_FOCUS_WARNED:
+        try:
+            features = status().get("features")
+            _TYPE_FOCUS_WARNED.add(key)      # 確かめられたときだけ覚える（失敗したら次の呼び出しでまた確かめる）
+        except OsAgentError:
+            features = None
+        if isinstance(features, list) and "typeFocusCheck" not in features:
+            warnings.warn("接続先のエージェントはフォーカスの確認（typeFocusCheck）を持たない古い版です。"
+                          "フォーカスが無いまま type_text を送るとエージェントが終了します（作り直しは run-ios-e2e -OsAgent なら自動、"
+                          "docs/09-ios16-osagent.md の手組みは手順 1 から）")
     _post("/type", {"text": text, "bundleId": bundle_id})
 
 
@@ -252,6 +293,249 @@ def activate(bundle_id: str) -> None:
     未起動を拒否している（黙って起動すると、クラッシュ等で状態が失われたことを隠すため）。
     """
     _post("/activate", {"bundleId": bundle_id})
+
+
+# `/orientation` が受け付ける向き。名前は iOS の `UIDeviceOrientation` の case 名のまま（大小文字を区別）。
+# アプリ側の向きの名前（`UIInterfaceOrientation` や Unity の `ScreenOrientation`）とは左右の名前が一致するとは限らない
+ORIENTATIONS = ("portrait", "portraitUpsideDown", "landscapeLeft", "landscapeRight")
+
+
+def rotate(orientation: str) -> None:
+    """**端末の向き**を変える（XCUITest の `XCUIDevice.shared.orientation`。issue #83）。
+
+    **アプリが回ったことは保証しない** ― 回るのはアプリがその向きに対応している場合だけで、
+    エージェントにはアプリの向きが分からない。効果はアプリ側で確かめ、**縦横が変わるまで待つ**（更新は後のフレームになりうる）
+    （Unity なら ping の `screen` の幅と高さ。名前で突き合わせない）。
+    回したあと横画面のアプリを押すときは `bundle_id` を渡し、新しい画面サイズを使う。
+    テストで回したら、終わりに `rotate("portrait")` で戻す（**エージェントを止めても向きは残る**。シミュレータと実機で実測）。
+
+    応答の向き（書き込んだあとに読み直した値）が送った名前と違えば `OsAgentError`。
+    """
+    if not isinstance(orientation, str) or orientation not in ORIENTATIONS:
+        raise OsAgentError(f"orientation は {ORIENTATIONS} のどれかを指定してください（大小文字を区別）: {orientation!r}")
+    response = _post_new("/orientation", {"orientation": orientation}, "向きの変更（/orientation）", "端末は回していません。")
+    actual = response.get("orientation")
+    if actual != orientation:
+        raise OsAgentError(
+            f"/orientation の応答の向きが送った名前と一致しません（送った: {orientation!r} / 読み直した: {actual!r}）。"
+            "この環境では端末の向きの書き込みが効いていない可能性があります"
+        )
+
+
+def _post_new(path: str, payload: dict, what: str, consequence: str = "何もしていません。",
+              timeout: float = DEFAULT_TIMEOUT) -> dict:
+    """新しい操作を送る。**送る前に /status を往復しない**（古い版は 404 で何も起きないため）。
+
+    古いエージェントはハンドラの default が `unknown:` で始まる本文の 404 を返す。それだけを「古い版」の案内に読み替え、
+    それ以外の 404（要素が無い・同じポートを別のサーバーが握っている等）はそのまま出す。
+    """
+    try:
+        return _post(path, payload, timeout=timeout)
+    except OsAgentError as e:
+        if e.http_status == 404 and _error_text(e.body or "").startswith("unknown:"):
+            raise OsAgentError(
+                f"接続先のエージェントが{what}に対応していません。{consequence}"
+                "エージェントが古い版の可能性があります（run-ios-e2e -OsAgent ならキットの更新で次の実行から新しくなる。"
+                "docs/09-ios16-osagent.md の手組みは手順 1 からやり直す）",
+                http_status=404, body=e.body,
+            ) from e
+        raise
+
+
+def _error_text(body: str) -> str:
+    """エラー応答の本文から `error` を取り出す（JSON でなければ空文字）。"""
+    try:
+        value = json.loads(body).get("error", "")
+    except (ValueError, AttributeError):
+        return ""
+    return value if isinstance(value, str) else ""
+
+# ------------------------------------------------------------------ issue #85: アプリ・要素・ジェスチャ・端末
+
+# 要素の種類・ボタン・待つ状態の名前（エージェントと同じ一覧。大小文字を区別）
+ELEMENT_TYPES = ("any", "button", "staticText", "textField", "secureTextField", "textView", "searchField", "link",
+                 "image", "cell", "switch", "slider", "alert", "webView", "keyboard", "key", "icon", "other")
+BUTTONS = ("home", "volumeUp", "volumeDown")
+WAIT_STATES = ("exists", "gone", "hittable")
+_MAX_ELEMENT_TIMEOUT = 30.0
+
+
+def _require_bundle_id(bundle_id) -> str:
+    if not isinstance(bundle_id, str) or not bundle_id:
+        raise OsAgentError(f"bundle_id が空か文字列ではありません: {bundle_id!r}")
+    return bundle_id
+
+
+def app_state(bundle_id: str) -> dict:
+    """アプリの状態（`{"state": <数>, "stateName": "runningForeground" …}`）。Android の `current_focus` の代わりに「何が前面か」を確かめる。"""
+    return _post_new("/app/state", {"bundleId": _require_bundle_id(bundle_id)}, "アプリの状態の取得（/app/state）")
+
+
+def launch_app(bundle_id: str, arguments: list[str] | None = None, environment: dict[str, str] | None = None) -> dict:
+    """アプリを起動する。**動いていれば終了してから起動し直す**（XCUITest の仕様）。
+
+    Unity アプリを起動し直すと**ブリッジの接続は切れる**ので、`wait_for_bridge` で繋ぎ直し、`device_log.clear()` し直す。
+    ブリッジのポートは `environment={"UAPP_E2E_BRIDGE_PORT": "<アプリ側のポート>"}` で渡す（渡さないと既定の 13333）。
+    アプリ側のポートは e2e-config.json の `iosSimulatorPort`（`run-ios-e2e` は `UAPP_E2E_IOS_APP_PORT` で渡す）。
+    **実機では pytest の `UAPP_E2E_BRIDGE_PORT` はホスト側（iproxy の入口）なので、それを渡してはいけない**。
+    `arguments` は Unity の managed 側から見えないので、Unity への受け渡しは `environment` を使う。
+    起動に失敗するとエージェントが止まりうる（XCUITest がテストを止める）。
+    """
+    payload: dict = {"bundleId": _require_bundle_id(bundle_id)}
+    if arguments is not None:
+        if not isinstance(arguments, list) or not all(isinstance(a, str) for a in arguments):
+            raise OsAgentError("arguments は文字列のリストで指定してください")
+        payload["arguments"] = arguments
+    if environment is not None:
+        if not isinstance(environment, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in environment.items()):
+            raise OsAgentError("environment は文字列から文字列への辞書で指定してください")
+        payload["environment"] = environment
+    return _post_new("/app/launch", payload, "アプリの起動（/app/launch）", timeout=90.0)
+
+
+def terminate_app(bundle_id: str) -> dict:
+    """アプリを終了する（未起動でもエラーにしない）。"""
+    return _post_new("/app/terminate", {"bundleId": _require_bundle_id(bundle_id)}, "アプリの終了（/app/terminate）", timeout=60.0)
+
+
+def _query(bundle_id, identifier, label, value, label_contains, type) -> dict:  # noqa: A002 (エージェントの引数名)
+    q: dict = {}
+    if bundle_id is not None:
+        q["bundleId"] = _require_bundle_id(bundle_id)
+    for key, v in (("identifier", identifier), ("label", label), ("value", value), ("labelContains", label_contains)):
+        if v is not None:
+            if not isinstance(v, str) or not v:
+                raise OsAgentError(f"{key} は空でない文字列で指定してください: {v!r}")
+            q[key] = v
+    if type is not None:
+        if type not in ELEMENT_TYPES:
+            raise OsAgentError(f"type は {ELEMENT_TYPES} のどれかを指定してください（大小文字を区別）: {type!r}")
+        q["type"] = type
+    if len([k for k in q if k != "bundleId"]) == 0:
+        raise OsAgentError("identifier / label / value / label_contains / type のどれかが要ります（全要素は accessibility_tree）")
+    return q
+
+
+def _timeout(timeout: float) -> float:
+    if not isinstance(timeout, (int, float)) or timeout < 0 or timeout > _MAX_ELEMENT_TIMEOUT:
+        raise OsAgentError(f"timeout は 0〜{_MAX_ELEMENT_TIMEOUT} 秒で指定してください: {timeout!r}")
+    return float(timeout)
+
+
+def find_elements(*, bundle_id: str | None = None, identifier: str | None = None, label: str | None = None,
+                  value: str | None = None, label_contains: str | None = None, type: str | None = None,  # noqa: A002
+                  limit: int = 50) -> dict:
+    """アクセシビリティの要素を探す（`{"count": <一致数>, "elements": [...]}`）。**Unity の UI は出ない**。
+
+    `bundle_id` を省くと SpringBoard（ホーム画面・システムの UI）。各要素の `center` はそのアプリの画面の正規化座標で、
+    `tap(…, bundle_id=…)` に同じ `bundle_id` で渡せる。**押せるか（hittable）は返さない**（`tap_element` が判断する）。
+    並び順と `tap_element` の `index` は一致するとは限らないので、押すときは一意に決まる指定を使う。
+    """
+    payload = _query(bundle_id, identifier, label, value, label_contains, type)
+    payload["limit"] = int(limit)
+    return _post_new("/elements", payload, "要素の検索（/elements）")
+
+
+def tap_element(*, bundle_id: str | None = None, identifier: str | None = None, label: str | None = None,
+                value: str | None = None, label_contains: str | None = None, type: str | None = None,  # noqa: A002
+                index: int = 0, timeout: float = 5.0) -> dict:
+    """要素が現れるのを待って押す。現れなければ 404、**存在するが押せない（画面外・覆われている）なら 409**（`OsAgentError.http_status`）。"""
+    payload = _query(bundle_id, identifier, label, value, label_contains, type)
+    payload.update({"index": int(index), "timeout": _timeout(timeout)})
+    return _post_new("/element/tap", payload, "要素を押す操作（/element/tap）", timeout=timeout + DEFAULT_TIMEOUT)
+
+
+def wait_element(*, state: str = "exists", bundle_id: str | None = None, identifier: str | None = None,
+                 label: str | None = None, value: str | None = None, label_contains: str | None = None,
+                 type: str | None = None, index: int = 0, timeout: float = 5.0) -> dict:  # noqa: A002
+    """要素が `exists` / `gone` / `hittable` になるまで待つ（時間切れは 408 の `OsAgentError`）。"""
+    if state not in WAIT_STATES:
+        raise OsAgentError(f"state は {WAIT_STATES} のどれかを指定してください（大小文字を区別）: {state!r}")
+    payload = _query(bundle_id, identifier, label, value, label_contains, type)
+    payload.update({"state": state, "index": int(index), "timeout": _timeout(timeout)})
+    return _post_new("/element/wait", payload, "要素を待つ操作（/element/wait）", timeout=timeout + DEFAULT_TIMEOUT)
+
+
+def type_into(text: str, *, clear: bool = False, bundle_id: str | None = None, identifier: str | None = None,
+              label: str | None = None, value: str | None = None, label_contains: str | None = None,
+              type: str | None = None, index: int = 0, timeout: float = 5.0) -> dict:  # noqa: A002
+    """要素を押してフォーカスを当て、文字を入れる。`clear=True` は既存の値を消してから入れる。
+
+    **消し切れなければ 409 で入力しない**（カーソル位置・消去ボタン・伏せ字のせいで値が混ざるのを防ぐ）。
+    **消したあとの値がプレースホルダーと同じでも 409**（空欄なのか、残りがたまたま同じ文字列なのか判別できない）。
+    プレースホルダーのある欄では空になると値がプレースホルダーとして読めることがあるので、**空欄に入れるときは `clear` を付けない**。
+    """
+    if not isinstance(text, str):
+        raise OsAgentError(f"text は文字列で指定してください: {text!r}")
+    payload = _query(bundle_id, identifier, label, value, label_contains, type)
+    payload.update({"text": text, "clear": bool(clear), "index": int(index), "timeout": _timeout(timeout)})
+    return _post_new("/element/type", payload, "要素への文字入力（/element/type）", timeout=timeout + DEFAULT_TIMEOUT)
+
+
+def accessibility_tree(bundle_id: str | None = None) -> str:
+    """アクセシビリティツリーを丸ごと（`debugDescription`）。人と AI が読むデバッグ用で、形式は Apple の実装依存（機械で解析しない）。"""
+    payload = {} if bundle_id is None else {"bundleId": _require_bundle_id(bundle_id)}
+    try:
+        body, _ = _request("POST", "/tree", payload)
+    except OsAgentError as e:
+        if e.http_status == 404 and _error_text(e.body or "").startswith("unknown:"):
+            raise OsAgentError("接続先のエージェントがツリーの取得（/tree）に対応していません。エージェントが古い版の可能性があります",
+                               http_status=404, body=e.body) from e
+        raise
+    return body.decode("utf-8", errors="replace")
+
+
+def double_tap(x: float, y: float, bundle_id: str | None = None) -> None:
+    """正規化座標でダブルタップ（基準と前面確認は `tap` と同じ。横画面のアプリは `bundle_id` を渡す）。"""
+    payload = _with_bundle_id({"x": x, "y": y}, bundle_id)
+    _check_base(_post_new("/doubletap", payload, "ダブルタップ（/doubletap）"), bundle_id, "/doubletap")
+
+
+def double_tap_unity(x: float, y: float, screen: tuple[int, int], bundle_id: str | None = None) -> None:
+    """Unity の座標（左下原点）でダブルタップ。"""
+    nx, ny = _normalize_unity(x, y, screen)
+    double_tap(nx, ny, bundle_id=bundle_id)
+
+
+def long_press(x: float, y: float, duration: float = 1.0, bundle_id: str | None = None) -> None:
+    """正規化座標で長押し（`duration` は 0 より大きく 10 秒以下）。"""
+    if not isinstance(duration, (int, float)) or not 0 < duration <= 10:
+        raise OsAgentError(f"duration は 0 より大きく 10 以下で指定してください: {duration!r}")
+    payload = _with_bundle_id({"x": x, "y": y, "duration": float(duration)}, bundle_id)
+    _check_base(_post_new("/longpress", payload, "長押し（/longpress）", timeout=duration + DEFAULT_TIMEOUT),
+                bundle_id, "/longpress")
+
+
+def long_press_unity(x: float, y: float, screen: tuple[int, int], duration: float = 1.0,
+                     bundle_id: str | None = None) -> None:
+    """Unity の座標（左下原点）で長押し。"""
+    nx, ny = _normalize_unity(x, y, screen)
+    long_press(nx, ny, duration=duration, bundle_id=bundle_id)
+
+
+def pinch(bundle_id: str, scale: float, velocity: float | None = None) -> dict:
+    """アプリの要素に対してピンチ（`scale` は 0.1〜10。`velocity` を省くと scale に合わせる）。座標指定のピンチは XCUITest に無い。"""
+    if not isinstance(scale, (int, float)) or not 0.1 <= scale <= 10:
+        raise OsAgentError(f"scale は 0.1〜10 で指定してください: {scale!r}")
+    payload: dict = {"bundleId": _require_bundle_id(bundle_id), "scale": float(scale)}
+    if velocity is not None:
+        payload["velocity"] = float(velocity)
+    return _post_new("/pinch", payload, "ピンチ（/pinch）")
+
+
+def press_button(name: str) -> dict:
+    """端末のボタン（`home` / `volumeUp` / `volumeDown`）。音量はシミュレータでは 400。"""
+    if name not in BUTTONS:
+        raise OsAgentError(f"button は {BUTTONS} のどれかを指定してください（大小文字を区別）: {name!r}")
+    return _post_new("/press", {"button": name}, "ボタンを押す操作（/press）")
+
+
+def open_url(url: str) -> dict:
+    """URL・ディープリンクを開く（iOS 16.4 以降。独自スキームは初回に「開きますか」で戻らないことがある）。"""
+    if not isinstance(url, str) or not re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", url):
+        raise OsAgentError(f"url はスキームつきで指定してください（例: https://… / myapp://…）: {url!r}")
+    return _post_new("/open-url", {"url": url}, "URL を開く操作（/open-url）")
+
 
 
 def stop(timeout: float = 10.0) -> None:

@@ -246,7 +246,7 @@ iproxy 8201:8200 -u "$UDID" & IPROXY_PID=$!
 
 ```bash
 curl -sS -H "X-Uapp-Token: $TOKEN" http://127.0.0.1:8201/status
-# {"agent":"uapp-os-agent/1.0","platform":"iOS","screen":{...},"features":["bundleId"],"authenticated":true,"ok":true}
+# {"agent":"uapp-os-agent/1.0","platform":"iOS","screen":{...},"features":["bundleId","orientation","app","elements","gestures","press","openUrl","typeFocusCheck"],"orientation":"portrait","authenticated":true,"ok":true}
 ```
 
 **`authenticated: true` まで見る。**

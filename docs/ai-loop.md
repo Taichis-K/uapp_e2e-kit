@@ -85,7 +85,7 @@ cd uapp_e2e
 pytest は `$env:UAPP_E2E_EDITOR = "1"; pytest tests; Remove-Item Env:\UAPP_E2E_EDITOR` で
 adb を迂回して流せる。**最後の `Remove-Item` を省かない** — 立てっぱなしのまま同じシェルで
 デバイス経路へ進むと、adb の使用が明示エラーで拒否され、接続先の検査にも引っかかる。
-adb を直接使うテスト—logcat アサート・adb タップ—は対象外で明示エラーになるため `-k` で除外する。
+`adb.*` を直接呼ぶテスト（`adb.clear_logcat` の例外アサート・adb タップ）は対象外で明示エラーになるため `-k` で除外する（例外アサートは `device_log` で書けばエディタでも回る）。
 ビルド不要なので外側ループの高速な代替になる。
 ただし実機との差異があるため、最終確認はエミュレーター/実機で行う）。
 
@@ -150,13 +150,13 @@ adb.uninstall(pkg); adb.install(apk)                      # クリーンイン�
 2. 操作APIは `e2e-config.json` の `uiType` に従う（`ngui-legacy` は `ngui_tap` 系 / `ugui-legacy` は `ugui_tap` 系）
 3. 待機は `wait_until_*` を使う。`time.sleep` は「待てる条件が存在しない」場合
    （物理値の安定待ち・「何も起きない」ことの確認）のみ例外とし、理由をコメントに書く
-4. マルチタッチテストは logcat 例外アサートをセットにする
+4. マルチタッチテストはアプリの例外アサートをセットにする（`device_log.clear(client)` → 操作 → `device_log.unity_exceptions(client)` が空。Android は logcat、iOS とエディタはブリッジのログ（ブリッジの経路は `Debug.LogError` もすべて数えるので Android の logcat の照合より厳しい。エディタでは Play 中のエディタ側のエラー＝インポート・拡張・パッケージも混ざる））
 5. 描画検証はスクリーンショットを画像として読む
 6. **アプリの外は計装では触れない**（issue #66）。**外部ブラウザ・システムダイアログ・
    ソフトウェアキーボード・他アプリ・IMGUI（`OnGUI`）は `dump` にも出ず `tap` でも押せない** ―
    計装は Unity アプリの中で動いているため。
    使うのは **Android: `adb.ui_tap` / `adb.ui_type`、iOS: `os_agent.tap` / `os_agent.type_text` /
-   `os_agent.handle_alert`**（`from e2e_driver import adb, os_agent`。
+   `os_agent.handle_alert` / `os_agent.tap_element` / `os_agent.rotate`**（`from e2e_driver import adb, os_agent`。
    iOS は `run-ios-e2e.ps1 -OsAgent` で起動しておく）。
    **文字入力が要る導線は、ここを知らないと詰まる** ― 実際に導入先が
    「入力欄に値を入れられずテストが進まない」で止まった
@@ -223,7 +223,7 @@ adb.uninstall(pkg); adb.install(apk)                      # クリーンイン�
 ## 失敗解析の優先順位
 
 1. pytest の失敗メッセージ（`BlockedError` は遮蔽者のパスを含む）
-2. `uapp_e2e/Builds/failure/unity-logcat.txt` の例外スタック → 修正対象コードの特定に直結
+2. `uapp_e2e/Builds/failure/unity-logcat.txt` の例外スタック → 修正対象コードの特定に直結（iOS は `uapp_e2e/Builds/failure/ios-app-log.txt`。ブリッジが溜めたアプリのログで、アプリが落ちていると書けない）
 3. `uapp_e2e/Builds/failure/screen.png` を画像として読む
 4. **全テスト接続エラーなら `uapp_e2e/Builds/failure/crash.txt`**（ネイティブクラッシュはUnityタグに出ない）。
    `adb shell pidof <package>` が空ならプロセス死亡。アプリが生きていて接続だけ死んでいるなら
@@ -320,7 +320,7 @@ adb.uninstall(pkg); adb.install(apk)                      # クリーンイン�
 
 | 呼び方 | 何をするもの | 対象 | トークン |
 |---|---|---|---|
-| OS エージェント | XCUITest 経由の `/tap` `/swipe` `/alert` `/screenshot` | iOS 実機・シミュレータ | 要る（`X-Uapp-Token`） |
+| OS エージェント | XCUITest 経由の `/tap` `/swipe` `/alert` `/screenshot` `/orientation` `/elements` `/element/*` `/app/*` `/press` `/open-url` ほか | iOS 実機・シミュレータ | 要る（`X-Uapp-Token`） |
 | mac 自身を見る側 | `System Events` / `CGWindowList` / `screencapture` | mac のアプリ（Unity エディタのモーダル判定など） | 無い。要るのは OS の権限 |
 | 端末設定の「UI オートメーションを有効」 | iOS の設定 → デベロッパ | iOS 実機 | — （OS エージェントの前提） |
 
@@ -401,7 +401,7 @@ adb.uninstall(pkg); adb.install(apk)                      # クリーンイン�
    ```
 
    - `screen` には**アプリ側の画面サイズ**（ブリッジの `ping` の `screen`＝Unity の `Screen.width`・`height`。横なら横長）を渡す。
-     `os_agent.status()` の `screen` は SpringBoard の大きさ（縦のまま）なので使わない
+     `os_agent.status()` の `screen` は SpringBoard の大きさ（iPhone では縦のまま。iPad は未実測）なので使わない
    - `bundle_id` のアプリが**前面に無ければ押さずに止まる**（HTTP 409。未起動と背面で案内が違う）
    - **前面のアプリの上にアラートや通知が重なっていると、409 にならずにそちらを押しうる**（前面かどうかはアプリ単位で判定する）
    - **システムダイアログ・ホーム画面を押すときは `bundle_id` を渡さない**（SpringBoard 基準）
@@ -410,6 +410,67 @@ adb.uninstall(pkg); adb.install(apk)                      # クリーンイン�
    - **エージェントが古い版だと、`bundle_id` を渡した時点で押さずに止まる**（`run-ios-e2e.ps1 -OsAgent` は毎回ビルドし直すので、キットを更新すれば次の実行で新しくなる。`docs/09-ios16-osagent.md` の手組みは手順 1 からやり直す）
    - `/screenshot` は横画面でも**縦の寸法のまま、中身が回った画像**で返った（シミュレータで実測。実機は未実測）。
      画像の座標をそのまま押す座標に使わない
+
+7. **端末を回したことにするなら `os_agent.rotate()`**（テストの途中で呼ぶ。Android には同じ API は無く、`e2e-config.json` の `deviceRotation` で**実行前に**向きを固定する。両者の向きの名前の対応は実測していない）。
+
+   ```python
+   from e2e_driver import os_agent
+   # client / g はテスト関数の fixture（BridgeClient / Gestures）
+
+   os_agent.rotate("landscapeRight")    # portrait / portraitUpsideDown / landscapeLeft / landscapeRight（大小文字を区別）
+   g.wait_until(lambda: (lambda s: s["w"] > s["h"])(client.ping()["screen"]), timeout=10)   # アプリが横になるまで待つ
+   ...
+   os_agent.rotate("portrait")          # 終わりに戻す（fixture の後始末で）
+   ```
+
+   - **変わるのは端末の向きで、アプリが回ったことは保証しない**（回るのはアプリがその向きに対応している場合だけ）。
+     効果は**アプリの画面の縦横**で確かめ、**変わるまで待つ**（Unity の `Screen` の更新は後のフレームになりうる）
+   - **向きを名前で突き合わせない** ― 名前は端末の向き（`UIDeviceOrientation`）で、アプリ側の向きの名前
+     （`UIInterfaceOrientation`・Unity の `ScreenOrientation`）とは左右が一致するとは限らない
+   - 回したあと横画面のアプリを押すときは、上の 6 のとおり `bundle_id` を渡し、**新しい**画面サイズを使う
+   - 応答の向き（回したあとに読み直した値）が送った名前と違えば止まる。エージェントが古い版だと「対応していません」で止まる（端末は回らない。作り直しは 6 と同じ）
+   - **テストで回したら戻す**。**エージェントを止めても向きは残る**ので（シミュレータと実機で実測）、戻さずに終わると次の走行が横のまま始まる
+   - **実機では、人が端末を動かすとセンサーの向きに戻る**（回したあと端末を手で横 → 縦にすると縦に戻った。実機の観測）。端末を置いたまま回す前提で使い、テストの途中で端末に触れない
+   - **横 → 横（`landscapeRight` → `landscapeLeft`）は縦横で待てない**（前の段で横になっているので待ちがすぐ真になる）。追従を確かめるなら間に `portrait` を挟む
+
+8. **アプリの外の要素・アプリ・ジェスチャ・端末**（issue #85。どれも `run-ios-e2e.ps1 -OsAgent` のとき）。
+
+   ```python
+   import os
+   from e2e_driver import os_agent
+   # app = os.environ["UAPP_E2E_IOS_BUNDLE_ID"]・screen = client.ping()["screen"]・(w, h) = (screen["w"], screen["h"])・
+   # c = client.resolve("<パス>")["center"]; cx, cy = c["x"], c["y"]。UAPP_E2E_IOS_* は run-ios-e2e 経由のときだけ立つ（手で回すなら自分で書く）
+
+   # 要素（WebView・Safari・システム UI・ネイティブのダイアログ。**Unity の UI は出ない**）
+   os_agent.wait_element(bundle_id="com.apple.mobilesafari", label="ログイン", type="button", timeout=20)
+   os_agent.type_into("user@example.com", bundle_id="com.apple.mobilesafari", type="textField", label="メール")   # 空欄なので clear は付けない
+   os_agent.tap_element(bundle_id="com.apple.mobilesafari", label="ログイン")
+   print(os_agent.accessibility_tree(bundle_id="com.apple.mobilesafari"))   # 何があるかを見る（デバッグ用）
+
+   # アプリ・端末
+   os_agent.app_state(app)["stateName"]          # "runningForeground" など（Android の current_focus の代わり）
+   os_agent.press_button("home"); os_agent.open_url("myapp://path")
+   os_agent.terminate_app(app)
+   os_agent.launch_app(app, environment={"UAPP_E2E_BRIDGE_PORT": os.environ["UAPP_E2E_IOS_APP_PORT"]})   # アプリ側のポート（実機でホスト側の値を渡さない）
+
+   # ジェスチャ（座標の基準は tap と同じ。横画面のアプリは bundle_id を渡す）
+   os_agent.double_tap_unity(cx, cy, (w, h), bundle_id=app)
+   os_agent.long_press_unity(cx, cy, (w, h), duration=2, bundle_id=app)
+   os_agent.pinch(app, 2.0)                      # アプリ全体に対して（座標指定のピンチは XCUITest に無い）
+   ```
+
+   - 要素の指定は `identifier` / `label` / `value`（完全一致）・`label_contains`（部分一致）・`type`。**どれも大小文字を区別**。`bundle_id` を省くと SpringBoard（ホーム画面・システムの UI）
+   - **押せない要素は押さない**（存在するが画面外・覆われていれば 409。画面外なら `swipe` でスクロールしてからやり直す。XCUITest に無理に押させるとエージェントが止まりうる）
+   - `find_elements` の `center` はそのアプリの画面の正規化座標で、`tap(…, bundle_id=…)` に渡せる。並び順と `tap_element` の `index` は一致するとは限らない
+   - `type_into(clear=True)` は消し切れなければ 409 で**入力しない**（値が混ざるのを防ぐ）。**消したあとの値がプレースホルダーと同じだと**空欄か判別できず 409 になる（プレースホルダーのある欄は空になると値がプレースホルダーとして読めることがある）ので、**空欄に入れるときは `clear` を付けない**。`/type`（`type_text`）は、**フォーカスを持つ要素が見えなければ 409**（以前は 200 を返したあとエージェントごと終了した）
+   - **Unity の入力欄への `type_text`**: 実機（iPhone 8 / iOS 16）では、入力欄を押して 2 秒ほど待つと値が入る。**シミュレータ（iPhone 16 / iOS 18.6）では入らない**（キーボードは出るがフォーカスの要素がアクセシビリティに見えないので、`keyboardVisible: true` の 409 で止まる）。シミュレータで入力欄に値を入れる手段は同梱していない（ブリッジに値を書き込むコマンドは無い）。シミュレータで入力の導線を通すなら、アプリ側にテスト用の口を用意するか、実機で確かめる
+   - **`open_url` や `launch_app` の直後は、`app_state` が `runningForeground` になるまで待ってから**要素を扱う（`bundle_id` を渡す操作は前面かをすぐ確かめて 409 を返す）
+   - **`launch_app` で Unity のアプリを起動し直すと、ブリッジの接続は切れる**。`wait_for_bridge` で繋ぎ直し、`device_log.clear()` し直す。起動に失敗するとエージェントが止まりうる
+   - 音量ボタンはシミュレータでは 400。独自スキームの `open_url` は初回に「開きますか」のダイアログで戻らないことがある。`pinch` の `velocity` は**省く**（既定は縮小 `scale < 1` なら負・拡大なら正。実測したのは縮小 0.3 に -1 と拡大 3.0 に +1 だけ）。Apple の資料は `velocity` を「1 秒あたりの倍率」とだけ書き、符号の規則は無い。逆の符号や大きすぎる値は未実測で、「要素の大きさで無理な値はテストの失敗になる」（XCTest のヘッダ）ので、エージェントが止まりうる
+   - **テスト中の例外は `device_log`**（`device_log.clear(client)` → 操作 → `device_log.unity_exceptions(client)`）。iOS では `Debug.Log` が OS のログに出ないので、
+     ブリッジがアプリの中で溜めたログを読む。**取れていない（アプリが起動し直された・溢れた・ブリッジが古い・ロガーを止めている）ときは空ではなく `DeviceLogUnavailableError`**（ロガーを止めている・例外が届かないほど絞っているなら `clear()` の時点で止まる。`clear()` のあとに設定が変われば読むときに止まる。
+     **`clear()` と読みのあいだで止めて、読む前に元へ戻した場合は検出できない**）。数え方の注意は上の 4 と同じ（ブリッジの経路は `Debug.LogError` もすべて数えるので Android の logcat の照合より厳しい。エディタでは Play 中のエディタ側のエラー＝インポート・拡張・パッケージも混ざる）。
+     印は最後の `clear()` のものが残るので、**テストの初めに `clear()` する**（起動し直したあと `clear()` せずに読むと止まる）
 
 ### やること: mac 自身を見る側
 

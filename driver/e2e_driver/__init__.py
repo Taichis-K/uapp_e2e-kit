@@ -6,8 +6,8 @@ from .gestures import Gestures
 # 外部ブラウザ・システムダイアログ・キーボード・他アプリは dump にも tap にも出てこない。
 # そこを埋めるのが Android=adb（uiautomator）/ iOS=os_agent（XCUITest）で、
 # **adb だけを公開していたので iOS 側は存在に気づかれなかった**
-from . import adb, os_agent
+from . import adb, device_log, os_agent
 
 __all__ = ["BridgeClient", "BridgeError", "BlockedError", "WrongBridgeTargetError", "Gestures",
            "wait_for_bridge",
-           "Keyboard", "Mouse", "Gamepad", "adb", "os_agent"]
+           "Keyboard", "Mouse", "Gamepad", "adb", "device_log", "os_agent"]

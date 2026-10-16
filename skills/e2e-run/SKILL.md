@@ -36,7 +36,7 @@ description: UnityアプリのE2Eテストを実行し、失敗時は証跡（lo
 
 1. pytest の失敗メッセージ。`BlockedError` は「誰に遮られたか」のパス付き —
    仕様（先に閉じる操作/`wait_until_hittable`を追加）かバグ（アプリ修正）かを判断
-2. `uapp_e2e/Builds/failure/unity-logcat.txt` — マネージド例外のスタックから修正対象を特定
+2. `uapp_e2e/Builds/failure/unity-logcat.txt` — マネージド例外のスタックから修正対象を特定（iOS は `uapp_e2e/Builds/failure/ios-app-log.txt`＝ブリッジが溜めたアプリのログ。iOS では Debug.Log が OS のログに出ない）
 3. `uapp_e2e/Builds/failure/screen.png` — 画像として読み、実際の画面状態を確認
 4. **全テストが接続エラーの場合** `uapp_e2e/Builds/failure/crash.txt`（ネイティブクラッシュはUnityタグに出ない）。
    `adb shell pidof <package>` が空ならプロセス死亡。空のままアプリが生きていればエミュレーター疲弊を疑い `adb reboot`

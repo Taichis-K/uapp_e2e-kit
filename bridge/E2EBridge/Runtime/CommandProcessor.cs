@@ -64,6 +64,8 @@ namespace E2EBridge
                     case "texts":         result = HierarchyDumper.Texts(args); break;
                     case "resolve":       result = HierarchyDumper.Resolve(args); break;
                     case "get":           result = HierarchyDumper.GetProperty(args); break;
+                    // アプリのログ（リングバッファ）。iOS では Debug.Log が OS のログに出ないため（issue #85）
+                    case "logs":          result = BridgeLog.Read(args); break;
                     case "pointer_down":  result = TouchInjector.Down(args); break;
                     case "pointer_move":  result = TouchInjector.Move(args); break;
                     case "pointer_up":    result = TouchInjector.Up(args); break;

@@ -585,6 +585,377 @@ def test_os_agent_stop_never_raises(monkeypatch):
     os_agent.stop()   # 例外にならないこと
 
 
+def _os_agent_rotate_mocks(monkeypatch, response=None, error=None):
+    """rotate のテスト用。`_post` の送信を記録し、応答か例外を差し替える。"""
+    from e2e_driver import os_agent
+
+    monkeypatch.setenv("UAPP_E2E_OS_AGENT_URL", "http://127.0.0.1:8200")
+    sent = []
+
+    def fake_post(path, payload, **k):
+        sent.append((path, payload))
+        if error is not None:
+            raise error
+        return response if response is not None else {"ok": True, "orientation": payload["orientation"]}
+
+    monkeypatch.setattr(os_agent, "_post", fake_post)
+    return os_agent, sent
+
+
+@pytest.mark.parametrize("bad", ["", "LandscapeLeft", "landscapeleft", "faceUp", "unknown", None, 1])
+def test_os_agent_rotate_rejects_bad_names_without_sending(monkeypatch, bad):
+    """4 つ以外の名前（大小文字違い・faceUp・型違い）は**送らずに**止める（issue #83）。"""
+    os_agent, sent = _os_agent_rotate_mocks(monkeypatch)
+    with pytest.raises(os_agent.OsAgentError, match="大小文字を区別"):
+        os_agent.rotate(bad)
+    assert sent == []
+
+
+def test_os_agent_rotate_sends_name_and_accepts_matching_readback(monkeypatch):
+    """4 つの名前はそのまま送り、読み直した向きが一致すれば戻る。"""
+    os_agent, sent = _os_agent_rotate_mocks(monkeypatch)
+    for name in os_agent.ORIENTATIONS:
+        os_agent.rotate(name)
+    assert sent == [("/orientation", {"orientation": n}) for n in os_agent.ORIENTATIONS]
+
+
+@pytest.mark.parametrize("readback", ["portrait", "unknown", "faceUp", None])
+def test_os_agent_rotate_rejects_mismatched_readback(monkeypatch, readback):
+    """読み直した向きが送った名前と違えば止める（書き込みが効かない環境への網）。"""
+    os_agent, _ = _os_agent_rotate_mocks(monkeypatch, response={"ok": True, "orientation": readback})
+    with pytest.raises(os_agent.OsAgentError, match="一致しません"):
+        os_agent.rotate("landscapeRight")
+
+
+def test_os_agent_rotate_translates_unknown_route_404_to_old_agent(monkeypatch):
+    """古いエージェントの 404（`unknown:` の本文）は「古い版」の案内に読み替える。**案内文そのものを照合する**
+    （読み替えを外しても OsAgentError は投げられるので、型だけでは守れない）。"""
+    from e2e_driver import os_agent as m
+
+    old = m.OsAgentError("POST /orientation が失敗（HTTP 404）", http_status=404,
+                         body='{"error":"unknown: POST /orientation"}')
+    os_agent, _ = _os_agent_rotate_mocks(monkeypatch, error=old)
+    with pytest.raises(os_agent.OsAgentError, match="向きの変更（/orientation）に対応していません") as e:
+        os_agent.rotate("landscapeLeft")
+    assert e.value.http_status == 404
+
+
+@pytest.mark.parametrize("status, body", [
+    (404, '{"error":"not found"}'),   # 同じポートを別のサーバーが握っている等
+    (404, "<html>404</html>"),         # JSON でない
+    (400, '{"error":"unknown: x"}'),   # 404 以外は本文が何でも読み替えない
+])
+def test_os_agent_rotate_keeps_other_errors_as_is(monkeypatch, status, body):
+    """`unknown:` で始まる 404 以外は読み替えず、元の例外をそのまま出す。"""
+    from e2e_driver import os_agent as m
+
+    original = m.OsAgentError(f"POST /orientation が失敗（HTTP {status}）: {body}", http_status=status, body=body)
+    os_agent, _ = _os_agent_rotate_mocks(monkeypatch, error=original)
+    with pytest.raises(os_agent.OsAgentError) as e:
+        os_agent.rotate("landscapeLeft")
+    assert e.value is original
+
+
+def test_os_agent_request_keeps_http_status_and_body(monkeypatch):
+    """`_request` は HTTP のエラーの状態コードと本文を例外に残す（rotate の読み替えの材料）。"""
+    import io
+    import urllib.error
+    from e2e_driver import os_agent
+
+    monkeypatch.setenv("UAPP_E2E_OS_AGENT_URL", "http://127.0.0.1:8200")
+    payload = b'{"error":"unknown: POST /orientation"}'
+
+    def fake_urlopen(request, timeout):
+        raise urllib.error.HTTPError(request.full_url, 404, "Not Found", {}, io.BytesIO(payload))
+
+    monkeypatch.setattr(os_agent.urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(os_agent.OsAgentError) as e:
+        os_agent._post("/orientation", {"orientation": "portrait"})
+    assert e.value.http_status == 404
+    assert e.value.body == payload.decode()
+
+
+# ---------------------------------------------------------------------------
+# issue #85: OS エージェントのアプリ・要素・ジェスチャ・端末と、device_log
+#
+
+def _os_agent_post_recorder(monkeypatch, response=None, features=("bundleId",)):
+    """新しい操作のテスト用。`_post` の送信を記録し、bundle_id の事前確認の /status も差し替える。"""
+    from e2e_driver import os_agent
+
+    monkeypatch.setenv("UAPP_E2E_OS_AGENT_URL", "http://127.0.0.1:8200")
+    monkeypatch.setattr(os_agent, "_BUNDLE_ID_SUPPORTED", set())
+    sent = []
+
+    def fake_post(path, payload, **k):
+        sent.append((path, payload, k.get("timeout")))
+        if response is not None:
+            return response
+        return {"ok": True, "base": payload.get("bundleId", "springboard")}
+
+    monkeypatch.setattr(os_agent, "_post", fake_post)
+    monkeypatch.setattr(os_agent, "status", lambda **k: {"agent": "uapp-os-agent/1.0", "features": list(features)})
+    return os_agent, sent
+
+
+def test_os_agent_new_operations_send_expected_json(monkeypatch):
+    """各操作が送るパスと本文（エージェントの約束どおりの名前）。"""
+    os_agent, sent = _os_agent_post_recorder(monkeypatch)
+    os_agent.app_state("com.example.app")
+    os_agent.launch_app("com.example.app", arguments=["-a"], environment={"UAPP_E2E_BRIDGE_PORT": "13383"})
+    os_agent.terminate_app("com.example.app")
+    os_agent.find_elements(bundle_id="com.apple.mobilesafari", label_contains="Go", type="button", limit=10)
+    os_agent.tap_element(identifier="ok", index=1, timeout=3)
+    os_agent.wait_element(state="gone", label="Loading")
+    os_agent.type_into("hello", clear=True, type="textField")
+    os_agent.double_tap(0.5, 0.25)
+    os_agent.long_press(0.1, 0.2, duration=2)
+    os_agent.pinch("com.example.app", 0.5)
+    os_agent.press_button("home")
+    os_agent.open_url("myapp://path")
+    assert [p for p, _, _ in sent] == ["/app/state", "/app/launch", "/app/terminate", "/elements", "/element/tap",
+                                       "/element/wait", "/element/type", "/doubletap", "/longpress", "/pinch",
+                                       "/press", "/open-url"]
+    body = {p: b for p, b, _ in sent}
+    assert body["/app/launch"] == {"bundleId": "com.example.app", "arguments": ["-a"],
+                                   "environment": {"UAPP_E2E_BRIDGE_PORT": "13383"}}
+    assert body["/elements"] == {"bundleId": "com.apple.mobilesafari", "labelContains": "Go", "type": "button", "limit": 10}
+    assert body["/element/tap"] == {"identifier": "ok", "index": 1, "timeout": 3.0}
+    assert body["/element/wait"]["state"] == "gone"
+    assert body["/element/type"] == {"type": "textField", "text": "hello", "clear": True, "index": 0, "timeout": 5.0}
+    assert body["/longpress"] == {"x": 0.1, "y": 0.2, "duration": 2.0}
+    assert body["/pinch"] == {"bundleId": "com.example.app", "scale": 0.5}
+    # HTTP の時間切れは「所要の上限＋余裕」
+    timeouts = {p: t for p, _, t in sent}
+    assert timeouts["/element/tap"] == 3 + os_agent.DEFAULT_TIMEOUT
+    assert timeouts["/longpress"] == 2 + os_agent.DEFAULT_TIMEOUT
+    assert timeouts["/app/launch"] == 90.0
+
+
+@pytest.mark.parametrize("call", [
+    lambda m: m.find_elements(),                              # 指定が何も無い
+    lambda m: m.find_elements(type="Button"),                 # 大小文字違い
+    lambda m: m.tap_element(label=""),                        # 空文字
+    lambda m: m.wait_element(state="Exists", label="x"),
+    lambda m: m.tap_element(label="x", timeout=31),           # 上限超え
+    lambda m: m.long_press(0.5, 0.5, duration=0),
+    lambda m: m.long_press(0.5, 0.5, duration=11),
+    lambda m: m.pinch("com.example.app", 0.05),
+    lambda m: m.pinch("", 2),
+    lambda m: m.press_button("Home"),
+    lambda m: m.open_url("no-scheme"),
+    lambda m: m.app_state(""),
+    lambda m: m.launch_app("com.example.app", arguments="-a"),
+    lambda m: m.launch_app("com.example.app", environment={"A": 1}),
+])
+def test_os_agent_new_operations_reject_bad_input_without_sending(monkeypatch, call):
+    """名前・範囲・型の誤りは**送らずに**止める（エージェントと同じ一覧。大小文字を区別）。"""
+    os_agent, sent = _os_agent_post_recorder(monkeypatch)
+    with pytest.raises(os_agent.OsAgentError):
+        call(os_agent)
+    assert sent == []
+
+
+def test_os_agent_new_operation_old_agent_404_is_translated_but_missing_element_is_not(monkeypatch):
+    """古い版の 404（`unknown:`）だけを「古い版」と案内する。要素が無い 404 はそのまま（**案内文そのものを照合する**）。"""
+    from e2e_driver import os_agent
+
+    monkeypatch.setenv("UAPP_E2E_OS_AGENT_URL", "http://127.0.0.1:8200")
+
+    def old_agent(path, payload, **k):
+        raise os_agent.OsAgentError("HTTP 404", http_status=404, body='{"error":"unknown: POST /app/state"}')
+
+    monkeypatch.setattr(os_agent, "_post", old_agent)
+    with pytest.raises(os_agent.OsAgentError, match="アプリの状態の取得（/app/state）に対応していません"):
+        os_agent.app_state("com.example.app")
+
+    missing = os_agent.OsAgentError("HTTP 404", http_status=404, body='{"error":"要素が見つかりません（5.0 秒待った）"}')
+
+    def no_element(path, payload, **k):
+        raise missing
+
+    monkeypatch.setattr(os_agent, "_post", no_element)
+    with pytest.raises(os_agent.OsAgentError) as e:
+        os_agent.tap_element(label="ok")
+    assert e.value is missing
+
+
+def test_os_agent_gestures_with_bundle_id_check_support_and_base(monkeypatch):
+    """bundle_id を渡すジェスチャは、既存の tap と同じく押す前に対応を確かめ、応答の base も照合する。"""
+    os_agent, sent = _os_agent_post_recorder(monkeypatch, features=())
+    with pytest.raises(os_agent.OsAgentError, match="bundle_id"):
+        os_agent.double_tap(0.5, 0.5, bundle_id="com.example.app")
+    assert sent == []   # 古い版には押さない
+
+    os_agent, sent = _os_agent_post_recorder(monkeypatch, response={"ok": True, "base": "springboard"})
+    with pytest.raises(os_agent.OsAgentError, match="base"):
+        os_agent.long_press(0.5, 0.5, bundle_id="com.example.app")
+
+
+class _FakeLogBridge:
+    """device_log のテスト用の偽ブリッジ（`logs` だけ）。ページの大きさを小さくして「追いつくまで読む」を確かめる。"""
+
+    def __init__(self, page=2):
+        self.session = "s1"
+        self.entries = []          # (type, message)
+        self.first = 0
+        self.dropped = 0
+        self.page = page
+        self.logEnabled = True
+        self.filterLogType = "Log"
+        self.unknown = False
+        self.calls = 0
+        self.off_on_calls = set()   # この番号（0 始まり）の呼び出しだけ logEnabled=False を返す
+
+    def add(self, type_, message):
+        self.entries.append((type_, message))
+
+    def logs(self, since=None, max=None):  # noqa: A002
+        from e2e_driver.client import BridgeError
+        if self.unknown:
+            raise BridgeError("UNKNOWN_COMMAND", "unknown command: logs")
+        call = self.calls
+        self.calls += 1
+        enabled = self.logEnabled and call not in self.off_on_calls
+        nxt = len(self.entries)
+        import builtins   # 引数名 max が組み込みを隠すため
+        start = self.first if since is None else builtins.max(since, self.first)
+        out = [{"seq": i, "type": t, "message": m, "stack": ""}
+               for i, (t, m) in enumerate(self.entries) if i >= start][: self.page]
+        return {"session": self.session, "first": self.first, "next": nxt, "dropped": self.dropped,
+                "logEnabled": enabled, "filterLogType": self.filterLogType, "entries": out}
+
+
+@pytest.fixture
+def bridge_log(monkeypatch):
+    from e2e_driver import device_log
+    monkeypatch.setenv("UAPP_E2E_IOS", "1")
+    monkeypatch.delenv("UAPP_E2E_EDITOR", raising=False)
+    monkeypatch.setattr(device_log, "_mark", None)
+    return device_log, _FakeLogBridge()
+
+
+def test_device_log_android_delegates_to_adb(monkeypatch):
+    """Android（エディタでも iOS でもない）は adb のまま（ネイティブのクラッシュや ANR の行も拾えるので変えない）。"""
+    from e2e_driver import adb, device_log
+    monkeypatch.delenv("UAPP_E2E_IOS", raising=False)
+    monkeypatch.delenv("UAPP_E2E_EDITOR", raising=False)
+    calls = []
+    monkeypatch.setattr(adb, "clear_logcat", lambda: calls.append("clear"))
+    monkeypatch.setattr(adb, "unity_exceptions", lambda: ["E/Unity: NullReferenceException"])
+    monkeypatch.setattr(adb, "unity_log", lambda: "log")
+    device_log.clear()
+    assert device_log.unity_exceptions() == ["E/Unity: NullReferenceException"]
+    assert device_log.unity_log() == "log"
+    assert calls == ["clear"]
+
+
+@pytest.mark.parametrize("env", ["UAPP_E2E_IOS", "UAPP_E2E_EDITOR"])
+def test_device_log_reads_after_mark_and_pages_until_caught_up(monkeypatch, env, bridge_log):
+    """clear() の後ろだけを、**next に追いつくまで**読む（1 回の応答の上限で後半を落とさない）。エディタでも同じ経路。"""
+    device_log, fake = bridge_log
+    monkeypatch.delenv("UAPP_E2E_IOS", raising=False)
+    monkeypatch.setenv(env, "1")
+    fake.add("Exception", "before-mark")
+    device_log.clear(fake)
+    for i in range(5):
+        fake.add("Log", f"log{i}")
+    fake.add("Error", "late-error")          # ページ（2 件）を何度もまたいだ先
+    fake.add("Assert", "late-assert")
+    assert device_log.unity_exceptions(fake) == ["Error: late-error", "Assert: late-assert"]
+    assert "log4" in device_log.unity_log(fake)
+
+
+def test_device_log_without_clear_reads_from_start(bridge_log):
+    device_log, fake = bridge_log
+    fake.add("Exception", "boom")
+    assert device_log.unity_exceptions(fake) == ["Exception: boom"]
+
+
+@pytest.mark.parametrize("breaker, message", [
+    (lambda f: setattr(f, "session", "s2"), "起動し直された"),
+    (lambda f: setattr(f, "first", 5), "溢れて"),
+    (lambda f: setattr(f, "unknown", True), "古い版"),
+    (lambda f: setattr(f, "logEnabled", False), "ロガーの設定を変えました"),     # clear のあとに止めた
+    (lambda f: setattr(f, "filterLogType", "Error"), "ロガーの設定を変えました"),  # clear のあとに絞った
+])
+def test_device_log_raises_instead_of_returning_empty(bridge_log, breaker, message):
+    """取れていないときは**空の一覧を返さない**（例外が無いことにすると偽の緑になる）。"""
+    device_log, fake = bridge_log
+    for i in range(3):
+        fake.add("Log", f"x{i}")
+    device_log.clear(fake)
+    for i in range(3, 8):
+        fake.add("Log", f"x{i}")
+    breaker(fake)
+    with pytest.raises(device_log.DeviceLogUnavailableError, match=message):
+        device_log.unity_exceptions(fake)
+
+
+def test_device_log_mark_survives_across_tests_so_relaunch_without_clear_is_detected(bridge_log):
+    """印は最後の clear() のものが残る。アプリが起動し直されたあと clear() せずに読むと止まる（偽の赤の側。見落としにはならない）。"""
+    device_log, fake = bridge_log
+    device_log.clear(fake)                 # 前のテスト
+    fake.session = "s2"                    # アプリが起動し直された
+    fake.entries = [("Exception", "new-boom")]
+    with pytest.raises(device_log.DeviceLogUnavailableError, match="起動し直された"):
+        device_log.unity_exceptions(fake)  # 次のテストが clear() せずに読む
+    device_log.clear(fake)
+    fake.add("Error", "after")
+    assert device_log.unity_exceptions(fake) == ["Error: after"]
+
+
+@pytest.mark.parametrize("setup, message", [
+    (lambda f: setattr(f, "logEnabled", False), "ロガーを止めています"),
+    (lambda f: setattr(f, "filterLogType", "Exception"), "ロガーを絞っています"),
+])
+def test_device_log_clear_refuses_when_logger_already_off(bridge_log, setup, message):
+    """clear() の前からロガーが止まっている・例外が届かないほど絞られているなら、**clear() の時点で**止める（操作の前に止まる）。"""
+    device_log, fake = bridge_log
+    setup(fake)
+    with pytest.raises(device_log.DeviceLogUnavailableError, match=message):
+        device_log.clear(fake)
+
+
+def test_device_log_detects_logger_stopped_and_restarted_between_reads(bridge_log):
+    """clear → ロガーを止める（その間の例外は届かない）→ 戻した状態を読む、の偽の緑。**戻したあとに読んでも、
+    clear 時と設定が同じなら検出できない**（残る限界）が、止めたまま読めば必ず止まる。"""
+    device_log, fake = bridge_log
+    device_log.clear(fake)
+    fake.logEnabled = False
+    with pytest.raises(device_log.DeviceLogUnavailableError, match="ロガーの設定を変えました"):
+        device_log.unity_exceptions(fake)
+    fake.logEnabled = True   # 戻すと検出できない（読みの時点の値しか見えない）
+    assert device_log.unity_exceptions(fake) == []
+
+
+@pytest.mark.parametrize("use_clear", [True, False])
+@pytest.mark.parametrize("which", ["head", "middle"])
+def test_device_log_checks_logger_on_every_response(bridge_log, use_clear, which):
+    """読み取りの**どの応答**（最初の応答・途中のページ）でロガーが止まっていても止める。最後の応答だけを見ると偽の緑になる。"""
+    device_log, fake = bridge_log
+    if use_clear:
+        device_log.clear(fake)
+    for i in range(7):
+        fake.add("Log", f"x{i}")       # ページ（2 件）を何度もまたぐ
+    base = fake.calls
+    # 読みの呼び出し: base = 最初の応答（page=1）、base+1 以降 = ページ
+    fake.off_on_calls = {base} if which == "head" else {base + 2}
+    with pytest.raises(device_log.DeviceLogUnavailableError):
+        device_log.unity_exceptions(fake)
+
+
+def test_device_log_filter_warning_still_allows_exceptions_but_not_full_log(bridge_log):
+    """filterLogType=Warning なら Exception / Assert / Error は届く（Unity の Logger の規則）。全部のログは取れない扱い。"""
+    device_log, fake = bridge_log
+    fake.filterLogType = "Warning"
+    fake.add("Error", "e")
+    assert device_log.unity_exceptions(fake) == ["Error: e"]
+    with pytest.raises(device_log.DeviceLogUnavailableError):
+        device_log.unity_log(fake)
+
+
+
 # ---------------------------------------------------------------------------
 # 記録した設定を serve が使う（issue #41）
 #
@@ -677,3 +1048,21 @@ def test_save_omits_the_config_path_when_unset(tmp_path, monkeypatch):
     journey.JourneyRecorder(client=object(), out_dir=out, enabled=True).save()
     saved = json.loads((out / "journey.json").read_text(encoding="utf-8"))
     assert "configPath" not in saved
+
+
+def test_os_agent_type_text_warns_once_for_agent_without_focus_check(monkeypatch):
+    """typeFocusCheck を持たない古いエージェントには、最初の type_text で 1 回だけ警告する（送ることは止めない）。"""
+    from e2e_driver import os_agent
+
+    monkeypatch.setenv("UAPP_E2E_OS_AGENT_URL", "http://127.0.0.1:8200")
+    monkeypatch.setattr(os_agent, "_TYPE_FOCUS_WARNED", set())
+    monkeypatch.setattr(os_agent, "status", lambda **k: {"agent": "uapp-os-agent/1.0", "features": ["bundleId"]})
+    sent = []
+    monkeypatch.setattr(os_agent, "_post", lambda path, payload, **k: sent.append(path) or {"ok": True})
+    with pytest.warns(UserWarning, match="typeFocusCheck"):
+        os_agent.type_text("a", bundle_id="com.example.app")
+    import warnings as _w
+    with _w.catch_warnings():
+        _w.simplefilter("error")
+        os_agent.type_text("b", bundle_id="com.example.app")   # 2 回目は警告しない
+    assert sent == ["/type", "/type"]

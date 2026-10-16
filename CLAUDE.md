@@ -87,8 +87,8 @@ cd driver
 $env:UAPP_E2E_EDITOR = "1"; pytest tests; Remove-Item Env:\UAPP_E2E_EDITOR
 ```
 
-対象は adb を直接使わないテストのみ（logcat アサート・adb タップ入りのテストは
-エディタ直結モードでは明示エラーになる → `-k` で除外する）。
+対象は `adb.*` を直接呼ばないテストのみ（`adb.clear_logcat` の例外アサート・adb タップ入りのテストは
+エディタ直結モードでは明示エラーになる → `-k` で除外する。例外アサートは `device_log` で書けばエディタでも回る）。
 
 **Play をまたぐテスト**（新規ユーザーからやり直す等、メモリ上の状態を捨てたい場合）は
 1 プロセスの中で完結できる: `.\scripts\restart-editor-play.ps1`（Play 停止 → 再生。
@@ -186,7 +186,7 @@ python -m e2e_driver.journey ..\Builds\journey    # → report.html 生成（詳
    構成は `ping` の `ngui` と、NGUI が `Input.touchCount` を直読みしているかで判断。
    **アプリが `Input.GetKey` を直読みしていて UI 操作だけでは足りない（ゲームパッド等）なら**
    `docs/ai-loop.md` の「アプリ独自の入力層へ届かせる」
-6. マルチタッチテストには logcat 例外アサート（`adb.clear_logcat()` → 操作 → `adb.unity_exceptions()` 空）を付ける
+6. マルチタッチテストにはアプリの例外アサート（`device_log.clear(client)` → 操作 → `device_log.unity_exceptions(client)` が空）を付ける。Android は logcat、iOS とエディタはブリッジのログ（取れないときは空ではなく `DeviceLogUnavailableError`）（ブリッジの経路は `Debug.LogError` もすべて数えるので Android の logcat の照合より厳しい。エディタでは Play 中のエディタ側のエラー＝インポート・拡張・パッケージも混ざる）
 7. 描画の検証は `adb.screencap()` で画像を取得して読む（エディタ直結では journey のスクリーンショットを見る）。
    **撮影は「OS 層優先・計装は保険」の 2 段構え** — `adb screencap` は画面に出ているものをそのまま残せるが、計装の `client.screenshot()` は **Unity の描画しか写らない**（WebView・ネイティブダイアログ・ソフトキーボードは欠ける）。後者は既定オフで、`UAPP_E2E_BRIDGE_SCREENSHOT=1` を宣言したときだけ使える（縮小は `UAPP_E2E_BRIDGE_SCREENSHOT_MAX_WIDTH`）
 
@@ -196,7 +196,7 @@ python -m e2e_driver.journey ..\Builds\journey    # → report.html 生成（詳
    （前回成功→今回失敗）を見つけたら、直近の自分の変更が壊した可能性を最優先で調査する。
    まず再実行して再現性を確認し、一時的要因（サーバー・タイミング）と切り分ける
 1. pytest の失敗メッセージ
-2. `Builds/failure/unity-logcat.txt`（マネージド例外スタック）
+2. `Builds/failure/unity-logcat.txt`（マネージド例外スタック。iOS は `Builds/failure/ios-app-log.txt`＝ブリッジが溜めたアプリのログ）
 3. `Builds/failure/screen.png`（画像として読む）
 4. **インストールで転んでいないか**（テスト失敗に見える）。空き容量・署名不一致が典型。
    run-e2e が理由を翻訳して出すので、その案内に従う（`adb shell df /data` で空きを確認）
@@ -258,10 +258,11 @@ $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 - **対応プラットフォームは Android（実機・エミュレーター）・エディタ直結・iOS（macOS のみ）**。
   iOS は 0.1.9 で統合された（`build-ios.ps1` / `run-ios-e2e.ps1`。シミュレータ・実機とも）。
   使う前に [SETUP.md](SETUP.md) の「iOS で使う場合」の制約表を**設計前に**読むこと —
-  特に **iOS のアプリ外（外部ブラウザ・システムダイアログ）の操作は、計装では不可・
-  同梱の OS レイヤーエージェント（`run-ios-e2e.ps1 -OsAgent`）でも座標タップとスクショまでしか
-  検証されていない**（Android は同梱の `adb` uiautomator 経由で文字入力まで可能）。
-  **外部ブラウザ認証を含む導線は iOS では検証が止まりうる**前提で設計する
+  特に **iOS のアプリ外（外部ブラウザ・システムダイアログ）の操作は、計装では不可**。
+  同梱の OS レイヤーエージェント（`run-ios-e2e.ps1 -OsAgent`）で、文字入力・システムアラート・アクセシビリティの要素
+  （名前で探す・押す・入力する。Unity の UI は対象外）などを扱える（**一覧と、実機・シミュレータで確かめた範囲は SETUP.md の制約表**）。
+  ただし **外部ブラウザ認証の導線を最初から最後まで通した実測は無い**ので、**iOS では検証が止まりうる**前提で設計する
+  （Android は同梱の `adb` uiautomator 経由で外部ブラウザでの認証も自動化できる）
 - **`run-ios-e2e.ps1 -OsAgent` が `pairingState=…` で止まったら [docs/09-ios16-osagent.md](docs/09-ios16-osagent.md)**。
   CoreDevice が担当しない実機（表示は `unsupported` ではなく **`未登録`** になることがある）でも、
   go-ios を自分で用意すれば OS エージェントを動かせる（**go-ios は同梱していない**）。

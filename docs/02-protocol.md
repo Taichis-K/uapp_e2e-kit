@@ -403,6 +403,26 @@ uGUI を独自のルートでまとめていることもある。だから**型�
 
 型名は**短い名前でも完全修飾名でも受け付ける**（`CoinPresenter` / `MyGame.UI.CoinPresenter`）。
 記録の残し方は `docs/ai-loop.md` の「計測と受け入れ判定の作法」を参照。
+
+### logs
+アプリのログ（`Application.logMessageReceivedThreaded`）をブリッジが溜めたリングバッファから読む（issue #85）。
+**iOS では Unity の `Debug.Log` が OS のログ（統合ログ・実機の syslog）に出ず、標準出力にしか出ない**ので、アプリの中で溜めて渡す。
+```json
+→ {"cmd": "logs", "args": {"since": 120, "max": 500}}
+← {"session": "3f2a…", "first": 0, "next": 125, "dropped": 0, "logEnabled": true, "filterLogType": "Log",
+   "entries": [{"seq": 120, "type": "Exception", "message": "NullReferenceException: …", "stack": "…"}, …]}
+```
+- `since` は**含む**（`seq >= since`）。省くとバッファの先頭（`first`）から。`max` は既定 500・上限 2000
+- バッファは 2000 件（最悪で約 32MB＝2000 件 ×（4000 字 ×2）× 2 バイト。計装ビルドだけ）。溢れると古いものから捨て、`first`（残っている最も古い seq）が進み `dropped` が増える。**`since < first` なら読めていない区間がある**
+- 1 回の応答は約 256K 文字（UTF-16 の文字数）で切る。**未読があれば少なくとも 1 件を返す**ので、`next` に追いつくまで `since` を進めて読み続ける。バッファが空なら `first == next`
+- `session` は起動ごと（エディタは Play ごと）に変わる。**変わっていたら前の起動のログは読めない**
+- `type` は Unity の `LogType` の名前（`Log` / `Warning` / `Error` / `Assert` / `Exception`）。メッセージとスタックはそれぞれ 4000 文字で切る
+- `logEnabled` / `filterLogType` はアプリの `Debug.unityLogger` の設定（止めている・絞っていると `Debug.*` の分が届かない。判定は呼び手。ドライバの `device_log` が行う）
+- ネイティブのクラッシュはプロセスごと消えるので取れない。古いブリッジは `UNKNOWN_COMMAND`
+- エディタでは、Play 中のエディタ側のログ（インポート・エディタ拡張・パッケージのエラー）も同じイベントに来るので混ざる
+
+全部読む・例外を判定するときは、ドライバの `device_log`（`clear` / `unity_log` / `unity_exceptions`）を使う。
+
 ### pointer_down / pointer_move / pointer_up
 マルチタッチプリミティブ。`pointerId`（クライアント任意の整数）ごとに 1 本の指を表す。
 ```json

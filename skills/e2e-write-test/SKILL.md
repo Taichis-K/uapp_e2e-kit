@@ -34,7 +34,7 @@ fixture を足すときはそのサブディレクトリの `conftest.py` に書
    - 待機は `g.wait_until_visible / gone / hittable / until`。`time.sleep` は使わない
    - 状態検証は `client.get(path, "コンポーネント名", "プロパティ名")`
    - マルチタッチ（ホールド+タップ、ピンチ）は `g.press/release`（pointerId指定）や `g.pinch`。
-     テスト末尾に logcat 例外アサート（`adb.unity_exceptions()` が空）を付ける
+     テスト末尾にアプリの例外アサート（`device_log.clear(client)` → 操作 → `device_log.unity_exceptions(client)` が空）を付ける。Android は logcat、iOS とエディタはブリッジのログ（`from e2e_driver import device_log`）（ブリッジの経路は `Debug.LogError` もすべて数えるので Android の logcat の照合より厳しい。エディタでは Play 中のエディタ側のエラー＝インポート・拡張・パッケージも混ざる）
    - 3D操作（キャラ移動・カメラ）は `g.drag(x1,y1,x2,y2, hold=秒)`（仮想ジョイスティック合成）。
      座標列の記録再生は再現性が低いので、**目標条件へのフィードバックループ**で書く
      （例: NPCの `resolve().center` で方向を決めて少し歩く→会話ボタンが hittable になるまで繰り返す）。
@@ -54,10 +54,14 @@ fixture を足すときはそのサブディレクトリの `conftest.py` に書
 
    | やりたいこと | Android | iOS |
    |---|---|---|
-   | 座標タップ | `adb.ui_tap(...)` | `os_agent.tap(x, y)`（**横画面のアプリは `bundle_id=` を渡す** ― 既定は縦の SpringBoard 基準で当たらない。`uapp_e2e/docs/ai-loop.md` の「OS レベルの UI オートメーション」） |
-   | **文字入力** | `adb.ui_type("...")` | **`os_agent.type_text("...", bundle_id=...)`** |
+   | 座標タップ | `adb.ui_tap(...)` | `os_agent.tap(x, y)`（**横画面のアプリは `bundle_id=` を渡す** ― 既定は SpringBoard 基準（iPhone では縦）で当たらない。`uapp_e2e/docs/ai-loop.md` の「OS レベルの UI オートメーション」） |
+   | **文字入力** | `adb.ui_type("...")` | **`os_agent.type_text("...", bundle_id=...)`**（Unity の入力欄はシミュレータ（iPhone 16 / iOS 18.6）では入らず 409。実機（iPhone 8 / iOS 16）では押して待つと入った） |
    | システムダイアログ | `adb.ui_tap(text="許可")` | `os_agent.handle_alert("許可")`（**名前は省略しない** ― 省略すると先頭のボタンを押す。名前が違うと 404＋候補一覧が返る） |
    | 他アプリから戻す | — | `os_agent.activate(bundle_id)` |
+   | アプリの外の要素を名前で押す | `adb.ui_tap(text=...)` | `os_agent.tap_element(bundle_id=..., label=...)`（WebView・Safari・システム UI。**Unity の UI は対象外**） |
+   | アプリの起動・終了・状態 | `adb.launch` / `adb.force_stop` / `adb.current_focus` | `os_agent.launch_app` / `terminate_app` / `app_state` |
+   | テスト中の例外 | `adb.unity_exceptions()` | `device_log.unity_exceptions(client)`（Android でも同じ関数で書ける） |
+   | 端末の向き | `e2e-config.json` の `deviceRotation`（**実行前に固定**。テストの途中で回す API は無い） | `os_agent.rotate("landscapeRight")`（テストの途中で回す。**アプリが回ったかは画面の縦横で待って確かめる**。終わりに `"portrait"` へ戻す） |
 
    **押せる要素をラベルで探すときは `hittables` の `label` を見る（`text` ではない）。**
    `text` は**その GameObject 自身**のコンポーネントだけなので、**uGUI の Button のように
