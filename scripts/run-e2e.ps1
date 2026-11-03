@@ -541,10 +541,10 @@ if ($Editor) {
                 $process.WaitForExit(10000) | Out-Null
                 return @{ TimedOut = $true; Json = $null; Raw = "" }
             }
-            $raw = ((Get-Content -LiteralPath $outFile -Raw -ErrorAction SilentlyContinue) +
-                    (Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue))
-            $json = $null
-            try { $json = $raw | ConvertFrom-Json } catch { $json = $null }
+            $stdout = "$(Get-Content -LiteralPath $outFile -Raw -ErrorAction SilentlyContinue)"
+            $raw = $stdout + "$(Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue)"
+            # **JSON は標準出力だけから読む**（標準エラーの行で壊れる。docs/design/cli-stderr-json.md）。$raw は証跡用
+            $json = ConvertFrom-UappCliJson -Stdout $stdout
             if (-not $json) { Save-CliRawEvidence -Label "status" -Raw $raw }
             return @{ TimedOut = $false; Json = $json; Raw = $raw }
         } finally {
@@ -557,6 +557,9 @@ if ($Editor) {
         param($Status)
         [bool]($Status -and $Status.Json -and $Status.Json.success -and $Status.Json.data.count -ge 1)
     }
+
+    # 送るコマンド名の形式（grouped / legacy）。最初の送信の直前に 1 回だけ決める（docs/design/pipeline-0.9.md）
+    function Get-PipelineStyle { Get-UappPipelineStyleOnce -ProjectDir $projectDir -Label $projectName }
 
     function Invoke-UnityCli {
         <#
@@ -593,13 +596,20 @@ if ($Editor) {
         param([string[]]$CliArgs, [switch]$AllowFail)
         $retrySafe = @("pipeline", "editor_status", "list_open_scenes", "editor_play", "editor_stop",
                        "eval", "eval_file", "screenshot")
-        # cmd 系は常に対象プロジェクトへスコープする（複数エディタ起動時に別プロジェクトを操作・停止しない）
-        if ($CliArgs[0] -eq "cmd") {
+        # cmd 系は常に対象プロジェクトへスコープする（複数エディタ起動時に別プロジェクトを操作・停止しない）。
+        # **コマンド名は pipeline の版で形が変わる**（0.9 から「グループ 名前」。docs/design/pipeline-0.9.md）。
+        # 呼び手は 0.8 の名前で書き、ここで変換する。$retrySafe の照合は変換前の 0.8 の名前で行う
+        $isCmd = ($CliArgs[0] -eq "cmd")
+        $cmdRest = @()
+        if ($isCmd) {
             $cmdName = $CliArgs[1]
-            $CliArgs = @("cmd", "--project-path", $projectDir) + $CliArgs[1..($CliArgs.Count - 1)]
+            if ($CliArgs.Count -gt 2) { $cmdRest = @($CliArgs[2..($CliArgs.Count - 1)]) }
+            $CliArgs = @("cmd", "--project-path", $projectDir) +
+                       @(Get-UappPipelineCommandArgs -Name $cmdName -Style (Get-PipelineStyle)) + $cmdRest
         } else {
             $cmdName = $CliArgs[0]
         }
+        $resent = $false
         $label = ($CliArgs | Where-Object { $_ -notmatch "^-" -and $_ -ne $projectDir }) -join " "
         $wait = [System.Diagnostics.Stopwatch]::StartNew()
         $notified = $false
@@ -611,15 +621,27 @@ if ($Editor) {
             $prevEnc = [Console]::OutputEncoding
             try {
                 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-                $raw = & $unityCli @cliGlobalArgs @CliArgs --format json --no-banner 2>&1 | Out-String
+                $split = & $unityCli @cliGlobalArgs @CliArgs --format json --no-banner 2>&1 | Split-UappNativeOutput
             } finally { [Console]::OutputEncoding = $prevEnc }
-            $parsed = $null
-            try { $parsed = $raw | ConvertFrom-Json } catch {}
+            # **JSON は標準出力だけから読む**（上と同じ理由）。$raw は証跡・メッセージ用に両方を残す
+            $raw = $split.Stdout + "`n" + $split.Stderr
+            $parsed = ConvertFrom-UappCliJson -Stdout $split.Stdout
             if ($parsed -and $parsed.success) {
                 if ($notified) {
                     Write-Host "[$projectName] $label が応答（待機 $([int]$wait.Elapsed.TotalSeconds) 秒）"
                 }
                 return $parsed
+            }
+            # **0.9 のエディタに古い名前を送ったときは、新しい名前で 1 回だけ送り直す**
+            # （Command Not Found はコマンドが実行されていない応答なので二重実行にならない。
+            # 証跡の保存と break の判定より前・-AllowFail に関係なく。以後このスクリプトでは grouped に固定）
+            if ($isCmd -and -not $resent -and (Test-UappPipelineRenamedResponse -Parsed $parsed)) {
+                $resent = $true
+                Set-UappPipelineStyleGrouped -ProjectDir $projectDir -Label $projectName -CommandName $cmdName
+                $CliArgs = @("cmd", "--project-path", $projectDir) +
+                           @(Get-UappPipelineCommandArgs -Name $cmdName -Style "grouped") + $cmdRest
+                $label = ($CliArgs | Where-Object { $_ -notmatch "^-" -and $_ -ne $projectDir }) -join " "
+                continue
             }
             $detail = if ($parsed.errors) { ($parsed.errors | ForEach-Object { $_.message }) -join " / " } else { $raw }
             # **判定は Get-UappUnityCliErrorClass に集約する**（issue #38。版差プローブ側と
@@ -826,11 +848,12 @@ if ($Editor) {
         if ($null -eq $probeClass -or $probeClass.Class -eq "permanent") {
             throw ("Unity CLI / com.unity.pipeline のバージョンが想定と異なります（eval の疎通に失敗: $detail）。" +
                    "'unity --version' と <プロジェクト>\Packages\manifest.json の com.unity.pipeline を確認する。" +
-                   "検証済みの組み合わせ: unity-cli 1.0.0-beta.13 / com.unity.pipeline 0.8.0-exp.1" +
-                   "（3 サンプルともエディタ直結で実走。2026-10-15）。" +
+                   "検証済みの組み合わせ: unity-cli 1.0.0-beta.15 / com.unity.pipeline 0.8.0-exp.1・0.9.1-exp.1" +
+                   "（0.9 からコマンド名がグループ付きになり、キットは版を見て送る名前を切り替える。2026-11-02）、" +
+                   "unity-cli 1.0.0-beta.13 / com.unity.pipeline 0.8.0-exp.1（3 サンプルともエディタ直結で実走。2026-10-15）。" +
                    "過去に通った組み合わせ: unity-cli 1.0.0-beta.11 / com.unity.pipeline 0.7.0-exp.1、" +
                    "unity-cli 1.0.0-beta.3 または 1.0.0-beta.5 / com.unity.pipeline 0.4.0-exp.1・0.5.0-exp.1。" +
-                   "0.8.0-exp.1 より新しい版は未検証（レジストリの最新はそれより新しいことがある）")
+                   "0.9.1-exp.1 より新しい版は未検証（レジストリの最新はそれより新しいことがある）")
         }
         # **ここで記録する** ― プローブは `-AllowFail` なので Invoke-UnityCli 側では書かれない
         # （書かせると、後始末の editor_stop でも書かれて緑の走行に証跡が出てしまう）。
@@ -850,7 +873,7 @@ if ($Editor) {
     $playMode = $es.data.result.playMode
     if ($playMode -ne "stopped") {
         throw ("エディタは既に Play セッション中です（playMode=$playMode。他タスク/他セッションが使用中の可能性）。" +
-               "意図的に奪う場合は 'unity cmd editor_stop' 後に再実行")
+               "意図的に奪う場合は 'unity cmd $((Get-UappPipelineCommandArgs -Name editor_stop -Style (Get-PipelineStyle)) -join ' ')' 後に再実行")
     }
 
     # **Play へ入る前にコンパイルを最新にする**（issue #57）。
@@ -963,6 +986,8 @@ if ($Editor) {
     # 「環境変数で別ポートを指したのに設定ファイルの値で接続しにいく」という
     # 契約違反になる（docs/02 のポート設計）。元の値は finally で必ず戻す
     $savedBridgePort = $env:UAPP_E2E_BRIDGE_PORT
+    $savedPipelineStyle = $env:UAPP_E2E_PIPELINE_STYLE   # 下の finally で立てる前の値へ戻す
+    $savedProjectPathEnv = $env:UAPP_E2E_PROJECT_PATH    # 同上（STYLE だけ戻すと、STYLE の絞り込みが外れて別のプロジェクトにも効く）
     # **例外を投げうる処理は環境変数を触る前に済ませる**。設定と try の間で throw すると
     # 呼び出し元のシェルに残る（不正な editorBridgePort での [int] 変換、Push-Location の失敗。
     # 4 周目のレビュー指摘）
@@ -996,6 +1021,9 @@ if ($Editor) {
         # 複数エディタが起動していても宛先を誤らないよう、対象プロジェクトも渡す
         $env:UAPP_E2E_UNITY_CLI = $unityCli
         $env:UAPP_E2E_PROJECT_PATH = $projectDir
+        # **コマンド名の形式も渡す**（ドライバの editor_screenshot と、pytest から呼ばれる
+        # restart-editor-play が同じ形式で送る。docs/design/pipeline-0.9.md）。終わったら立てる前の値へ戻す
+        $env:UAPP_E2E_PIPELINE_STYLE = Get-PipelineStyle
         if ($JourneyDir) { $env:UAPP_E2E_JOURNEY_DIR = $JourneyDir }
         # **どの設定で走ったかをジャーニーへ残す**（issue #41）。serve は既定では
         # journey ディレクトリから祖先を遡って設定を探すが、注入モードでは出力先が
@@ -1035,7 +1063,10 @@ if ($Editor) {
         # 設定した分は全部消す（消し漏れると、次に手で pytest を回したときに
         # 古いプロジェクトのエディタへスクリーンショットを撮りに行く）
         Remove-Item -LiteralPath Env:\UAPP_E2E_UNITY_CLI -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath Env:\UAPP_E2E_PROJECT_PATH -ErrorAction SilentlyContinue
+        if ($savedProjectPathEnv) { $env:UAPP_E2E_PROJECT_PATH = $savedProjectPathEnv }
+        else { Remove-Item -LiteralPath Env:\UAPP_E2E_PROJECT_PATH -ErrorAction SilentlyContinue }
+        if ($savedPipelineStyle) { $env:UAPP_E2E_PIPELINE_STYLE = $savedPipelineStyle }
+        else { Remove-Item -LiteralPath Env:\UAPP_E2E_PIPELINE_STYLE -ErrorAction SilentlyContinue }
         # **消すのではなく元の値へ戻す**（呼び出し元が設定していた値を奪わない）
         if ($savedBridgePort) { $env:UAPP_E2E_BRIDGE_PORT = $savedBridgePort }
         else { Remove-Item -LiteralPath Env:\UAPP_E2E_BRIDGE_PORT -ErrorAction SilentlyContinue }

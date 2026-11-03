@@ -119,7 +119,8 @@ function Format-CliArg {
 function Invoke-WithTimeout {
     <#
       .SYNOPSIS
-      外部コマンドを時間制限つきで実行し、@{ TimedOut; Output; ExitCode } を返す。
+      外部コマンドを時間制限つきで実行し、@{ TimedOut; Output; Stdout; Stderr; ExitCode } を返す。
+      `Output` は標準出力と標準エラーの連結（証跡・メッセージ用）。**JSON は `Stdout` だけから読む**（ConvertFrom-UappCliJson）
 
       .NOTES
       Unity CLI は認証セッションが stale になると**無言で数十分ハングする**（実測 10 分超）。
@@ -149,11 +150,11 @@ function Invoke-WithTimeout {
         if (-not $process.HasExited) {
             try { $process.Kill() } catch {}
             $process.WaitForExit(10000) | Out-Null
-            return @{ TimedOut = $true; Output = ""; ExitCode = $null }
+            return @{ TimedOut = $true; Output = ""; Stdout = ""; Stderr = ""; ExitCode = $null }
         }
-        $text = ((Get-Content -LiteralPath $outFile -Raw -ErrorAction SilentlyContinue) +
-                 (Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue))
-        return @{ TimedOut = $false; Output = $text; ExitCode = $process.ExitCode }
+        $stdout = "$(Get-Content -LiteralPath $outFile -Raw -ErrorAction SilentlyContinue)"
+        $stderr = "$(Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue)"
+        return @{ TimedOut = $false; Output = ($stdout + $stderr); Stdout = $stdout; Stderr = $stderr; ExitCode = $process.ExitCode }
     } finally {
         Remove-Item -LiteralPath $outFile, $errFile -Force -ErrorAction SilentlyContinue
     }
@@ -181,7 +182,7 @@ function Get-UnityCliStatus {
         -WaitMessage $WaitMessage
     $json = $null
     if (-not $probe.TimedOut) {
-        try { $json = $probe.Output | ConvertFrom-Json } catch { $json = $null }
+        $json = ConvertFrom-UappCliJson -Stdout $probe.Stdout
     }
     @{ TimedOut = $probe.TimedOut; Json = $json; Raw = $probe.Output; ExitCode = $probe.ExitCode }
 }
@@ -379,6 +380,9 @@ if ($Editor) {
     }
     # Unity CLI の有無は上（解決直後）で判定済み。ここへ来る時点で $unityCli は必ずある
 
+    # 送るコマンド名の形式（grouped / legacy）。最初の送信の直前に 1 回だけ決める（docs/design/pipeline-0.9.md）
+    function Get-PipelineStyle { Get-UappPipelineStyleOnce -ProjectDir $projectDir -Label $projectName }
+
     function Invoke-Pipeline {
         <#
           .NOTES
@@ -401,27 +405,44 @@ if ($Editor) {
           分かるので、人・AI のどちらが読んでも次の一手を選べる。
         #>
         param([string[]]$CmdArgs, [switch]$AllowFail, [int]$TimeoutSeconds = 0)
-        if ($TimeoutSeconds -gt 0) {
-            # **空白を含む引数は明示的に引用する**（Start-Process -ArgumentList の配列は
-            # 空白で結合されるため、引用しないと eval のコードやパスが複数引数に割れる）
-            $quoted = @("cmd", "--project-path", (Format-CliArg $projectDir)) +
-                      @($CmdArgs | ForEach-Object { if ("$_" -match "\s") { Format-CliArg "$_" } else { "$_" } }) +
-                      @("--format", "json", "--no-banner")
-            $raw = (Invoke-WithTimeout -FilePath $unityCli -Arguments (@($cliGlobalArgs) + $quoted) -TimeoutSeconds $TimeoutSeconds).Output
-        } else {
-            # **CLI の出力（UTF-8）をコンソール符号化で復号しない**。日本語 Windows の既定
-            # （cp932）だと、日本語テスト名等のマルチバイトの**後続バイトが直後の `"` を
-            # 飲み込んで JSON が壊れ、「全件成功なのに失敗扱い」**になる（unity-nis の
-            # 日本語テスト名で実測。ASCII 名だけのプロジェクトでは発症しない）。
-            # `&` 直取りの復号は [Console]::OutputEncoding に従うため、この間だけ UTF-8 にする
-            $prevEnc = [Console]::OutputEncoding
-            try {
-                [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-                $raw = & $unityCli @cliGlobalArgs cmd --project-path $projectDir @CmdArgs --format json --no-banner 2>&1 | Out-String
-            } finally { [Console]::OutputEncoding = $prevEnc }
+        # **コマンド名は pipeline の版で形が変わる**（0.9 から「グループ 名前」。docs/design/pipeline-0.9.md）。
+        # 呼び手は 0.8 の名前で書き、ここで変換する。0.9 のエディタに古い名前を送ったときは
+        # 新しい名前で 1 回だけ送り直す（Command Not Found はコマンドが実行されていない応答なので、
+        # run_tests でも二重実行にならない）。以後このスクリプトでは grouped に固定
+        $cmdName = $CmdArgs[0]
+        $cmdRest = @(); if ($CmdArgs.Count -gt 1) { $cmdRest = @($CmdArgs[1..($CmdArgs.Count - 1)]) }
+        $CmdArgs = @(Get-UappPipelineCommandArgs -Name $cmdName -Style (Get-PipelineStyle)) + $cmdRest
+        for ($attempt = 0; $attempt -lt 2; $attempt++) {
+            if ($TimeoutSeconds -gt 0) {
+                # **空白を含む引数は明示的に引用する**（Start-Process -ArgumentList の配列は
+                # 空白で結合されるため、引用しないと eval のコードやパスが複数引数に割れる）
+                $quoted = @("cmd", "--project-path", (Format-CliArg $projectDir)) +
+                          @($CmdArgs | ForEach-Object { if ("$_" -match "\s") { Format-CliArg "$_" } else { "$_" } }) +
+                          @("--format", "json", "--no-banner")
+                $probe = Invoke-WithTimeout -FilePath $unityCli -Arguments (@($cliGlobalArgs) + $quoted) -TimeoutSeconds $TimeoutSeconds
+                $raw = $probe.Output; $stdout = $probe.Stdout
+            } else {
+                # **CLI の出力（UTF-8）をコンソール符号化で復号しない**。日本語 Windows の既定
+                # （cp932）だと、日本語テスト名等のマルチバイトの**後続バイトが直後の `"` を
+                # 飲み込んで JSON が壊れ、「全件成功なのに失敗扱い」**になる（unity-nis の
+                # 日本語テスト名で実測。ASCII 名だけのプロジェクトでは発症しない）。
+                # `&` 直取りの復号は [Console]::OutputEncoding に従うため、この間だけ UTF-8 にする
+                $prevEnc = [Console]::OutputEncoding
+                try {
+                    [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+                    $split = & $unityCli @cliGlobalArgs cmd --project-path $projectDir @CmdArgs --format json --no-banner 2>&1 | Split-UappNativeOutput
+                    $raw = $split.Stdout + "`n" + $split.Stderr; $stdout = $split.Stdout
+                } finally { [Console]::OutputEncoding = $prevEnc }
+            }
+            # **JSON は標準出力だけから読む**（標準エラーの行で壊れる。docs/design/cli-stderr-json.md）。$raw は証跡・メッセージ用
+            $parsed = ConvertFrom-UappCliJson -Stdout $stdout
+            if ($attempt -eq 0 -and (Test-UappPipelineRenamedResponse -Parsed $parsed)) {
+                Set-UappPipelineStyleGrouped -ProjectDir $projectDir -Label $projectName -CommandName $cmdName
+                $CmdArgs = @(Get-UappPipelineCommandArgs -Name $cmdName -Style "grouped") + $cmdRest
+                continue
+            }
+            break
         }
-        $parsed = $null
-        try { $parsed = $raw | ConvertFrom-Json } catch {}
         if (-not $AllowFail -and (-not $parsed -or -not $parsed.success)) {
             # **分類は添えるが、再試行はしない**（上の .NOTES 参照）。
             # 一過性だと分かれば「そのまま再実行すれば通る」と判断できる

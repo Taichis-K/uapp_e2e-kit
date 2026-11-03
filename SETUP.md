@@ -335,8 +335,10 @@ Codex ユーザーでルート `AGENTS.md` が無いプロジェクトは `-Root
 
 #### 5a. エディタ再生で疎通（数分・デバイス/adb 不要）
 
-**Unity CLI（v1.0.0-beta.3+）がインストール済みで対象が Unity 6 以降なら、1コマンドで完結する**
-（シーンオープン→Game view解像度設定→Play開始→pytest→Play終了まで全自動。人手でのPlay操作は不要）:
+**Unity CLI がインストール済みで対象が Unity 6 以降なら、1コマンドで完結する**
+（シーンオープン→Game view解像度設定→Play開始→pytest→Play終了まで全自動。人手でのPlay操作は不要）。
+**先に Unity CLI の版を確かめる**: com.unity.pipeline 0.8.0-exp.1 と 0.9.1-exp.1 は Unity CLI 1.0.0-beta.15 で検証した。
+0.9 系と 1.0.0-beta.15 より前の Unity CLI の組み合わせは未実測なので、`unity --version` が 1.0.0-beta.15 より前なら `unity upgrade` で上げてから実行する:
 
 ```powershell
 .\uapp_e2e\scripts\run-e2e.ps1 -Editor
@@ -349,6 +351,38 @@ Codex ユーザーでルート `AGENTS.md` が無いプロジェクトは `-Root
 **`-PytestArgs "-k …"` や `--deselect` で絞ると、このスモークごと外れて「passed」だけが残る**ので、
 導入検証の一発目は絞り込みなしで（`tests` を個別ファイルに変えずに）実行すること。
 エディタが別タスクで Play 中の場合は明示エラーで停止する（排他ガード）。
+
+**エディタと Pipeline（com.unity.pipeline）の状態で、run-e2e の動きが変わる**（どれも run-e2e が自分で判定する）:
+
+| 状態 | run-e2e の動き |
+|---|---|
+| 最初の `unity status` が応答しない（既定 60 秒。`-UnityCliProbeSeconds` で延ばせる） | その場で止まる。`unity doctor` で状態を見て、認証が切れていれば `unity auth login`（CLI を使わない手動の手順は下） |
+| エディタが Pipeline に接続している | そのまま使う |
+| このプロジェクトを開いている Unity がいない | `unity pipeline install` を呼ぶ（入っていなければ `Packages/manifest.json` に追加する。入る版は Unity CLI が選ぶ。失敗すればそこで止まる）→ エディタを開き、接続して準備が終わる（ready）まで 600 秒ほど待つ。超えたら止まるので `Editor.log` を見る |
+| このプロジェクトが掴まれているのに Pipeline が応答しない | コンパイル中の可能性があるので 300 秒ほど待つ（応答すればその時点で進む）。待ち終えて掴まれていなければ上の行の動きへ進む。まだ掴まれていれば「エディタは既にこのプロジェクトを開いていますが、Pipeline に接続していません」で止まる（二重起動はしない）＝下の「止まったら」へ |
+
+- 待ち時間は、1 回の確認に最長 60 秒かかるぶん少し延びることがある
+- 「掴まれている」には、エディタが開いているときのほか、同じプロジェクトを batchmode の Unity が掴んでいるときと、Unity のプロセスを判定できないときも入る
+- どの経路でも、接続したあとに版差の確認として eval を 1 回送る。失敗すれば理由を出して止まり（版の食い違いなら検証済みの組み合わせもメッセージに出る）、一過性と分かった失敗なら先へ進む
+
+**「Pipeline に接続していません」で止まったら**、`.\uapp_e2e\scripts\unity-editor-status.ps1` で状態を見る
+（`state` の読み方は `docs/ai-loop.md` の「内側ループ」）:
+
+- **プロセスの一覧に、`→ このプロジェクト` と付いた batchmode の Unity があれば**（`state` に関わらず）、画面は無いので、
+  その Unity の終了を待つ（ビルドのあとの終了でハングしているなら終了させる）。**`（別プロジェクト）` の Unity には触らない**
+- **`open` でも「Pipeline 接続: なし」と出る**なら、com.unity.pipeline が入っていないか、エディタがまだ読み込んでいないか、
+  CLI がこのエディタを見つけられていない（手動の Play は使えるので `open` と判定される）。`Packages/manifest.json` に com.unity.pipeline があるかを見る:
+  - 無ければ、**エディタを閉じて再実行する**（「開いている Unity がいない」の動きで入る）か、エディタの Package Manager で追加する
+  - 有れば、パッケージの読み込みとコンパイルのエラーが無いかを `Editor.log`（エディタの Console と同じ内容）で見る。
+    エラーがあれば先に直す（コンパイルエラーのまま閉じて開き直すと `Enter Safe Mode?` で止まる）。
+    無ければ読み込みが終わるのを待ってから再実行し、それでも同じなら、エディタを閉じて再実行する
+- `starting-or-blocked` なら、起動途中かモーダルダイアログ待ちなので、画面を確認する。
+  画面に何も出ていなければ、下のプロキシを疑う（状態を見るスクリプトにも `-UnityCliProxyDisable` を付けて測り直す）
+- `unknown` なら、プロセスを列挙できていないので、表示された警告の原因を直してから再実行する
+- `closed`、または `open` で「Pipeline 接続: あり」なら、止まったあとに状態が変わっている（エディタが閉じた・読み込みが終わった）ので、そのまま再実行する
+- ほかの原因: HTTP プロキシ配下なら `-UnityCliProxyDisable`（上の「macOS で使う場合」の表。Windows でも同じ）。
+  macOS では画面ロック中もエディタが応答しない（`docs/ai-loop.md` の「内側ループ」）
+
 Unity CLI が無い / Unity 6 未満の場合は以下の手動手順で行う。
 
 1. コンパイル確認: 対象バージョンの Unity でバッチ起動し `error CS` が無いこと

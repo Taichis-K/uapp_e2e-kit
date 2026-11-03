@@ -644,3 +644,22 @@ def test_logs_sends_only_given_arguments(monkeypatch):
     client.logs()
     client.logs(since=3, max=10)
     assert calls == [("logs", {}), ("logs", {"since": 3, "max": 10})]
+
+
+# --- editor_screenshot が送る eval の名前（com.unity.pipeline 0.9 のグループ付きの名前） ---
+# run-e2e が版を見て決めた形式を UAPP_E2E_PIPELINE_STYLE で渡す（docs/design/pipeline-0.9.md）。
+# 完全一致の "grouped" だけが `script eval`。綴りの違う値は既定（`eval`）に倒す
+
+@pytest.mark.parametrize("value, expected", [
+    ("grouped", ["script", "eval"]),
+    ("legacy", ["eval"]),
+    (None, ["eval"]),
+    ("Grouped", ["eval"]),
+])
+def test_editor_screenshot_eval_command_follows_pipeline_style(monkeypatch, value, expected):
+    from e2e_driver.editor_screenshot import _eval_command
+    if value is None:
+        monkeypatch.delenv("UAPP_E2E_PIPELINE_STYLE", raising=False)
+    else:
+        monkeypatch.setenv("UAPP_E2E_PIPELINE_STYLE", value)
+    assert _eval_command() == expected

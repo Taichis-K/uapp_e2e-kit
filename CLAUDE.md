@@ -231,6 +231,9 @@ python -m e2e_driver.journey ..\Builds\journey    # → report.html 生成（詳
 $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 ```
 
+**JSON は標準出力だけから読む**（`2>&1` で標準エラーを混ぜない）。送るコマンドの名前も com.unity.pipeline の版で変わる（0.9 から「グループ 名前」）。
+理由と書き方は `docs/ai-loop.md` の「失敗解析の優先順位」にある「自作の .ps1 から `unity cmd` を直接叩く場合」の段落を見る。
+
 **結果の読み方（3 つ）**:
 **赤いとき＝測り方を疑う**（判定式の戻り値でなく出力そのものを見る）/
 **緑のとき＝測った対象を疑う**（何件・どのファイルを測ったのかを出力で確かめる。

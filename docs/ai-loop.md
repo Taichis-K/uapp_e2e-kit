@@ -274,10 +274,20 @@ adb.uninstall(pkg); adb.install(apk)                      # クリーンイン�
    ファイルは実行の先頭で切り詰められ、以後は追記される。
 7. **出力を丸ごとファイルへ残すときは `Start-Transcript` か `6>&1`**。
    キットの進捗行は `Write-Host`（情報ストリーム）なので **`2>&1 | Tee-Object` では取れない**
-   （pytest の標準出力だけが残る）。導入先で実際に踏まれた
-   なお**自作の .ps1 から `unity cmd` を直接叩く場合は、スクリプト先頭で
-   `[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)` を宣言する**
-   （コンソールを持たない起動では OEM に落ち、日本語を含む応答だけ JSON が壊れる）
+   （pytest の標準出力だけが残る）。導入先で実際に踏まれた。
+
+   **自作の .ps1 から `unity cmd` を直接叩く場合**は、スクリプト先頭で
+   `[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)` を宣言する
+   （コンソールを持たない起動では OEM に落ち、日本語を含む応答だけ JSON が壊れる）。
+   **JSON は標準出力だけから読む**（`2>&1` で標準エラーを混ぜない）。CLI は標準エラーに JSON 以外の行を出すことがあり
+   （Claude Code の中から呼ぶと、unity プラグインが入っていなければ `<claude-code-hint … />` の 1 行）、混ぜると応答全体が JSON にならない。
+
+   **送るコマンドの名前は com.unity.pipeline の版で変わる**: 0.9 から「グループ 名前」になり
+   （`editor_status` → `editor status`、`run_tests` → `test run`）、**グループと名前は別々の引数で渡す**。
+   `editor_status` などの古い名前は 0.9 のエディタでは `Command Not Found` になる（応答の本文が新しい名前を示す。
+   `eval` のように 1 つのグループにしか無い名前は通るが、当てにしない）。
+   Unity CLI 1.0.0-beta.14 以降は新しい名前を 0.8 向けに読み替えるが、逆向き（古い名前を 0.9 へ）は読み替えない。
+   キット同梱のスクリプトは版を見て切り替えている。
 
 判断基準: 失敗が「実ユーザーにも起きる」ならアプリを直す。「テストの前提が誤り」ならテストを直す。
 

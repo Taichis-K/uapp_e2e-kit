@@ -741,7 +741,8 @@ def wait_for_bridge(timeout: float = 60.0, host: str = "127.0.0.1",
     """ブリッジが応答するまで待って、接続済みクライアントを返す。
 
     **Play をまたぐテストの定番部品**（導入先要望）: エディタ直結では
-    `unity cmd editor_stop` → `editor_play` のあと、ブリッジが再び待ち受けるまで
+    Play の停止 → 開始（`unity cmd editor_stop` → `editor_play`。com.unity.pipeline 0.9 以降は
+    `editor.playmode stop` → `editor.playmode start`）のあと、ブリッジが再び待ち受けるまで
     数秒〜数十秒かかる。各プロジェクトが自前のポーリングを書かなくて済むよう、
     「タイムアウトまで接続を試し続ける」だけをここに置く。
 

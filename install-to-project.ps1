@@ -1262,9 +1262,12 @@ Write-Host "     ほかに何をコミットするか（キットをコミット
 Write-Host "6. $(Mark (-not $portNote)) 待受ポートが他と重ならないこと（devicePort / editorBridgePort / iosSimulatorPort）"
 if ($portNote) { Write-Host "     → $portNote" }
 Write-Host "     （同一デバイスに計装アプリを複数入れる場合も devicePort をアプリごとに分ける）"
-if ($Mode -eq "editor") {
-    Write-Host "7. 初回の run-e2e.ps1 -Editor は Packages/manifest.json へ com.unity.pipeline（Unity CLI 連携）を"
-    Write-Host "     自動追加する（追跡ファイルが変わる。コミットするか事前にチームで方針を決めておく）"
+# エディタ直結を使いうるモードすべてで出す（既定の both でも SETUP の 5a で run-e2e -Editor を回す。device だけが使わない）
+if ($Mode -ne "device") {
+    Write-Host "7. run-e2e.ps1 -Editor は、このプロジェクトを開いている Unity がいないときに、入っていなければ Packages/manifest.json へ"
+    Write-Host "     com.unity.pipeline（Unity CLI 連携）を自動追加する（追跡ファイルが変わる。コミットするか事前にチームで方針を決めておく）"
+    Write-Host "     エディタを開いたまま（または同じプロジェクトを掴む Unity がいる・判定できない）で Pipeline が無いと、追加せずに止まる"
+    Write-Host "     （閉じてから実行するか、Package Manager で入れる。詳しくは uapp_e2e\SETUP.md の 5a）"
 }
 if ((Test-UappIosSupported) -or ($Mode -eq "ios")) {
     # iOS 経路は macOS でしか動かない（xcodebuild / simctl）ので、mac で導入したときだけ案内する。

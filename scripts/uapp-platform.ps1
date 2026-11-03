@@ -232,6 +232,51 @@ function Get-UappUnityCli {
     return $null
 }
 
+function ConvertFrom-UappCliJson {
+    <#
+      .SYNOPSIS
+      Unity CLI の応答（`--format json`）を**標準出力だけから**読む。読めた JSON（オブジェクト）か $null を返す。
+
+      .NOTES
+      **標準エラーを連結して読まない**（docs/design/cli-stderr-json.md）。CLI beta.15 は Claude Code の中から呼ぶと
+      標準エラーに `<claude-code-hint … />` の 1 行を出し（unity プラグインが入っていないとき）、初回の告知も標準エラーに出る。
+      連結して読むと応答全体が JSON にならず、ready のエディタを「未接続」と判定していた。
+      CLI は失敗のときも `success:false` の JSON を標準出力に出す（実測 4 通り）ので、標準エラーは判定に要らない
+      （証跡・メッセージには呼び手が両方を残す）。
+      「読めた」はオブジェクトのときだけ: 空・空白だけは ConvertFrom-Json が例外なしに $null を返し、
+      `12` のようなスカラーは読めてしまうため。先頭の BOM は外す（付いていると例外になる）。
+    #>
+    param([AllowNull()][AllowEmptyString()][string]$Stdout)
+    if ([string]::IsNullOrWhiteSpace($Stdout)) { return $null }
+    # -NoEnumerate: 要素 1 つの配列 `[{…}]` が展開されてオブジェクトに化けないように
+    try { $json = ConvertFrom-Json -InputObject $Stdout.TrimStart([char]0xFEFF) -NoEnumerate -ErrorAction Stop } catch { return $null }
+    if ($json -is [System.Management.Automation.PSCustomObject]) { return $json }
+    return $null
+}
+
+function Split-UappNativeOutput {
+    <#
+      .SYNOPSIS
+      `& $exe … 2>&1` の出力をパイプで受け、@{ Stdout; Stderr }（どちらも文字列。入力 0 件なら空文字）に分ける。
+
+      .NOTES
+      **引数は型なしで受ける**（`[string]` だと束縛の時点で ErrorRecord が文字列に変わり、標準エラーの行も Stdout に入る）。
+      順序は各ストリームの中だけ保つ（標準出力と標準エラーの間の順序は受け取った時点で保証されない）。
+      復号はパイプを流れる時点で起きるので、呼び手は `[Console]::OutputEncoding` を切り替えた範囲の中でここまで通す。
+    #>
+    param([Parameter(ValueFromPipeline)]$InputObject)
+    begin {
+        $out = [System.Collections.Generic.List[string]]::new()
+        $err = [System.Collections.Generic.List[string]]::new()
+    }
+    process {
+        if ($null -eq $InputObject) { return }
+        if ($InputObject -is [System.Management.Automation.ErrorRecord]) { $err.Add($InputObject.ToString()) }
+        else { $out.Add("$InputObject") }
+    }
+    end { @{ Stdout = ($out -join "`n"); Stderr = ($err -join "`n") } }
+}
+
 function Get-UappUnityCliErrorClass {
     <#
       .SYNOPSIS
@@ -1106,15 +1151,15 @@ function Get-UappPipelinePackageState {
         return @{ State = "unknown"; Why = "ファイルが見つかりません" }
     }
     try {
-        $raw = Get-Content -LiteralPath $ManifestPath -Raw -ErrorAction Stop
-        $json = $raw | ConvertFrom-Json -ErrorAction Stop
+        $manifestText = Get-Content -LiteralPath $ManifestPath -Raw -ErrorAction Stop
+        $json = $manifestText | ConvertFrom-Json -ErrorAction Stop
     } catch {
         return @{ State = "unknown"; Why = $_.Exception.Message }
     }
     if ($null -eq $json) { return @{ State = "unknown"; Why = "中身が空です" } }
     # **ルートが配列かは生の文字列で見る**。PowerShell は**1 要素の配列を展開する**ので、
     # `[{...}]` は単一のオブジェクトとして代入され、型の検査では捕まらない（実測 2026-09-13）
-    if ($raw.TrimStart().StartsWith("[")) {
+    if ($manifestText.TrimStart().StartsWith("[")) {
         return @{ State = "unknown"; Why = "JSON のルートが配列です" }
     }
     # **型まで見る**（codex 2026-09-13）。`{"dependencies":"x"}` / `1` / `true` / 非空配列は
@@ -1132,6 +1177,242 @@ function Get-UappPipelinePackageState {
         return @{ State = "present"; Why = "" }
     }
     return @{ State = "none"; Why = "" }
+}
+
+# --- com.unity.pipeline のコマンド名（0.8 の名前と 0.9 の「グループ 名前」） -------------
+# 0.9.0-exp.1 から名前がグループ付きになり、古い名前は 0.9 のエディタでは Command Not Found になる。
+# 入っている版を見て送る名前を切り替える（設計: docs/design/pipeline-0.9.md）。
+# キーは 0.8 の名前、値は 0.9 で送る引数（グループと名前は**別の引数**で渡す ― 1 つにすると
+# 「No command named 'editor status' … Did you mean 'editor status'?」で落ちる。実測）
+$script:UappPipelineGroupedNames = @{
+    "editor_status"    = @("editor", "status")
+    "editor_play"      = @("editor.playmode", "start")
+    "editor_stop"      = @("editor.playmode", "stop")
+    "list_open_scenes" = @("scene", "list_open")
+    "open_scene"       = @("scene", "open")
+    "eval"             = @("script", "eval")
+    "eval_file"        = @("script", "eval_file")
+    "recompile"        = @("script", "recompile")
+    "recompile_status" = @("script", "recompile_status")
+    "run_tests"        = @("test", "run")
+}
+
+function Get-UappPipelineVersionStyle {
+    # 版の文字列を grouped / legacy / $null（版の形でない）にする。主版・副版の数値で比べる
+    # （文字列で比べると 0.10 が 0.9 より小さく並ぶ）
+    param([AllowNull()][string]$Version)
+    if (-not $Version -or $Version -notmatch '^\s*(\d+)\.(\d+)\.') { return $null }
+    $major = [int]$Matches[1]; $minor = [int]$Matches[2]
+    if ($major -ge 1 -or $minor -ge 9) { return "grouped" }
+    return "legacy"
+}
+
+function Read-UappJsonFile {
+    # JSON ファイルを読む。無い・読めない・壊れているときは $null（呼び手は次の段へ進む）
+    param([Parameter(Mandatory)][string]$Path)
+    try {
+        $full = Resolve-UappFsPath $Path
+        if (-not [System.IO.File]::Exists($full)) { return $null }
+        return ([System.IO.File]::ReadAllText($full) | ConvertFrom-Json -ErrorAction Stop)
+    } catch { return $null }
+}
+
+function Get-UappJsonMember {
+    # PSCustomObject のメンバーを**大小文字を区別して**取り出す（ConvertFrom-Json のプロパティ参照は区別しない）
+    param($Object, [Parameter(Mandatory)][string]$Name)
+    if ($Object -isnot [System.Management.Automation.PSCustomObject]) { return $null }
+    foreach ($p in $Object.PSObject.Properties) { if ($p.Name -ceq $Name) { return $p.Value } }
+    return $null
+}
+
+function Get-UappPipelineCommandStyle {
+    <#
+      .SYNOPSIS
+      このプロジェクトの com.unity.pipeline に送るコマンド名の形式を決める。
+      @{ Style = "grouped" | "legacy"; Version; Source; Why } を返す。
+
+      .NOTES
+      設計は docs/design/pipeline-0.9.md の「1. 判定は 1 つの関数に置く」。段の順:
+      0 環境変数 UAPP_E2E_PIPELINE_STYLE（run-e2e が pytest へ渡す値・検証での強制）
+      1 packages-lock.json  2 manifest.json  3 package.json（埋め込み / file:<ディレクトリ>）
+      4 ポートファイルの capabilities（pid が生きた Unity で -projectPath が一致するときだけ）
+      5 legacy
+      **最後を legacy にするのは、誤りの向きが回復できるから** ― 0.9 に古い名前を送ると
+      エディタが「It was renamed」を返すので送り直せる。逆向きは CLI beta.13 以前では回復できない。
+    #>
+    param([Parameter(Mandatory)][string]$ProjectDir)
+    $why = @()
+    $projFull = $null
+    try { $projFull = Get-UappNormalizedDir (Resolve-Path -LiteralPath $ProjectDir).Path } catch { $projFull = $ProjectDir }
+
+    # 0. 環境変数（小文字のみ。UAPP_E2E_PROJECT_PATH が未設定か対象と一致するときだけ）
+    $envStyle = $env:UAPP_E2E_PIPELINE_STYLE
+    if ($envStyle) {
+        if ($envStyle -cne "grouped" -and $envStyle -cne "legacy") {
+            $why += "環境変数 UAPP_E2E_PIPELINE_STYLE の値 '$envStyle' は grouped / legacy ではないので無視"
+        } else {
+            $envProj = $env:UAPP_E2E_PROJECT_PATH
+            $match = $true
+            if ($envProj) {
+                $envFull = $envProj
+                try { $envFull = Get-UappNormalizedDir (Resolve-Path -LiteralPath $envProj).Path } catch { }
+                $match = Test-UappPathEqual -A $envFull -B $projFull
+            }
+            if ($match) {
+                return @{ Style = $envStyle; Version = $null; Source = "env"; Why = "" }
+            }
+            $why += "環境変数 UAPP_E2E_PIPELINE_STYLE は別のプロジェクト（UAPP_E2E_PROJECT_PATH）向けなので使わない"
+        }
+    }
+
+    $pkg = "com.unity.pipeline"
+    $packagesDir = Join-UappPath $ProjectDir "Packages"
+    $lockVal = $null; $manVal = $null
+
+    # 1. packages-lock.json（エディタが解決した版）
+    $lock = Read-UappJsonFile (Join-UappPath $packagesDir "packages-lock.json")
+    $lockEntry = Get-UappJsonMember (Get-UappJsonMember $lock "dependencies") $pkg
+    if ($lockEntry) {
+        $lockVal = "$(Get-UappJsonMember $lockEntry 'version')"
+        $s = Get-UappPipelineVersionStyle $lockVal
+        if ($s) { return @{ Style = $s; Version = $lockVal; Source = "packages-lock.json"; Why = ($why -join " / ") } }
+    }
+
+    # 2. manifest.json（書かれた版）
+    $man = Read-UappJsonFile (Join-UappPath $packagesDir "manifest.json")
+    $manEntry = Get-UappJsonMember (Get-UappJsonMember $man "dependencies") $pkg
+    if ($manEntry -is [string]) {
+        $manVal = $manEntry
+        $s = Get-UappPipelineVersionStyle $manVal
+        if ($s) { return @{ Style = $s; Version = $manVal; Source = "manifest.json"; Why = ($why -join " / ") } }
+    }
+
+    # 3. パッケージ本体の package.json（埋め込み / file:<ディレクトリ>）。PackageCache は見ない
+    $candidates = @(Join-UappPath $packagesDir "$pkg/package.json")
+    foreach ($v in @($lockVal, $manVal)) {
+        if ($v -and $v -cmatch '^file:(.+)$' -and $v -notmatch '\.tgz$') {
+            $dir = $Matches[1]
+            $abs = if ([System.IO.Path]::IsPathRooted($dir)) { $dir } else { Join-UappPath $packagesDir $dir }
+            $candidates += (Join-UappPath $abs "package.json")
+        }
+    }
+    foreach ($c in $candidates) {
+        $pj = Read-UappJsonFile $c
+        $pv = "$(Get-UappJsonMember $pj 'version')"
+        $s = Get-UappPipelineVersionStyle $pv
+        if ($s) { return @{ Style = $s; Version = $pv; Source = "package.json"; Why = ($why -join " / ") } }
+    }
+
+    # 4. ポートファイルの capabilities（今のエディタのものだと確かめられたときだけ）
+    $port = Read-UappJsonFile (Join-UappPath $ProjectDir "Library/Pipeline/.unity-pipeline-port")
+    if ($port) {
+        $caps = @(Get-UappJsonMember $port "capabilities")
+        $pidVal = (Get-UappJsonMember $port "pid") -as [int]   # 数値でない壊れたファイルで判定ごと落とさない
+        if ($caps -ccontains "commands.obsoleteNames") {
+            $prevWarn = $WarningPreference
+            $proc = $null; $listFailed = $false; $listError = ""
+            try {
+                $WarningPreference = "SilentlyContinue"
+                $proc = @(Get-UappUnityProcess | Where-Object { $pidVal -and $_.Id -eq $pidVal }) | Select-Object -First 1
+            } catch {
+                # **列挙の失敗で判定ごと落とさない**（mac の Get-UappUnityProcess は ps が無い・失敗すると throw する）。
+                # 理由を残して 5 段目（legacy＝回復できる向き）へ進む（v0.1.28 の codex・読解レビュー）。
+                # 旗で分ける（メッセージが空の例外でも「pid が見つからない」と取り違えない）
+                $listFailed = $true; $listError = $_.Exception.Message
+            } finally { $WarningPreference = $prevWarn }
+            if ($listFailed) {
+                $why += "Unity のプロセスを列挙できない（$listError）"
+            } elseif (-not $proc) {
+                $why += "ポートファイルの pid ($pidVal) の Unity が見つからない"
+            } elseif (-not $proc.CommandLineAvailable) {
+                $why += "ポートファイルの pid の Unity のコマンドラインが取れない"
+            } elseif ($proc.CommandLine -match '-projectPath\s+"?([^"]+?)"?(\s+-|\s*$)') {
+                $path = $Matches[1].Trim()
+                try { $path = Get-UappNormalizedDir (Resolve-Path -LiteralPath $path).Path } catch { }
+                if (Test-UappPathEqual -A $path -B $projFull) {
+                    return @{ Style = "grouped"; Version = $null; Source = "port-file"; Why = ($why -join " / ") }
+                }
+                $why += "ポートファイルの pid の Unity は別のプロジェクト（$path）を開いている"
+            } else {
+                $why += "ポートファイルの pid の Unity に -projectPath が無い"
+            }
+        }
+    }
+
+    # 5. 既定
+    if (-not $lockEntry -and -not $manEntry) { $why += "packages-lock.json / manifest.json に $pkg の版が読めない" }
+    elseif (-not $why) { $why += "版の形でない値（$lockVal / $manVal）" }
+    return @{ Style = "legacy"; Version = $null; Source = "default"; Why = ($why -join " / ") }
+}
+
+function Get-UappPipelineCommandArgs {
+    <#
+      .SYNOPSIS
+      0.8 の名前を、Style（grouped / legacy）に合わせた送る引数の配列にする。
+      **対応表に無い名前は throw する**（黙って古い名前を送ると、0.9 で動かない経路が残ったことに気づけない）
+    #>
+    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$Style)
+    if (-not $script:UappPipelineGroupedNames.ContainsKey($Name) -or
+        -not ($script:UappPipelineGroupedNames.Keys -ccontains $Name)) {
+        throw "com.unity.pipeline のコマンド '$Name' は対応表にありません（uapp-platform.ps1 の UappPipelineGroupedNames に足す）"
+    }
+    # 配列はパイプラインへ展開して返す（`return , @(...)` にすると、呼び手の `@(...)` が入れ子になり
+    # `System.Object[]` という 1 つの引数を送ってしまう。呼び手は `@(...)` で受ける）
+    if ($Style -ceq "grouped") { return $script:UappPipelineGroupedNames[$Name] }
+    if ($Style -ceq "legacy")  { return $Name }
+    throw "Style は grouped / legacy のどちらか: '$Style'"
+}
+
+# キーは大小文字を区別する（@{} は区別しない。.claude/rules/case-sensitivity.md）
+$script:UappPipelineStyleCache = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::Ordinal)
+function Get-UappPipelineStyleOnce {
+    <#
+      .SYNOPSIS
+      送るコマンド名の形式（grouped / legacy）を、スクリプトの中で**最初の送信の直前に 1 回だけ**決めて覚える。
+
+      .NOTES
+      保持はこのファイルを読み込んだスクリプトのスコープで、プロジェクトごと（`$global:` にすると、
+      同じシェルで続けて回したときに別のプロジェクト・別の走行へ漏れる）。
+      環境変数で決まったときは 1 行出す（消し忘れた値が黙って判定を上書きしないため）。
+      送り直しで新しい名前が通ったら `Set-UappPipelineStyleGrouped` で固定する。
+    #>
+    param([Parameter(Mandatory)][string]$ProjectDir, [string]$Label = (Split-Path $ProjectDir -Leaf))
+    if (-not $script:UappPipelineStyleCache.ContainsKey($ProjectDir)) {
+        $st = Get-UappPipelineCommandStyle -ProjectDir $ProjectDir
+        $script:UappPipelineStyleCache[$ProjectDir] = $st.Style
+        if ($st.Source -eq "env") {
+            # **標準エラーへ出す**（unity-editor-status -Json の標準出力に混ざると、受け手の ConvertFrom-Json が壊れる。
+            # 受け手は 2>$null で捨てている）
+            [Console]::Error.WriteLine("[$Label] コマンド名の形式は環境変数 UAPP_E2E_PIPELINE_STYLE で指定（利用者または run-e2e の受け渡し）: $($st.Style)")
+        }
+    }
+    $script:UappPipelineStyleCache[$ProjectDir]
+}
+
+function Set-UappPipelineStyleGrouped {
+    param([Parameter(Mandatory)][string]$ProjectDir, [string]$Label = (Split-Path $ProjectDir -Leaf), [string]$CommandName)
+    $script:UappPipelineStyleCache[$ProjectDir] = "grouped"
+    [Console]::Error.WriteLine("[$Label] エディタの com.unity.pipeline は 0.9 以降の名前を使う（'$CommandName' は改名済み）。新しい名前で送り直します")   # 標準エラー（上と同じ理由）
+}
+
+function Test-UappPipelineRenamedResponse {
+    <#
+      .SYNOPSIS
+      0.9 のエディタに古い名前を送ったときの応答（＝新しい名前で送り直してよい）かを返す。
+
+      .NOTES
+      **code と本文の両方を見る**（実測: errors[].code が REMOTE_COMMAND_NOT_FOUND、
+      message が「… It was renamed: run 'unity command editor status'.」）。
+      Command Not Found はエディタが登録にない名前を引いたときの応答で、コマンドは実行されていない
+      （0.9.1 の CommandNotFoundException.cs の注記）ので、送り直しても二重実行にならない。
+    #>
+    param($Parsed)
+    if (-not $Parsed -or -not $Parsed.errors) { return $false }
+    foreach ($e in @($Parsed.errors)) {
+        if ("$($e.code)" -ceq "REMOTE_COMMAND_NOT_FOUND" -and
+            "$($e.message)".Contains("It was renamed: run 'unity command ")) { return $true }
+    }
+    return $false
 }
 
 function Stop-UappChildAndFold {

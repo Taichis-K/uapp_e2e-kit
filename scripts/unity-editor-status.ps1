@@ -175,6 +175,25 @@ function Test-CliExec {
     if (-not $Cli -or $TimeoutSeconds -le 0) {
         return [pscustomobject]@{ attempted = $false; ok = $false; timedOut = $false; seconds = 0 }
     }
+    # **コマンド名は pipeline の版で形が変わる**（0.9 から「グループ 名前」。docs/design/pipeline-0.9.md）。
+    # 0.9 のエディタに古い名前を送ったときは、戻り値を作る前に新しい名前で 1 回だけ送り直す
+    $style = Get-UappPipelineStyleOnce -ProjectDir $ProjectDir
+    $r = Test-CliExecOnce -Cli $Cli -ProjectDir $ProjectDir -TimeoutSeconds $TimeoutSeconds `
+                          -EvalArgs (Get-UappPipelineCommandArgs -Name "eval" -Style $style)
+    if (Test-UappPipelineRenamedResponse -Parsed $r.json) {
+        Set-UappPipelineStyleGrouped -ProjectDir $ProjectDir -CommandName "eval"
+        $first = $r.seconds
+        $r = Test-CliExecOnce -Cli $Cli -ProjectDir $ProjectDir -TimeoutSeconds $TimeoutSeconds `
+                              -EvalArgs (Get-UappPipelineCommandArgs -Name "eval" -Style "grouped")
+        $r.seconds = [math]::Round($first + $r.seconds, 1)
+    }
+    # 戻り値の形は変えない（json は送り直しの判定のためだけに使う）
+    return [pscustomobject]@{ attempted = $r.attempted; ok = $r.ok; timedOut = $r.timedOut; seconds = $r.seconds }
+}
+
+function Test-CliExecOnce {
+    # Test-CliExec の 1 回ぶん（名前は変換済み）。json は応答をそのまま持つ（送り直しの判定用）
+    param([string]$Cli, [string]$ProjectDir, [int]$TimeoutSeconds, [string[]]$EvalArgs)
     $outFile = [System.IO.Path]::GetTempFileName()
     $errFile = [System.IO.Path]::GetTempFileName()
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -182,9 +201,8 @@ function Test-CliExec {
         # **cmd は --project-path でスコープする**（複数エディタが起動していても対象を間違えない）。
         # code は名前付き引数が必須（位置引数だと 400 になる）
         $p = Start-Process -FilePath $Cli -PassThru -NoNewWindow `
-            -ArgumentList (@($cliGlobalArgs) + @("cmd", "--project-path", (Format-CliArg $ProjectDir),
-                                                 "eval", "--code", (Format-CliArg 'return "ok";'),
-                                                 "--format", "json", "--no-banner")) `
+            -ArgumentList (@($cliGlobalArgs) + @("cmd", "--project-path", (Format-CliArg $ProjectDir)) + $EvalArgs +
+                           @("--code", (Format-CliArg 'return "ok";'), "--format", "json", "--no-banner")) `
             -RedirectStandardOutput $outFile -RedirectStandardError $errFile
         if (-not $p.WaitForExit($TimeoutSeconds * 1000)) {
             # **子孫ごと落とす。** `Kill()` は子へ再帰しないので、CLI が別プロセスを
@@ -197,12 +215,10 @@ function Test-CliExec {
                                       seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1) }
         }
         $sw.Stop()
-        $raw = ((Get-Content -LiteralPath $outFile -Raw -ErrorAction SilentlyContinue) +
-                (Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue))
-        $json = $null
-        try { $json = $raw | ConvertFrom-Json } catch { }
+        # **JSON は標準出力だけから読む**（標準エラーの行で壊れる。docs/design/cli-stderr-json.md）
+        $json = ConvertFrom-UappCliJson -Stdout "$(Get-Content -LiteralPath $outFile -Raw -ErrorAction SilentlyContinue)"
         return [pscustomobject]@{ attempted = $true; ok = [bool]($json -and $json.success)
-                                  timedOut = $false
+                                  timedOut = $false; json = $json
                                   seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1) }
     } catch {
         $sw.Stop()
@@ -227,10 +243,8 @@ function Get-CliStatus {
             return [pscustomobject]@{ available = $true; timedOut = $true; connected = $false
                                       instanceCount = 0; state = $null }
         }
-        $raw = ((Get-Content -LiteralPath $outFile -Raw -ErrorAction SilentlyContinue) +
-                (Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue))
-        $json = $null
-        try { $json = $raw | ConvertFrom-Json } catch { }
+        # **JSON は標準出力だけから読む**（標準エラーの行で壊れる。docs/design/cli-stderr-json.md）
+        $json = ConvertFrom-UappCliJson -Stdout "$(Get-Content -LiteralPath $outFile -Raw -ErrorAction SilentlyContinue)"
         $connected = [bool]($json -and $json.success -and $json.data.count -ge 1)
         # **「0 件」と「見つかったが繋がらない」を潰さない**（2026-09-08 の退行の真因）。
         # CLI は別物として返している: 正常= success/count 1/state ready、

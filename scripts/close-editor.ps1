@@ -110,6 +110,28 @@ function Invoke-Cli {
       飲み込み JSON が壊れる）。
     #>
     param([string[]]$CmdArgs, [int]$TimeoutSeconds = 60)
+    # **コマンド名は pipeline の版で形が変わる**（0.9 から「グループ 名前」。docs/design/pipeline-0.9.md）。
+    # 呼び手は 0.8 の名前で書き、ここで変換する。0.9 のエディタに古い名前を送ったときは
+    # 新しい名前で 1 回だけ送り直す（Command Not Found はコマンドが実行されていない応答）。
+    # 時間制限は 1 回ごとに掛かるので、送り直すと所要は最大 2 倍になる
+    $cmdName = $CmdArgs[0]
+    $cmdRest = @(); if ($CmdArgs.Count -gt 1) { $cmdRest = @($CmdArgs[1..($CmdArgs.Count - 1)]) }
+    $label = Split-Path $projectDir -Leaf
+    $style = Get-UappPipelineStyleOnce -ProjectDir $projectDir -Label $label
+    for ($attempt = 0; $attempt -lt 2; $attempt++) {
+        $r = Invoke-CliOnce -CmdArgs (@(Get-UappPipelineCommandArgs -Name $cmdName -Style $style) + $cmdRest) -TimeoutSeconds $TimeoutSeconds
+        if ($attempt -eq 0 -and (Test-UappPipelineRenamedResponse -Parsed $r.Json)) {
+            Set-UappPipelineStyleGrouped -ProjectDir $projectDir -Label $label -CommandName $cmdName
+            $style = "grouped"
+            continue
+        }
+        return $r
+    }
+}
+
+function Invoke-CliOnce {
+    # Invoke-Cli の 1 回ぶん（名前は変換済み）。戻り値は @{ Json; Raw; TimedOut }
+    param([string[]]$CmdArgs, [int]$TimeoutSeconds = 60)
     $outFile = [System.IO.Path]::GetTempFileName()
     $errFile = [System.IO.Path]::GetTempFileName()
     try {
@@ -129,10 +151,10 @@ function Invoke-Cli {
             $proc.WaitForExit(10000) | Out-Null
             return @{ Json = $null; Raw = ""; TimedOut = $true }
         }
-        $raw = ((Get-Content -LiteralPath $outFile -Raw -ErrorAction SilentlyContinue) +
-                (Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue))
-        $parsed = $null
-        try { $parsed = $raw | ConvertFrom-Json } catch {}
+        $stdout = "$(Get-Content -LiteralPath $outFile -Raw -ErrorAction SilentlyContinue)"
+        $raw = $stdout + "$(Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue)"
+        # **JSON は標準出力だけから読む**（標準エラーの行で壊れる。docs/design/cli-stderr-json.md）。$raw はメッセージ用
+        $parsed = ConvertFrom-UappCliJson -Stdout $stdout
         return @{ Json = $parsed; Raw = $raw; TimedOut = $false }
     } finally {
         Remove-Item -LiteralPath $outFile, $errFile -Force -ErrorAction SilentlyContinue

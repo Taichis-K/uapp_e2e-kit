@@ -13,6 +13,9 @@ UI の E2E で画像を残す意味が無くなるので、フレームごと撮
 
 - `UAPP_E2E_UNITY_CLI`    … unity 実行ファイルのパス
 - `UAPP_E2E_PROJECT_PATH` … 対象 Unity プロジェクトのパス（複数エディタ起動時の宛先指定）
+- `UAPP_E2E_PIPELINE_STYLE` … com.unity.pipeline に送るコマンド名の形式（`grouped` / `legacy`）。
+  0.9 から名前が「グループ 名前」になった（`eval` → `script eval`）。run-e2e が版を見て決めた値を渡す
+  （判定はここで複製しない。docs/design/pipeline-0.9.md）
 """
 from __future__ import annotations
 
@@ -22,6 +25,18 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
+
+def _eval_command() -> list[str]:
+    """送る eval の名前。`UAPP_E2E_PIPELINE_STYLE` が完全一致で `grouped` なら `script eval`。
+
+    それ以外（未設定・`Grouped` を含む）は `eval`（PowerShell 側の `-ceq` と揃える）。
+    未設定のまま 0.9 のエディタへ送っても、どのグループにも 1 つしか無い名前は
+    グループを省いて解決される（接続の資料の規則。実測）。送り直しはしない。
+    """
+    if os.environ.get("UAPP_E2E_PIPELINE_STYLE") == "grouped":
+        return ["script", "eval"]
+    return ["eval"]
+
 
 TIMEOUT_SEC = 60
 # CaptureScreenshot はフレーム終端で非同期に書き出す。書き出し完了までポーリングする
@@ -92,7 +107,7 @@ def capture(out_path: Path) -> bool:
     argv = [cli, *_cli_global_args(), "cmd", "--project-path", project]
     # C# の逐語的文字列に埋めるので " だけ二重化する（Windows のパス区切りはそのまま渡せる）
     literal = str(out_path.resolve()).replace('"', '""')
-    argv += ["eval", "--code",
+    argv += [*_eval_command(), "--code",
              f'UnityEngine.ScreenCapture.CaptureScreenshot(@"{literal}"); return "queued";',
              "--format", "json", "--no-banner"]
     response = _run(argv)

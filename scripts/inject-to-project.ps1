@@ -311,7 +311,7 @@ function Get-PipelineVersion {
     }
     # 配布キットのハブには unity-nis が無いので、ここへ落ちるのが通常経路。
     # **キットが検証した版を既定にする**（run-e2e.ps1 の版差メッセージの「検証済みの組み合わせ」と揃える。docs/05 は版を書いていない）
-    return "0.8.0-exp.1"
+    return "0.9.1-exp.1"
 }
 
 function Test-PipelinePackagePresent([string]$Target) {
@@ -327,19 +327,19 @@ function Test-PipelinePackagePresent([string]$Target) {
 function Add-PipelinePackage([string]$Target) {
     $path = Join-UappPath $Target "Packages\manifest.json"
     if (-not (Test-Path -LiteralPath $path)) { throw "Packages\manifest.json がありません: $path" }
-    $raw = Get-Content -LiteralPath $path -Raw
-    $json = $raw | ConvertFrom-Json
+    $manifestText = Get-Content -LiteralPath $path -Raw
+    $json = $manifestText | ConvertFrom-Json
     if ($json.dependencies -and
         ($json.dependencies.PSObject.Properties.Name -contains $PIPELINE_PKG)) { return $null }
     $version = Get-PipelineVersion
     # **JSON を組み直さずテキストへ 1 行挿す**（ConvertTo-Json は順序・書式・エスケープを
     # 変えるため、対象の manifest 全体が差分になる。人のリポジトリを荒らさない）
     $needle = '"dependencies"'
-    $idx = $raw.IndexOf($needle)
+    $idx = $manifestText.IndexOf($needle)
     if ($idx -lt 0) { throw "manifest.json に dependencies がありません: $path" }
-    $brace = $raw.IndexOf("{", $idx)
+    $brace = $manifestText.IndexOf("{", $idx)
     if ($brace -lt 0) { throw "manifest.json の dependencies を解釈できません: $path" }
-    $nl = if ($raw -match "`r`n") { "`r`n" } else { "`n" }
+    $nl = if ($manifestText -match "`r`n") { "`r`n" } else { "`n" }
     # **既存要素が無ければカンマを付けない**（`"dependencies": {}` へカンマ付きで挿すと
     # 末尾カンマの不正 JSON になる。PowerShell は寛容に読むが、厳格なパーサーは拒否する
     # ― レビュー指摘。Unity 自身が読めなくなる可能性がある）
@@ -347,7 +347,7 @@ function Add-PipelinePackage([string]$Target) {
                     @($json.dependencies.PSObject.Properties).Count -gt 0)
     $comma = if ($hasExisting) { "," } else { "" }
     $entry = $nl + '    "' + $PIPELINE_PKG + '": "' + $version + '"' + $comma
-    Set-TargetText $path ($raw.Insert($brace + 1, $entry))
+    Set-TargetText $path ($manifestText.Insert($brace + 1, $entry))
     return $version
 }
 

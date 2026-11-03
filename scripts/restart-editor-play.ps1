@@ -40,16 +40,31 @@ if (-not $unityCli) {
 
 function Invoke-Cli {
     param([string[]]$CmdArgs)
-    # CLI の出力（UTF-8）をコンソール符号化で復号しない（run-unity-tests.ps1 と同じ理由:
-    # cp932 だとマルチバイトの後続バイトが `"` を飲み込み JSON が壊れる）
-    $prevEnc = [Console]::OutputEncoding
-    try {
-        [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-        $raw = & $unityCli @cliGlobalArgs cmd --project-path $projectDir @CmdArgs --format json --no-banner 2>&1 | Out-String
-    } finally { [Console]::OutputEncoding = $prevEnc }
-    $parsed = $null
-    try { $parsed = $raw | ConvertFrom-Json } catch {}
-    return $parsed
+    # **コマンド名は pipeline の版で形が変わる**（0.9 から「グループ 名前」。docs/design/pipeline-0.9.md）。
+    # 呼び手は 0.8 の名前で書き、ここで変換する。pytest から呼ばれたときは run-e2e が渡した
+    # UAPP_E2E_PIPELINE_STYLE で親と同じ形式になる。0.9 のエディタに古い名前を送ったときは
+    # 新しい名前で 1 回だけ送り直す（Command Not Found はコマンドが実行されていない応答）
+    $cmdName = $CmdArgs[0]
+    $cmdRest = @(); if ($CmdArgs.Count -gt 1) { $cmdRest = @($CmdArgs[1..($CmdArgs.Count - 1)]) }
+    $style = Get-UappPipelineStyleOnce -ProjectDir $projectDir -Label $projectName
+    for ($attempt = 0; $attempt -lt 2; $attempt++) {
+        $sendArgs = @(Get-UappPipelineCommandArgs -Name $cmdName -Style $style) + $cmdRest
+        # CLI の出力（UTF-8）をコンソール符号化で復号しない（run-unity-tests.ps1 と同じ理由:
+        # cp932 だとマルチバイトの後続バイトが `"` を飲み込み JSON が壊れる）
+        $prevEnc = [Console]::OutputEncoding
+        try {
+            [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+            $split = & $unityCli @cliGlobalArgs cmd --project-path $projectDir @sendArgs --format json --no-banner 2>&1 | Split-UappNativeOutput
+        } finally { [Console]::OutputEncoding = $prevEnc }
+        # **JSON は標準出力だけから読む**（標準エラーの行で壊れる。docs/design/cli-stderr-json.md）
+        $parsed = ConvertFrom-UappCliJson -Stdout $split.Stdout
+        if ($attempt -eq 0 -and (Test-UappPipelineRenamedResponse -Parsed $parsed)) {
+            Set-UappPipelineStyleGrouped -ProjectDir $projectDir -Label $projectName -CommandName $cmdName
+            $style = "grouped"
+            continue
+        }
+        return $parsed
+    }
 }
 
 # run-e2e.ps1 -Editor と同じプロセス間ロックを取る（同じ名前のヘルパで組み立てる）。
