@@ -338,9 +338,14 @@ Codex ユーザーでルート `AGENTS.md` が無いプロジェクトは `-Root
 **Unity CLI がインストール済みで対象が Unity 6 以降なら、1コマンドで完結する**
 （シーンオープン→Game view解像度設定→Play開始→pytest→Play終了まで全自動。人手でのPlay操作は不要）。
 **先に Unity CLI の版を確かめる**: com.unity.pipeline 0.8.0-exp.1 と 0.9.1-exp.1 は Unity CLI 1.0.0-beta.15 で、
-0.9.1-exp.1 と 0.10.0-exp.1 は 1.0.0-beta.16 で検証した（0.10 は Windows と macOS・uGUI のサンプル 1 本のエディタ直結と EditMode）。
-0.9 系以降と 1.0.0-beta.15 より前の Unity CLI の組み合わせ、0.10 と 1.0.0-beta.15 の組み合わせは未実測なので、
-`unity --version` が 1.0.0-beta.15 より前（0.10 を使うなら 1.0.0-beta.16 より前）なら `unity upgrade` で上げてから実行する:
+0.9.1-exp.1 と 0.10.0-exp.1 は 1.0.0-beta.16 で検証した（0.10 は 2026-11-04 に Windows と macOS・uGUI のサンプル 1 本のエディタ直結と EditMode、
+2026-11-05 に Windows・Unity 6 のサンプル 3 本のエディタ直結・EditMode（テストのある 2 本）・Android のビルドと E2E）。
+入る版は経路で違う: **注入モード（`inject-to-project.ps1`）が足す既定の版は 0.10.0-exp.1**（すでに入っている版は上げない）/
+installer の経路では、下の `run-e2e.ps1 -Editor` の初回に Unity CLI の `unity pipeline install` が入れる版になる。
+入っている版は `Packages/packages-lock.json` の `com.unity.pipeline` の `version` で見る。
+どちらの経路でも 0.10 が入りうるので、**0.10 で検証した 1.0.0-beta.16 に揃える**（0.10 と 1.0.0-beta.15 の組み合わせは未実測）。
+`unity --version` が 1.0.0-beta.16 より前なら `unity upgrade` で上げてから実行する
+（0.8.0-exp.1 と 1.0.0-beta.16 の組み合わせは未実測。0.8 のままなら、`Packages/manifest.json` の `com.unity.pipeline` の版を書き換えて 0.9.1 以降へ上げることを勧める）:
 
 ```powershell
 .\uapp_e2e\scripts\run-e2e.ps1 -Editor

@@ -853,7 +853,7 @@ if ($Editor) {
             throw ("Unity CLI / com.unity.pipeline のバージョンが想定と異なります（eval の疎通に失敗: $detail）。" +
                    "'unity --version' と <プロジェクト>\Packages\manifest.json の com.unity.pipeline を確認する。" +
                    "検証済みの組み合わせ: unity-cli 1.0.0-beta.16 / com.unity.pipeline 0.9.1-exp.1・0.10.0-exp.1" +
-                   "（0.10 は unity cmd の応答から包みが外れ、キットは両方の形を読む。Windows と macOS・uGUI のサンプル 1 本でエディタ直結と EditMode。2026-11-04）、" +
+                   "（0.10 は unity cmd の応答から包みが外れ、キットは両方の形を読む。2026-11-04 に Windows と macOS・uGUI のサンプル 1 本でエディタ直結と EditMode、2026-11-05 に Windows・Unity 6 のサンプル 3 本でエディタ直結・EditMode（テストのある 2 本）・Android のビルドと E2E）、" +
                    "unity-cli 1.0.0-beta.15 / com.unity.pipeline 0.8.0-exp.1・0.9.1-exp.1" +
                    "（0.9 からコマンド名がグループ付きになり、キットは版を見て送る名前を切り替える。2026-11-02）、" +
                    "unity-cli 1.0.0-beta.13 / com.unity.pipeline 0.8.0-exp.1（3 サンプルともエディタ直結で実走。2026-10-15）。" +
