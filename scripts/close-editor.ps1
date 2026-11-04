@@ -142,6 +142,7 @@ function Invoke-CliOnce {
         # 「一部の呼び出しにだけ付く」退行を検査している。run-e2e.ps1 と同じ書き方に揃える）
         $proc = Start-Process -FilePath $unityCli -PassThru -NoNewWindow -ArgumentList (@($cliGlobalArgs) + $tail) `
                               -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+        $null = $proc.Handle   # 先に触る（触らないと終了後の ExitCode が $null になる。Invoke-UappAdb と同じ）
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
         while (-not $proc.HasExited -and $sw.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
             Start-Sleep -Milliseconds 300
@@ -152,9 +153,11 @@ function Invoke-CliOnce {
             return @{ Json = $null; Raw = ""; TimedOut = $true }
         }
         $stdout = "$(Get-Content -LiteralPath $outFile -Raw -ErrorAction SilentlyContinue)"
-        $raw = $stdout + "$(Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue)"
-        # **JSON は標準出力だけから読む**（標準エラーの行で壊れる。docs/design/cli-stderr-json.md）。$raw はメッセージ用
-        $parsed = ConvertFrom-UappCliJson -Stdout $stdout
+        $stderr = "$(Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue)"
+        $raw = $stdout + $stderr
+        # **JSON は標準出力だけから読む**（標準エラーの行で壊れる。docs/design/cli-stderr-json.md）。$raw はメッセージ用。
+        # **pipeline 0.10 の包みの無い応答は包みありの形に揃える**（issue #88。docs/design/pipeline-0.10.md）
+        $parsed = ConvertFrom-UappCliCommandResponse -Stdout $stdout -Stderr $stderr -ExitCode $proc.ExitCode
         return @{ Json = $parsed; Raw = $raw; TimedOut = $false }
     } finally {
         Remove-Item -LiteralPath $outFile, $errFile -Force -ErrorAction SilentlyContinue

@@ -242,7 +242,8 @@ function ConvertFrom-UappCliJson {
       標準エラーに `<claude-code-hint … />` の 1 行を出し（unity プラグインが入っていないとき）、初回の告知も標準エラーに出る。
       連結して読むと応答全体が JSON にならず、ready のエディタを「未接続」と判定していた。
       CLI は失敗のときも `success:false` の JSON を標準出力に出す（実測 4 通り）ので、標準エラーは判定に要らない
-      （証跡・メッセージには呼び手が両方を残す）。
+      （証跡・メッセージには呼び手が両方を残す）。**これは `cmd` 以外の呼び出しと、com.unity.pipeline 0.9.1 までの `cmd` の話**。
+      0.10 の `cmd` は失敗で標準出力が空になり、文章が標準エラーにだけ出ることがある（ConvertFrom-UappCliCommandResponse が扱う）。
       「読めた」はオブジェクトのときだけ: 空・空白だけは ConvertFrom-Json が例外なしに $null を返し、
       `12` のようなスカラーは読めてしまうため。先頭の BOM は外す（付いていると例外になる）。
     #>
@@ -252,6 +253,70 @@ function ConvertFrom-UappCliJson {
     try { $json = ConvertFrom-Json -InputObject $Stdout.TrimStart([char]0xFEFF) -NoEnumerate -ErrorAction Stop } catch { return $null }
     if ($json -is [System.Management.Automation.PSCustomObject]) { return $json }
     return $null
+}
+
+function ConvertFrom-UappCliCommandResponse {
+    <#
+      .SYNOPSIS
+      `unity cmd … --format json` の応答を読み、**包みありの形**（success / command / data / errors / warnings）に揃えて返す。読めなければ $null。
+
+      .NOTES
+      **issue #88。** pipeline 0.10 × CLI 1.0.0-beta.16 では、エディタが返した結果から包みが外れて本体だけが返る
+      （成功は本体＝旧い `data.result` と同じ・失敗は本体の `success:false` か、標準出力が空で標準エラーに文章）。
+      CLI 自身のエラーと 0.9.1 以前は今までどおり包みつき。呼び手の `.success` / `.data.result…` / `.errors[].message` の
+      読み方を変えずに済むよう、ここで 0.9.1 の包みの形に揃える。場合分けは docs/design/pipeline-0.10.md の表（番号はそれ）。
+      **終了コードが 0 と分かっているときだけ成功にする**（取れない＝$null は成功にしない。偽の緑を作らない）。
+      `unity status` など `cmd` でない呼び出しは ConvertFrom-UappCliJson で読む（包みは外れていない）。
+    #>
+    param([AllowNull()][AllowEmptyString()][string]$Stdout,
+          [AllowNull()][AllowEmptyString()][string]$Stderr,
+          $ExitCode)
+    $out = "$Stdout".TrimStart([char]0xFEFF).Trim()
+    $err = "$Stderr".Trim()
+    $exit = $null
+    if ($null -ne $ExitCode -and "$ExitCode" -match '^-?\d+$') { $exit = [int]"$ExitCode" }
+    $exitCodeName = switch ($exit) { 13 { "REMOTE_COMMAND_NOT_FOUND" } 17 { "EDITOR_BUSY" } 18 { "EDITOR_BLOCKED_BY_DIALOG" } 102 { "EDITOR_BUSY" } default { "COMMAND_FAILED" } }
+    $fail = {
+        param([string]$code, [string]$message)
+        [pscustomobject]@{ success = $false; command = "command"; data = $null
+                           errors = @([pscustomobject]@{ code = $code; message = $message }); warnings = @() }
+    }
+
+    $parsed = $null; $parsedOk = $false
+    if ($out) {
+        # 1 行に 1 つの JSON（NDJSON）や JSON でない行は読まない（表の 9・10）
+        try { $parsed = ConvertFrom-Json -InputObject $out -NoEnumerate -ErrorAction Stop; $parsedOk = $true } catch { return $null }
+    }
+
+    if ($parsedOk -and $parsed -is [System.Management.Automation.PSCustomObject]) {
+        $names = @($parsed.PSObject.Properties.Name)
+        # 1. 包みあり（0.9.1 以前・CLI 自身のエラー）。success / command / data / errors をすべて持ち、command が "command"
+        if (($names -ccontains "success") -and ($names -ccontains "command") -and ($names -ccontains "data") -and
+            ($names -ccontains "errors") -and ("$($parsed.command)" -ceq "command")) {
+            return $parsed
+        }
+        # 2. 包みの無い失敗の本体（success:false、または空でない error を持つ）
+        $bodyError = if ($names -ccontains "error") { "$($parsed.error)".Trim() } else { "" }
+        if ((($names -ccontains "success") -and $parsed.success -eq $false) -or $bodyError) {
+            $code = if (($names -ccontains "errorCode") -and "$($parsed.errorCode)".Trim()) { "$($parsed.errorCode)" } else { $exitCodeName }
+            $parts = @(foreach ($k in @("error", "errorDetails", "message")) { if (($names -ccontains $k) -and "$($parsed.$k)".Trim()) { "$($parsed.$k)" } })
+            $msg = if ($parts.Count -gt 0) { $parts -join "`n " } elseif ($err) { $err } else { $out }
+            return (& $fail $code $msg)
+        }
+    }
+
+    if ($parsedOk) {
+        if ($null -eq $exit) { return $null }                                 # 8b. 終了コードが分からない
+        if ($exit -eq 0) {                                                    # 3・5. 成功（本体・文字列・null など）
+            return [pscustomobject]@{ success = $true; command = "command"
+                                      data = [pscustomobject]@{ result = $parsed }; errors = @(); warnings = @() }
+        }
+        return (& $fail $exitCodeName $(if ($err) { $err } else { $out }))  # 4・6. 終了コードが 0 でない
+    }
+
+    # 標準出力が空
+    if ($null -eq $exit -or $exit -eq 0) { return $null }                    # 8・8b
+    return (& $fail $exitCodeName $err)                                       # 7. 標準エラーの文章だけ
 }
 
 function Split-UappNativeOutput {
@@ -352,6 +417,7 @@ function Get-UappUnityCliErrorClass {
         "connection was closed",
         "transport connection",
         "No Pipeline instance found",                    # 起動直後・リロード中（上の .NOTES 参照）
+        "Pipeline インスタンスが見つかりません",           # 同じ応答の日本語（CLI 1.0.0-beta.16・リロード中の実物。code は EDITOR_NOT_RUNNING。docs/design/pipeline-0.10.md）
         # **Pipeline サーバー自身が「まだ受けられない」と言っている状態**（issue #52。実物）:
         #   Pipeline server returned 503 Service Unavailable: Server Busy. The Editor is still
         #   settling after startup (importing assets / compiling scripts), so main-thread commands
@@ -377,6 +443,15 @@ function Get-UappUnityCliErrorClass {
     #     `Parameter Validation Failed` と別メッセージの `Server Busy` が混ざると
     #     **transient が permanent を覆う**（codex レビューの指摘。直接評価で再現）
     # 文言が変われば unknown として原文が証跡に残るので、**見てから足す**（この関数の原則）
+    #
+    # **code `EDITOR_BUSY` だけは code で見る**（code を照合に使わない方針の例外。docs/design/pipeline-0.10.md）。
+    # pipeline 0.10 × CLI 1.0.0-beta.16 では起動直後の断りが見出しの無い本文だけになり、上の 2 語の AND に当たらない見込み
+    # （pipeline のソースの読み）。code は CLI の変更履歴に記載がある（終了コード 17 = EDITOR_BUSY / 18 = EDITOR_BLOCKED_BY_DIALOG）。
+    # 0.10 の包みの無い応答では ConvertFrom-UappCliCommandResponse が終了コード 17 / 102 からこの code を付ける。
+    # **`EDITOR_BLOCKED_BY_DIALOG` は transient にしない**（ダイアログは待っても閉じない）。**17・18・102 の実物は未観測**
+    if ($codes -ccontains "EDITOR_BUSY") {
+        return @{ Class = "transient"; Reason = "transient: EDITOR_BUSY（エディタが読み込み・コンパイル中）"; Detail = $detail }
+    }
     foreach ($m in $messages) {
         if (($m -like "*Server Busy*") -and ($m -like "*still settling after startup*")) {
             return @{ Class  = "transient"

@@ -289,6 +289,16 @@ adb.uninstall(pkg); adb.install(apk)                      # クリーンイン�
    Unity CLI 1.0.0-beta.14 以降は新しい名前を 0.8 向けに読み替えるが、逆向き（古い名前を 0.9 へ）は読み替えない。
    キット同梱のスクリプトは版を見て切り替えている。
 
+   **com.unity.pipeline 0.10 × Unity CLI 1.0.0-beta.16 では、`unity cmd … --format json` の応答から包み
+   （`success` / `command` / `data` / `errors`）が外れ、コマンドの結果だけが返る**（0.9 までの `data.result` にあたるもの。
+   たとえば eval は `{"output":null,"diagnostics":[],"success":true,"result":"ok"}`、Play の開始は `"Entered play mode"` という JSON の文字列）。
+   失敗は終了コードが 0 以外になり、本文に `"success":false` と `errorCode` が入るか、標準出力が空で標準エラーに文章だけが出る
+   （JSON は標準出力だけから読み、標準エラーはメッセージ用に残す）。
+   **ただし `test run` はテストが失敗しても終了コード 0・`success:true` で、失敗の件数は `Summary.Failed` に入る**（0.10・Windows で観測）。
+   テストの成否は終了コードでなく `Summary.Failed` で見る。
+   CLI 自身のエラー（エディタが見つからない等）と `unity status` は今までどおり包みつき。
+   自作のスクリプトで読むときは、**終了コードと、包みの有無の両方を見る**（キット同梱のスクリプトは両方の形を読む）。
+
 判断基準: 失敗が「実ユーザーにも起きる」ならアプリを直す。「テストの前提が誤り」ならテストを直す。
 
 ## よくある詰まり（導入先で実際に出たもの）

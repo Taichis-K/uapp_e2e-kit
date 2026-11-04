@@ -622,10 +622,14 @@ if ($Editor) {
             try {
                 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
                 $split = & $unityCli @cliGlobalArgs @CliArgs --format json --no-banner 2>&1 | Split-UappNativeOutput
+                $exitCode = $LASTEXITCODE   # 直後に控える（下の finally は外部コマンドを呼ばないが、読む位置を固定する）
             } finally { [Console]::OutputEncoding = $prevEnc }
             # **JSON は標準出力だけから読む**（上と同じ理由）。$raw は証跡・メッセージ用に両方を残す
             $raw = $split.Stdout + "`n" + $split.Stderr
-            $parsed = ConvertFrom-UappCliJson -Stdout $split.Stdout
+            # **cmd の応答は、pipeline 0.10 の包みの無い形も包みありの形に揃える**（issue #88。docs/design/pipeline-0.10.md）。
+            # cmd でない呼び出し（pipeline install 等）は包みが外れていないので従来どおり
+            $parsed = if ($isCmd) { ConvertFrom-UappCliCommandResponse -Stdout $split.Stdout -Stderr $split.Stderr -ExitCode $exitCode }
+                      else { ConvertFrom-UappCliJson -Stdout $split.Stdout }
             if ($parsed -and $parsed.success) {
                 if ($notified) {
                     Write-Host "[$projectName] $label が応答（待機 $([int]$wait.Elapsed.TotalSeconds) 秒）"
@@ -848,12 +852,14 @@ if ($Editor) {
         if ($null -eq $probeClass -or $probeClass.Class -eq "permanent") {
             throw ("Unity CLI / com.unity.pipeline のバージョンが想定と異なります（eval の疎通に失敗: $detail）。" +
                    "'unity --version' と <プロジェクト>\Packages\manifest.json の com.unity.pipeline を確認する。" +
-                   "検証済みの組み合わせ: unity-cli 1.0.0-beta.15 / com.unity.pipeline 0.8.0-exp.1・0.9.1-exp.1" +
+                   "検証済みの組み合わせ: unity-cli 1.0.0-beta.16 / com.unity.pipeline 0.9.1-exp.1・0.10.0-exp.1" +
+                   "（0.10 は unity cmd の応答から包みが外れ、キットは両方の形を読む。Windows と macOS・uGUI のサンプル 1 本でエディタ直結と EditMode。2026-11-04）、" +
+                   "unity-cli 1.0.0-beta.15 / com.unity.pipeline 0.8.0-exp.1・0.9.1-exp.1" +
                    "（0.9 からコマンド名がグループ付きになり、キットは版を見て送る名前を切り替える。2026-11-02）、" +
                    "unity-cli 1.0.0-beta.13 / com.unity.pipeline 0.8.0-exp.1（3 サンプルともエディタ直結で実走。2026-10-15）。" +
                    "過去に通った組み合わせ: unity-cli 1.0.0-beta.11 / com.unity.pipeline 0.7.0-exp.1、" +
                    "unity-cli 1.0.0-beta.3 または 1.0.0-beta.5 / com.unity.pipeline 0.4.0-exp.1・0.5.0-exp.1。" +
-                   "0.9.1-exp.1 より新しい版は未検証（レジストリの最新はそれより新しいことがある）")
+                   "0.10.0-exp.1 より新しい版は未検証（レジストリの最新はそれより新しいことがある）")
         }
         # **ここで記録する** ― プローブは `-AllowFail` なので Invoke-UnityCli 側では書かれない
         # （書かせると、後始末の editor_stop でも書かれて緑の走行に証跡が出てしまう）。

@@ -55,9 +55,11 @@ function Invoke-Cli {
         try {
             [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
             $split = & $unityCli @cliGlobalArgs cmd --project-path $projectDir @sendArgs --format json --no-banner 2>&1 | Split-UappNativeOutput
+            $exitCode = $LASTEXITCODE   # 直後に控える
         } finally { [Console]::OutputEncoding = $prevEnc }
-        # **JSON は標準出力だけから読む**（標準エラーの行で壊れる。docs/design/cli-stderr-json.md）
-        $parsed = ConvertFrom-UappCliJson -Stdout $split.Stdout
+        # **JSON は標準出力だけから読む**（標準エラーの行で壊れる。docs/design/cli-stderr-json.md）。
+        # **pipeline 0.10 の包みの無い応答は包みありの形に揃える**（issue #88。docs/design/pipeline-0.10.md）
+        $parsed = ConvertFrom-UappCliCommandResponse -Stdout $split.Stdout -Stderr $split.Stderr -ExitCode $exitCode
         if ($attempt -eq 0 -and (Test-UappPipelineRenamedResponse -Parsed $parsed)) {
             Set-UappPipelineStyleGrouped -ProjectDir $projectDir -Label $projectName -CommandName $cmdName
             $style = "grouped"

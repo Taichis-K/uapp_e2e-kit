@@ -137,6 +137,9 @@ function Invoke-WithTimeout {
     try {
         $process = Start-Process -FilePath $FilePath -ArgumentList $Arguments -PassThru -NoNewWindow `
                                  -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+        # **Handle に先に触る**（触らないと終了後の ExitCode が $null になる PowerShell の癖。Invoke-UappAdb と同じ。
+        # 終了コードは pipeline 0.10 の包みの無い応答の成否に使う＝ConvertFrom-UappCliCommandResponse）
+        $null = $process.Handle
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
         $announced = $false
         while (-not $process.HasExited -and $sw.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
@@ -420,7 +423,7 @@ if ($Editor) {
                           @($CmdArgs | ForEach-Object { if ("$_" -match "\s") { Format-CliArg "$_" } else { "$_" } }) +
                           @("--format", "json", "--no-banner")
                 $probe = Invoke-WithTimeout -FilePath $unityCli -Arguments (@($cliGlobalArgs) + $quoted) -TimeoutSeconds $TimeoutSeconds
-                $raw = $probe.Output; $stdout = $probe.Stdout
+                $raw = $probe.Output; $stdout = $probe.Stdout; $stderr = $probe.Stderr; $exitCode = $probe.ExitCode
             } else {
                 # **CLI の出力（UTF-8）をコンソール符号化で復号しない**。日本語 Windows の既定
                 # （cp932）だと、日本語テスト名等のマルチバイトの**後続バイトが直後の `"` を
@@ -431,11 +434,13 @@ if ($Editor) {
                 try {
                     [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
                     $split = & $unityCli @cliGlobalArgs cmd --project-path $projectDir @CmdArgs --format json --no-banner 2>&1 | Split-UappNativeOutput
-                    $raw = $split.Stdout + "`n" + $split.Stderr; $stdout = $split.Stdout
+                    $exitCode = $LASTEXITCODE   # 直後に控える（下の finally は外部コマンドを呼ばないが、読む位置を固定する）
+                    $raw = $split.Stdout + "`n" + $split.Stderr; $stdout = $split.Stdout; $stderr = $split.Stderr
                 } finally { [Console]::OutputEncoding = $prevEnc }
             }
-            # **JSON は標準出力だけから読む**（標準エラーの行で壊れる。docs/design/cli-stderr-json.md）。$raw は証跡・メッセージ用
-            $parsed = ConvertFrom-UappCliJson -Stdout $stdout
+            # **JSON は標準出力だけから読む**（標準エラーの行で壊れる。docs/design/cli-stderr-json.md）。$raw は証跡・メッセージ用。
+            # **pipeline 0.10 の包みの無い応答は包みありの形に揃える**（issue #88。docs/design/pipeline-0.10.md）
+            $parsed = ConvertFrom-UappCliCommandResponse -Stdout $stdout -Stderr $stderr -ExitCode $exitCode
             if ($attempt -eq 0 -and (Test-UappPipelineRenamedResponse -Parsed $parsed)) {
                 Set-UappPipelineStyleGrouped -ProjectDir $projectDir -Label $projectName -CommandName $cmdName
                 $CmdArgs = @(Get-UappPipelineCommandArgs -Name $cmdName -Style "grouped") + $cmdRest

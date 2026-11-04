@@ -204,6 +204,7 @@ function Test-CliExecOnce {
             -ArgumentList (@($cliGlobalArgs) + @("cmd", "--project-path", (Format-CliArg $ProjectDir)) + $EvalArgs +
                            @("--code", (Format-CliArg 'return "ok";'), "--format", "json", "--no-banner")) `
             -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+        $null = $p.Handle   # 先に触る（触らないと終了後の ExitCode が $null になる。Invoke-UappAdb と同じ）
         if (-not $p.WaitForExit($TimeoutSeconds * 1000)) {
             # **子孫ごと落とす。** `Kill()` は子へ再帰しないので、CLI が別プロセスを
             # 抱えていると**打ち切ったつもりで待たされる** ―
@@ -215,8 +216,10 @@ function Test-CliExecOnce {
                                       seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1) }
         }
         $sw.Stop()
-        # **JSON は標準出力だけから読む**（標準エラーの行で壊れる。docs/design/cli-stderr-json.md）
-        $json = ConvertFrom-UappCliJson -Stdout "$(Get-Content -LiteralPath $outFile -Raw -ErrorAction SilentlyContinue)"
+        # **JSON は標準出力だけから読む**（標準エラーの行で壊れる。docs/design/cli-stderr-json.md）。
+        # **pipeline 0.10 の包みの無い応答は包みありの形に揃える**（issue #88。docs/design/pipeline-0.10.md）
+        $json = ConvertFrom-UappCliCommandResponse -Stdout "$(Get-Content -LiteralPath $outFile -Raw -ErrorAction SilentlyContinue)" `
+                                                   -Stderr "$(Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue)" -ExitCode $p.ExitCode
         return [pscustomobject]@{ attempted = $true; ok = [bool]($json -and $json.success)
                                   timedOut = $false; json = $json
                                   seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1) }

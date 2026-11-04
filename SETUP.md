@@ -337,8 +337,10 @@ Codex ユーザーでルート `AGENTS.md` が無いプロジェクトは `-Root
 
 **Unity CLI がインストール済みで対象が Unity 6 以降なら、1コマンドで完結する**
 （シーンオープン→Game view解像度設定→Play開始→pytest→Play終了まで全自動。人手でのPlay操作は不要）。
-**先に Unity CLI の版を確かめる**: com.unity.pipeline 0.8.0-exp.1 と 0.9.1-exp.1 は Unity CLI 1.0.0-beta.15 で検証した。
-0.9 系と 1.0.0-beta.15 より前の Unity CLI の組み合わせは未実測なので、`unity --version` が 1.0.0-beta.15 より前なら `unity upgrade` で上げてから実行する:
+**先に Unity CLI の版を確かめる**: com.unity.pipeline 0.8.0-exp.1 と 0.9.1-exp.1 は Unity CLI 1.0.0-beta.15 で、
+0.9.1-exp.1 と 0.10.0-exp.1 は 1.0.0-beta.16 で検証した（0.10 は Windows と macOS・uGUI のサンプル 1 本のエディタ直結と EditMode）。
+0.9 系以降と 1.0.0-beta.15 より前の Unity CLI の組み合わせ、0.10 と 1.0.0-beta.15 の組み合わせは未実測なので、
+`unity --version` が 1.0.0-beta.15 より前（0.10 を使うなら 1.0.0-beta.16 より前）なら `unity upgrade` で上げてから実行する:
 
 ```powershell
 .\uapp_e2e\scripts\run-e2e.ps1 -Editor
@@ -369,15 +371,26 @@ Codex ユーザーでルート `AGENTS.md` が無いプロジェクトは `-Root
 （`state` の読み方は `docs/ai-loop.md` の「内側ループ」）:
 
 - **プロセスの一覧に、`→ このプロジェクト` と付いた batchmode の Unity があれば**（`state` に関わらず）、画面は無いので、
-  その Unity の終了を待つ（ビルドのあとの終了でハングしているなら終了させる）。**`（別プロジェクト）` の Unity には触らない**
+  その Unity の終了を待つ。`build-android.ps1` のビルドなら、そのログ（`uapp_e2e/Builds/build-<プロジェクト>.log`）に
+  `[E2EBridge.BuildEntry] result=` の行が出たあと更新が止まっていれば、ビルドは終わっていて終了だけがハングしているので終了させる
+  （この行はキットのビルドメソッドが出す。`-ExecuteMethod` で自前のメソッドを使うと出ない）。
+  **`（別プロジェクト）` の Unity には触らない**
 - **`open` でも「Pipeline 接続: なし」と出る**なら、com.unity.pipeline が入っていないか、エディタがまだ読み込んでいないか、
   CLI がこのエディタを見つけられていない（手動の Play は使えるので `open` と判定される）。`Packages/manifest.json` に com.unity.pipeline があるかを見る:
   - 無ければ、**エディタを閉じて再実行する**（「開いている Unity がいない」の動きで入る）か、エディタの Package Manager で追加する
-  - 有れば、パッケージの読み込みとコンパイルのエラーが無いかを `Editor.log`（エディタの Console と同じ内容）で見る。
+  - 有れば、パッケージの読み込みとコンパイルのエラーが無いかを `Editor.log` で見る
+    （Windows は `%LOCALAPPDATA%\Unity\Editor\Editor.log`、macOS は `~/Library/Logs/Unity/Editor.log`。Console に出るエラーはここにも出る）。
+    別のプロジェクトの Unity も動いていると、このファイルがこのプロジェクトのものとは限らない
+    （複数の Unity が同時に動くと既定の `Editor.log` は競合する。`docs/ai-loop.md` の「内側ループ」）。
+    先頭近くの `COMMAND LINE ARGUMENTS:` の下にある `-projectpath` の値で、どのプロジェクトのログかを確かめる
+    （Windows で `-useHub` 付きの起動のときに確認した綴り。ほかの起動のしかたは未確認で `-projectPath` になりうるので、大小文字を区別せずに探す）。
     エラーがあれば先に直す（コンパイルエラーのまま閉じて開き直すと `Enter Safe Mode?` で止まる）。
     無ければ読み込みが終わるのを待ってから再実行し、それでも同じなら、エディタを閉じて再実行する
-- `starting-or-blocked` なら、起動途中かモーダルダイアログ待ちなので、画面を確認する。
-  画面に何も出ていなければ、下のプロキシを疑う（状態を見るスクリプトにも `-UnityCliProxyDisable` を付けて測り直す）
+  - **エディタを閉じる前に**、そのエディタを人が使っていないか、未保存の変更（シーン・プレハブ）が無いかを確かめる
+- `starting-or-blocked` なら、起動途中かモーダルダイアログ待ちか、長い import・コンパイル・重い処理でメインスレッドが塞がっている
+  （この判定では区別できない）。20〜30 秒あけて状態を見直し、`open` にならなければ画面を確認する。
+  画面にダイアログが無ければ、下のプロキシも疑う（状態を見るスクリプトにも `-UnityCliProxyDisable` を付けて測り直す）
+- 「Unity CLI: … 秒で応答なし」と出たら、CLI が応答していない（上の表の 1 行目と同じ。`unity doctor` で状態を見て、認証が切れていれば `unity auth login`）
 - `unknown` なら、プロセスを列挙できていないので、表示された警告の原因を直してから再実行する
 - `closed`、または `open` で「Pipeline 接続: あり」なら、止まったあとに状態が変わっている（エディタが閉じた・読み込みが終わった）ので、そのまま再実行する
 - ほかの原因: HTTP プロキシ配下なら `-UnityCliProxyDisable`（上の「macOS で使う場合」の表。Windows でも同じ）。
