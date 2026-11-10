@@ -1069,6 +1069,111 @@ function Stop-UappProcessTree {
     foreach ($procId in $all) { Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue }
 }
 
+function Measure-UappKitTagRef {
+    <#
+      .SYNOPSIS
+      `git ls-remote --tags` の出力行から、`refs/tags/v<版>` に当たる ref の数（0 か 1）を返す純関数。
+
+      .NOTES
+      **大小文字を区別する完全一致**（git の ref は大小文字を区別する。`V0.1.30` や `v0.1.300` を数えない）。
+      注釈付きのタグは `refs/tags/v<版>^{}` の行も出るので、`^{}` を外して重複を数えない。
+      `ls-remote` にパターンを渡すと git の側でも同じ絞り込みをする（二重の安全）。
+      **検出力は合成した行の単体テストで見る** ― 実物の `ls-remote` を通すと、ここの比較を壊しても結果が変わらない
+      （docs/design/release-no-post-publish-commits.md）。
+    #>
+    param([AllowNull()][AllowEmptyCollection()][string[]]$Lines, [Parameter(Mandatory)][string]$Version)
+    $want = "refs/tags/v$Version"
+    $found = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    foreach ($line in @($Lines)) {
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        $parts = $line -split "`t"
+        if ($parts.Count -lt 2) { continue }
+        $ref = $parts[1].Trim()
+        if ($ref.EndsWith('^{}', [System.StringComparison]::Ordinal)) { $ref = $ref.Substring(0, $ref.Length - 3) }
+        if ($ref -ceq $want) { [void]$found.Add($ref) }
+    }
+    return $found.Count
+}
+
+function Get-UappKitTagState {
+    <#
+      .SYNOPSIS
+      公開リポにタグ `v<版>` があるか（＝その版が公開済みか）を返す。@{ State = present | absent | unknown; Url; Detail }。
+
+      .NOTES
+      **開発用**（package-kit / publish-kit が使う。導入先は使わない。置き場が配布物しか無いのでここにある）。
+      URL は -KitRepoUrl → クローン（-KitRepo）の origin → 既定（公開リポ）の順。
+      **期限つき・対話のプロンプトなし**で `git ls-remote` を叩く。GitHub は存在しないリポにも認証を求めるので、
+      プロンプトを無効にしないと Git Credential Manager の画面や SSH のホスト鍵の確認で止まりうる
+      （adb の無期限待ちと同じ型）。環境変数は**子プロセスにだけ渡す**（呼び手のプロセスに残さない）。
+      期限を超えたら `Stop-UappProcessTree` でツリーごと止める（https では git-remote-https が孫になる）。
+      確かめられないときは unknown を返す。**unknown をどう扱うかは呼び手が決める**
+      （publish-kit は止める＝公開の最後の門 / package-kit は出力先に zip が無ければ警告して進む）。
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Version,
+        [string]$KitRepo,
+        [string]$KitRepoUrl,
+        [int]$TimeoutSeconds = 30
+    )
+    $git = Get-UappCommandPath "git"
+    $url = $KitRepoUrl
+    $hasRepo = [bool]($KitRepo -and (Test-Path -LiteralPath (Join-UappPath $KitRepo ".git")))
+    if (-not $url -and $git -and $hasRepo) {
+        $u = & $git -C $KitRepo remote get-url origin 2>$null
+        if ($LASTEXITCODE -eq 0 -and $u) { $url = "$u".Trim() }
+    }
+    if (-not $url) { $url = "https://github.com/Taichis-K/uapp_e2e-kit.git" }
+    if (-not $git) { return @{ State = "unknown"; Url = $url; Detail = "git が見つからない" } }
+
+    $psi = [System.Diagnostics.ProcessStartInfo]::new($git)
+    # **クローンがあれば、その中で叩く**（`-C`）。クローンのローカル設定（http.sslbackend・credential 等）を効かせる
+    # （以前の publish-kit は `git -C <クローン> ls-remote origin` だった。外れると別の設定で通信する＝レビューの指摘）
+    $gitArgs = @()
+    if ($hasRepo) { $gitArgs += @("-C", $KitRepo) }
+    $gitArgs += @("ls-remote", "--tags", $url, "refs/tags/v$Version")
+    foreach ($a in $gitArgs) { $psi.ArgumentList.Add($a) }
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.RedirectStandardInput = $true
+    $psi.Environment["GIT_TERMINAL_PROMPT"] = "0"
+    $psi.Environment["GCM_INTERACTIVE"] = "false"
+    # 利用者の SSH の設定（core.sshCommand・GIT_SSH_COMMAND）があれば上書きしない（鍵の指定などを消さない）。
+    # その場合 SSH のプロンプトは止められない（残る限界）
+    $userSsh = "$env:GIT_SSH_COMMAND$env:GIT_SSH"
+    if (-not $userSsh) {
+        # クローンがあればそのローカル設定ごと、無ければグローバルとシステムの設定を読む
+        $cfgArgs = if ($hasRepo) { @("-C", $KitRepo, "config", "--get", "core.sshCommand") } else { @("config", "--get", "core.sshCommand") }
+        $userSsh = "$(& $git @cfgArgs 2>$null)"
+    }
+    if (-not $userSsh) { $psi.Environment["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes" }
+    try {
+        $proc = [System.Diagnostics.Process]::Start($psi)
+    } catch {
+        return @{ State = "unknown"; Url = $url; Detail = "git を起動できない: $($_.Exception.Message)" }
+    }
+    try {
+        $proc.StandardInput.Close()
+        $outTask = $proc.StandardOutput.ReadToEndAsync()
+        $errTask = $proc.StandardError.ReadToEndAsync()
+        if (-not $proc.WaitForExit($TimeoutSeconds * 1000)) {
+            Stop-UappProcessTree -ProcessId $proc.Id
+            return @{ State = "unknown"; Url = $url; Detail = "$($TimeoutSeconds) 秒で返らない（打ち切った）" }
+        }
+        $proc.WaitForExit()
+        $code = $proc.ExitCode
+        $stdout = $outTask.Result
+        $stderr = "$($errTask.Result)".Trim()
+    } finally { $proc.Dispose() }
+    if ($code -ne 0) {
+        return @{ State = "unknown"; Url = $url; Detail = "ls-remote が失敗（終了コード $($code)）: $($stderr)" }
+    }
+    $n = Measure-UappKitTagRef -Lines @($stdout -split "`r?`n") -Version $Version
+    if ($n -gt 0) { return @{ State = "present"; Url = $url; Detail = "タグ v$($Version) がある" } }
+    return @{ State = "absent"; Url = $url; Detail = "タグ v$($Version) は無い" }
+}
+
 function Test-UappPathEqual {
     <#
       .SYNOPSIS

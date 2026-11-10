@@ -278,7 +278,11 @@ def type_text(text: str, bundle_id: str) -> None:
 
 
 def handle_alert(button: str | None = None, timeout: float = 5.0) -> dict:
-    """システムアラートのボタンを押す（button 省略で先頭）。無ければ OsAgentError。"""
+    """システムアラートのボタンを押す（button 省略で先頭）。無ければ OsAgentError。
+
+    ボタン名は `label` か `identifier` の完全一致（大小文字を区別）。無い名前なら 404（本文の `available` にボタン名）、
+    `button` が空文字なら 400、ボタンの中心が画面の外なら 409。
+    """
     payload: dict = {"timeout": timeout}
     if button is not None:
         payload["button"] = button
@@ -439,7 +443,13 @@ def find_elements(*, bundle_id: str | None = None, identifier: str | None = None
 def tap_element(*, bundle_id: str | None = None, identifier: str | None = None, label: str | None = None,
                 value: str | None = None, label_contains: str | None = None, type: str | None = None,  # noqa: A002
                 index: int = 0, timeout: float = 5.0) -> dict:
-    """要素が現れるのを待って押す。現れなければ 404、**存在するが押せない（画面外・覆われている）なら 409**（`OsAgentError.http_status`）。"""
+    """要素が現れるのを待って押す。現れなければ 404、**存在するが押せない（画面外・覆われている）なら 409**（`OsAgentError.http_status`）。
+
+    **WebView の中の覆い（`div` など）は見ないことがある**（そのときは 409 にならず中心の座標を押す＝当たるのは上の覆い。
+    ネイティブの UI の覆いは未確認）。
+    押すのは確かめた時点のスナップショットの中心（確かめたあとに一致しなくなっていたら 404）。`bundle_id` を渡したとき、
+    要素がキーボードの裏にあれば押さずに 409（キーボードのキーは押せる）。
+    """
     payload = _query(bundle_id, identifier, label, value, label_contains, type)
     payload.update({"index": int(index), "timeout": _timeout(timeout)})
     return _post_new("/element/tap", payload, "要素を押す操作（/element/tap）", timeout=timeout + DEFAULT_TIMEOUT)
@@ -463,6 +473,7 @@ def type_into(text: str, *, clear: bool = False, bundle_id: str | None = None, i
 
     **消し切れなければ 409 で入力しない**（カーソル位置・消去ボタン・伏せ字のせいで値が混ざるのを防ぐ）。
     **消したあとの値がプレースホルダーと同じでも 409**（空欄なのか、残りがたまたま同じ文字列なのか判別できない）。
+    消したあとに入力欄を読み直せない（フォーカスが外れた）ときも 409 で入力しない。要素の押し方とキーボードの 409 は `tap_element` と同じ。
     プレースホルダーのある欄では空になると値がプレースホルダーとして読めることがあるので、**空欄に入れるときは `clear` を付けない**。
     """
     if not isinstance(text, str):
@@ -531,7 +542,11 @@ def press_button(name: str) -> dict:
 
 
 def open_url(url: str) -> dict:
-    """URL・ディープリンクを開く（iOS 16.4 以降。独自スキームは初回に「開きますか」で戻らないことがある）。"""
+    """URL・ディープリンクを開く（iOS 16.4 以降。独自スキームは初回に「開きますか」で戻らないことがある）。
+
+    **開けない URL を渡すとエージェントが終わる**（XCUITest が失敗として記録する）。`data:` / `javascript:` / `about:` /
+    `file:` / `blob:` はエージェントが渡す前に 400 で断る。対応するアプリの無い独自スキームや `mailto:` などは見分けられない。
+    """
     if not isinstance(url, str) or not re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", url):
         raise OsAgentError(f"url はスキームつきで指定してください（例: https://… / myapp://…）: {url!r}")
     return _post_new("/open-url", {"url": url}, "URL を開く操作（/open-url）")

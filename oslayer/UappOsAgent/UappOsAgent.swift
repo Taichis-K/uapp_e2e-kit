@@ -239,22 +239,64 @@ final class UappOsAgent: XCTestCase {
             return HttpResponse(status: 200, json: ["ok": true])
 
         case ("POST", "/alert"):
+            // `button` は文字列で、空でないこと（数値などを「指定なし」と読んで先頭＝「許可」を押さない。issue #90）。
+            // null とキー無しは「指定なし」
+            let rawButton = request.json["button"]
+            let wanted: String?
+            if rawButton == nil || rawButton is NSNull {
+                wanted = nil
+            } else if let s = rawButton as? String, !s.isEmpty {
+                wanted = s
+            } else {
+                return HttpResponse(status: 400, json: ["error": "button は空でない文字列で指定してください（省くと先頭のボタン）"])
+            }
             let alert = springboard.alerts.firstMatch
             guard alert.waitForExistence(timeout: request.jsonDouble("timeout") ?? 5) else {
                 return HttpResponse(status: 404, json: ["error": "システムアラートがありません"])
             }
-            if let label = request.jsonString("button") {
-                let button = alert.buttons[label]
-                guard button.exists else {
+            // 出てくるアニメーションの途中に座標で押すと効かない（tap() は押せる状態を待っていた）ので、ボタンが押せる状態に
+            // なるのを待つ（isHittable は一致しなくなっても失敗を記録しない＝実測。2 秒で打ち切り、そのまま進む）
+            let readyDeadline = Date().addingTimeInterval(2)
+            while !(wanted.map { alert.buttons[$0] } ?? alert.buttons.firstMatch).isHittable && Date() < readyDeadline {
+                Thread.sleep(forTimeInterval: 0.1)
+            }
+            // **アラートを解決し直す読み取りと tap() をしない**（issue #90。#89 と同じ型）。スナップショットを 1 回取り、
+            // その子孫のボタンから選んで、中心を SpringBoard の正規化座標で押す（アラートは SpringBoard の木にある）
+            let snap: XCUIElementSnapshot
+            do { snap = try alert.snapshot() } catch {
+                return HttpResponse(status: 404, json: ["error": "システムアラートが閉じた可能性があります（snapshot: \(error)）"])
+            }
+            var buttons: [XCUIElementSnapshot] = []
+            UappOsAgent.collectButtons(snap, into: &buttons)
+            let target: XCUIElementSnapshot
+            if let label = wanted {
+                guard let hit = buttons.first(where: { $0.label == label || $0.identifier == label }) else {
                     return HttpResponse(status: 404, json: [
                         "error": "ボタンがありません: \(label)",
-                        "available": alert.buttons.allElementsBoundByIndex.map { $0.label },
+                        "available": buttons.map { $0.label },
                     ])
                 }
-                button.tap()
+                target = hit
             } else {
-                alert.buttons.firstMatch.tap()
+                guard let first = buttons.first else {
+                    return HttpResponse(status: 404, json: ["error": "システムアラートにボタンがありません"])
+                }
+                target = first
             }
+            // **横画面では座標で押さない**。SpringBoard の frame は横（例 852×393）で返るのに、アラートのスナップショットの
+            // frame は縦の座標のまま（シミュレータ iPhone 16 / iOS 18.6 で実測）で、正規化すると画面の外を指す（#80 と同じ型）。
+            // 違うボタンを押すと同意を取り違えるので、横のときは今までどおり要素を引いて tap() する（#89 の型が残る＝残る限界）
+            let board = springboard.frame
+            if board.width > board.height {
+                let button = wanted.map { alert.buttons[$0] } ?? alert.buttons.firstMatch
+                button.tap()
+                return HttpResponse(status: 200, json: ["ok": true])
+            }
+            guard !target.frame.isEmpty, let point = normalizedPoint(in: target.frame, rx: 0.5, ry: 0.5, app: springboard),
+                  (0...1).contains(point.dx), (0...1).contains(point.dy) else {
+                return HttpResponse(status: 409, json: ["error": "ボタンの中心が画面の外です（押していません）: \(target.label)"])
+            }
+            springboard.coordinate(withNormalizedOffset: point).tap()
             return HttpResponse(status: 200, json: ["ok": true])
 
         case ("POST", "/activate"):
@@ -360,12 +402,18 @@ final class UappOsAgent: XCTestCase {
             switch resolveElement(request) {
             case .failure(let response): return response
             case .success(let element):
-                guard element.isHittable else { return notHittableResponse(element) }
-                // **要約は押す前に取る**（押すと消える要素＝アラートのボタン・画面を移るボタンの属性を、押したあとに読むと
-                // XCTest の失敗になりエージェントが止まりうる）
-                let summary = UappOsAgent.summary(element)
-                element.tap()
-                return HttpResponse(status: 200, json: ["ok": true, "element": summary])
+                // **要素を解決し直す読み取り（属性・tap()）をしない**（issue #89）。存在を確かめたあとに要素が述語に
+                // 一致しなくなると、その読み取りが XCTest の失敗として記録され、以後の操作が断られてエージェントが終わる。
+                // isHittable は一致しなくても記録しない（実測）。属性はこの要求で 1 回だけ取ったスナップショットから読み、
+                // 押すのはその frame の中心をアプリの正規化座標で（設計は docs/design/os-agent-element-vanish.md）
+                switch pressableSnapshot(element, request: request) {
+                case .failure(let response): return response
+                case .success(let snap):
+                    let app = baseApp(request)
+                    if let refusal = pressRefusal(snap.frame, app: app) { return refusal }
+                    guard pressPoint(in: snap.frame, rx: 0.5, ry: 0.5, app: app) else { return UappOsAgent.cannotPressResponse }
+                    return HttpResponse(status: 200, json: ["ok": true, "element": UappOsAgent.summary(snap)])
+                }
             }
 
         case ("POST", "/element/wait"):
@@ -404,18 +452,35 @@ final class UappOsAgent: XCTestCase {
             switch resolveElement(request) {
             case .failure(let response): return response
             case .success(let element):
-                guard element.isHittable else { return notHittableResponse(element) }
+                // /element/tap と同じく、要素を解決し直す読み取りと操作をしない（issue #89）
+                let snap: XCUIElementSnapshot
+                switch pressableSnapshot(element, request: request) {
+                case .failure(let response): return response
+                case .success(let value): snap = value
+                }
                 let app = baseApp(request)
-                let summary = UappOsAgent.summary(element)
-                let target = element.frame
-                element.tap()
+                if let refusal = pressRefusal(snap.frame, app: app) { return refusal }
+                let summary = UappOsAgent.summary(snap)
+                let target = snap.frame
+                guard pressPoint(in: target, rx: 0.5, ry: 0.5, app: app) else { return UappOsAgent.cannotPressResponse }
                 // **押した要素（かその子）にフォーカスが来たかを確かめ、フォーカスを持つ要素へ入力する**。
                 // 「アプリのどこかにフォーカスがある」だけだと、別の入力欄がフォーカスを持ったまま押しても移らない要素を
-                // 指定したときに、typeText が XCTest の失敗になりエージェントが止まりうる（#81 と同じ型）
-                func focusedInTarget() -> XCUIElement? {
+                // 指定したときに、typeText が XCTest の失敗になりエージェントが止まりうる（#81 と同じ型）。
+                // フォーカスの要素も exists（記録しない）のあとスナップショットで読む（issue #89）。
+                // 「来た」と見なす枠は 3 つ（issue #93。入力欄はキーボードを避けて動くことがある）:
+                //   1. 押す前の frame  2. 最初に来たと判定したときのフォーカスの frame（clear で値が変わり、述語に一致しなくなっても読み直せるように）
+                //   3. 対象の今の frame（exists → try? snapshot() で読み直す。読めない・幅か高さが 0 なら使わない）
+                var focusedFrame: CGRect? = nil
+                func focusedInTarget() -> XCUIElementSnapshot? {
                     let focused = focusedElement(in: app)
-                    guard focused.exists, target.insetBy(dx: -1, dy: -1).contains(focused.frame) else { return nil }
-                    return focused
+                    guard focused.exists, let s = try? focused.snapshot() else { return nil }
+                    var frames = [target]
+                    if let f = focusedFrame { frames.append(f) }
+                    if element.exists, let now = try? element.snapshot(), now.frame.width > 0, now.frame.height > 0 {
+                        frames.append(now.frame)
+                    }
+                    guard frames.contains(where: { $0.insetBy(dx: -1, dy: -1).contains(s.frame) }) else { return nil }
+                    return s
                 }
                 let deadline = Date().addingTimeInterval(2)
                 var field = focusedInTarget()
@@ -423,33 +488,53 @@ final class UappOsAgent: XCTestCase {
                 guard let input = field else {
                     return HttpResponse(status: 409, json: ["error": "要素を押しましたが、その要素にキーボードのフォーカスが来ません", "element": summary])
                 }
+                focusedFrame = input.frame
                 if clear {
                     let placeholder = input.placeholderValue ?? ""
                     let current = (input.value as? String) ?? ""
                     // **値がプレースホルダーと同じでも消す**（同じ文字列の実際の値かもしれない。空欄に削除キーを送っても害は無い）
                     if !current.isEmpty {
                         // 右端寄りを押してカーソルを末尾へ寄せてから、値の長さぶん削除キーを送る
-                        input.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
-                        input.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: current.count + 4))
+                        // （要素を基準にした座標は解決し直すので、アプリの座標で押す。入力はフォーカスへ届くアプリへ送る）
+                        // （入力欄はフォーカスを持って対象の中にあるので、画面の外とキーボードの検査はしない）
+                        // 判定のあとに欄がさらに動くことがある（キーボードを避ける途中で判定した等。issue #93）ので、
+                        // 押す直前にフォーカスの要素を読み直し、その frame を押す（読めなければ判定したときの frame）
+                        let fresh = focusedInTarget() ?? input
+                        focusedFrame = fresh.frame
+                        guard pressPoint(in: fresh.frame, rx: 0.95, ry: 0.5, app: app) else { return UappOsAgent.cannotPressResponse }
+                        // 押したことでフォーカスが外れていたら削除キーを送らない（フォーカスが無いまま typeText を呼ぶと
+                        // XCTest の失敗になりエージェントが止まる＝#81 の型）
+                        guard focusedInTarget() != nil else {
+                            return HttpResponse(status: 409, json: [
+                                "error": "既存の値を消す前に入力欄のフォーカスが外れました。入力していません",
+                                "remaining": NSNull()])
+                        }
+                        app.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: current.count + 4))
                     }
-                    // **消えたか読み直す**。残っていれば入力しない（黙って混ざった値を入れない）
-                    let after = input.exists ? ((input.value as? String) ?? "") : ""
+                    // **消えたか読み直す**。残っていれば入力しない（黙って混ざった値を入れない）。
+                    // 読み直せない（フォーカスが外れた・対象の外へ移った）ときも、消えたか分からないので入力しない
+                    guard let again = focusedInTarget() else {
+                        return HttpResponse(status: 409, json: [
+                            "error": "既存の値を消したあとに入力欄を読み直せません（フォーカスが外れた可能性）。入力していません",
+                            "remaining": NSNull()])
+                    }
+                    let after = (again.value as? String) ?? ""
                     // **消したあとの値がプレースホルダーと同じなら、消す前の値にかかわらず判別できない**
                     // （空欄なのか、部分的に消えた残りがたまたまプレースホルダーと同じ文字列なのか。例: "prefixguest" → "guest"）
-                    if input.exists && !placeholder.isEmpty && after == placeholder {
+                    if !placeholder.isEmpty && after == placeholder {
                         return HttpResponse(status: 409, json: [
                             "error": "値がプレースホルダーと同じで、空欄か既存の値かを判別できません。入力していません（空欄なら clear を付けずに入れる）",
                             "remaining": after])
                     }
-                    guard input.exists, after.isEmpty else {
+                    guard after.isEmpty else {
                         return HttpResponse(status: 409, json: [
                             "error": "既存の値を消し切れませんでした（カーソル位置・消去ボタン・伏せ字の可能性）。入力していません",
                             "remaining": after])
                     }
                 }
-                input.typeText(text)
-                // 入力で要素が消えることがある（確定で画面が移る等）ので、あるときだけ読む
-                let value: Any = input.exists ? ((input.value as? String) ?? NSNull()) : NSNull()
+                app.typeText(text)
+                // 入力で要素が消えることがある（確定で画面が移る等）ので、対象の中のフォーカスの要素があるときだけ読む
+                let value: Any = (focusedInTarget()?.value as? String) ?? NSNull()
                 return HttpResponse(status: 200, json: ["ok": true, "value": value])
             }
 
@@ -530,6 +615,15 @@ final class UappOsAgent: XCTestCase {
             guard let raw = request.jsonString("url"), !raw.isEmpty,
                   let url = URL(string: raw), let scheme = url.scheme, !scheme.isEmpty else {
                 return HttpResponse(status: 400, json: ["error": "url はスキームつきの URL を指定してください（例: https://… / myapp://…）"])
+            }
+            // **開けないと決まっているスキームは渡す前に弾く**（issue #92）。XCUITest は開けない URL を
+            // 「Failed to open the default app for a URL」の失敗として記録し、以後の操作が断られてエージェントが終わる
+            // （200 を返したあとで）。実測で終わったのは data / javascript / about / file。blob は推測。
+            // 対応するアプリの無い独自スキーム・標準のスキームは事前に見分けられないので弾けない（残る限界）。
+            // URL のスキームは大小文字を区別しない
+            if UappOsAgent.unopenableSchemes.contains(scheme.lowercased()) {
+                return HttpResponse(status: 400, json: [
+                    "error": "このスキームの URL はほかのアプリでは開けません（\(scheme):）。渡すとエージェントが終わるので開いていません"])
             }
             if #available(iOS 16.4, *) {
                 // 独自スキームでは初回に「開きますか」のダイアログが出て戻らないことがある（残る限界）
@@ -737,8 +831,10 @@ final class UappOsAgent: XCTestCase {
         ]
     }
 
-    private static func summary(_ e: XCUIElement) -> [String: Any] {
-        ["type": elementTypeName(e.elementType), "identifier": e.identifier, "label": e.label]
+    /// 要素の要約。**スナップショットから読む**（`XCUIElement` の属性を読むと要素を解決し直し、一致しなくなっていると
+    /// XCTest の失敗が記録されてエージェントが終わる。issue #89）
+    private static func summary(_ s: XCUIElementSnapshot) -> [String: Any] {
+        ["type": elementTypeName(s.elementType), "identifier": s.identifier, "label": s.label]
     }
 
     /// `/element/*` の要素（**固定の書式に値を引数で渡した述語**で引く。呼び手の文字列を述語にしない）
@@ -781,10 +877,85 @@ final class UappOsAgent: XCTestCase {
 
     /// 存在するが押せない要素は押さない（XCUITest に押させるとテストの失敗として記録され、エージェントが止まりうる）。
     /// 画面外ならスクロールしてからやり直す（自動スクロールには任せない）
-    private func notHittableResponse(_ element: XCUIElement) -> HttpResponse {
+    private func notHittableResponse(_ snap: XCUIElementSnapshot) -> HttpResponse {
         HttpResponse(status: 409, json: [
             "error": "要素は存在しますが押せません（画面外・他の要素に覆われている等。画面外なら /swipe でスクロールしてからやり直す）",
-            "element": UappOsAgent.summary(element)])
+            "element": UappOsAgent.summary(snap)])
+    }
+
+    /// 押す前の要素を、`isHittable`（一致しなくても記録しない）と 1 回だけのスナップショットで確かめる（issue #89）。
+    /// スナップショットが取れない（確かめたあとに一致しなくなった可能性）ときは、押す経路なら 404、押せない経路なら 409 のまま `element` を外す
+    private func pressableSnapshot(_ element: XCUIElement, request: HttpRequest) -> Result<XCUIElementSnapshot, HttpResponse> {
+        let hittable = element.isHittable
+        let snap: XCUIElementSnapshot
+        do { snap = try element.snapshot() } catch {
+            // 404 の本文は "unknown:" で始めない（ドライバはそれを「古いエージェント」と読む）
+            let why = "要素は確かめたあとに一致しなくなった可能性があります（snapshot: \(error)）"
+            return .failure(hittable
+                ? HttpResponse(status: 404, json: ["error": why])
+                : HttpResponse(status: 409, json: ["error": "要素は存在しますが押せません。" + why]))
+        }
+        guard hittable else { return .failure(notHittableResponse(snap)) }
+        return .success(snap)
+    }
+
+    /// 押す前の位置の検査（押さないなら応答を返す）。中心が画面の外なら 409。
+    /// **要素がキーボードの裏にある**（中心がキーボードの中で、要素がキーボードの一部でない）なら 409
+    /// （中心を押すとキーを押して文字が入る）。キー・Return・完了などキーボードの一部は押す。
+    /// 「丸ごと入っていればキーボードの一部」とは見なさない（キーボードの裏に丸ごと隠れた要素を押してしまう＝実測）
+    private func pressRefusal(_ frame: CGRect, app: XCUIApplication) -> HttpResponse? {
+        guard let point = normalizedPoint(in: frame, rx: 0.5, ry: 0.5, app: app),
+              (0...1).contains(point.dx), (0...1).contains(point.dy) else {
+            return HttpResponse(status: 409, json: ["error": "要素の中心が画面の外です（/swipe でスクロールしてからやり直す）"])
+        }
+        let keyboard = app.keyboards.firstMatch
+        if keyboard.exists, let kb = try? keyboard.snapshot(),
+           kb.frame.contains(CGPoint(x: frame.midX, y: frame.midY)),
+           !UappOsAgent.hasDescendant(kb, frame: frame) {
+            return HttpResponse(status: 409, json: [
+                "error": "要素の中心がキーボードの裏にあります（押すとキーを押します）。キーボードを閉じるかスクロールしてからやり直す"])
+        }
+        return nil
+    }
+
+    /// スナップショットの子孫のうち、種類がボタンのもの（木の順）
+    private static func collectButtons(_ node: XCUIElementSnapshot, into out: inout [XCUIElementSnapshot]) {
+        for child in node.children {
+            if child.elementType == .button { out.append(child) }
+            collectButtons(child, into: &out)
+        }
+    }
+
+    /// スナップショットの子孫に、同じ `frame`（各辺 1 pt の許容）の要素があるか
+    private static func hasDescendant(_ node: XCUIElementSnapshot, frame: CGRect) -> Bool {
+        for child in node.children {
+            let f = child.frame
+            if abs(f.minX - frame.minX) <= 1 && abs(f.minY - frame.minY) <= 1 &&
+               abs(f.maxX - frame.maxX) <= 1 && abs(f.maxY - frame.maxY) <= 1 { return true }
+            if hasDescendant(child, frame: frame) { return true }
+        }
+        return false
+    }
+
+    /// `frame` の中の点（幅・高さに対する割合）を、アプリの正規化座標にする（基準はアプリの `frame`）
+    private func normalizedPoint(in frame: CGRect, rx: CGFloat, ry: CGFloat, app: XCUIApplication) -> CGVector? {
+        let base = app.frame
+        guard base.width > 0, base.height > 0 else { return nil }
+        return CGVector(dx: (frame.minX + frame.width * rx - base.minX) / base.width,
+                        dy: (frame.minY + frame.height * ry - base.minY) / base.height)
+    }
+
+    /// `frame` の中の点を、アプリの正規化座標で押す（要素を解決し直さない。`/tap` と同じ経路）。
+    /// 座標を作れない（アプリの `frame` の幅か高さが 0）なら押さずに偽（呼び手は 200 を返さない）
+    @discardableResult
+    private func pressPoint(in frame: CGRect, rx: CGFloat, ry: CGFloat, app: XCUIApplication) -> Bool {
+        guard let point = normalizedPoint(in: frame, rx: rx, ry: ry, app: app) else { return false }
+        app.coordinate(withNormalizedOffset: point).tap()
+        return true
+    }
+
+    private static var cannotPressResponse: HttpResponse {
+        HttpResponse(status: 409, json: ["error": "押す座標を作れません（アプリの frame の幅か高さが 0）。押していません"])
     }
 
     private func clampedTimeout(_ request: HttpRequest) -> Double {
@@ -818,6 +989,9 @@ final class UappOsAgent: XCTestCase {
         guard let raw = raw, raw.isFinite else { return fallback }
         return Int(min(Double(range.upperBound), max(Double(range.lowerBound), raw)))
     }
+
+    /// `/open-url` が渡す前に弾くスキーム（小文字。issue #92）
+    private static let unopenableSchemes: Set<String> = ["data", "javascript", "about", "file", "blob"]
 
     /// `/orientation` が受け付ける向き。名前は `UIDeviceOrientation` の case 名のまま（Android の番号に揃えない）。
     /// faceUp / faceDown はアプリの画面の向きが変わらない値なので受け付けない
