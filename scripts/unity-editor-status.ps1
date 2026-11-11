@@ -50,6 +50,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot "uapp-platform.ps1")   # OS 差分の吸収（Windows / macOS。mac は暫定・未検証）
+. (Join-UappPath $PSScriptRoot "uapp-pipeline.ps1")   # com.unity.pipeline の層（返事はキットの形＝1.0 の形で読む。docs/design/pipeline-1.0.md）
 
 # CLI のグローバル引数は 1 か所で決めて全呼び出しへ渡す（check-portability.ps1 が検査する）
 $cliGlobalArgs = Get-UappUnityCliGlobalArgs -ProxyDisable:(Resolve-UappUnityCliProxyDisable -Switch:$UnityCliProxyDisable)
@@ -218,8 +219,10 @@ function Test-CliExecOnce {
         $sw.Stop()
         # **JSON は標準出力だけから読む**（標準エラーの行で壊れる。docs/design/cli-stderr-json.md）。
         # **pipeline 0.10 の包みの無い応答は包みありの形に揃える**（issue #88。docs/design/pipeline-0.10.md）
-        $json = ConvertFrom-UappCliCommandResponse -Stdout "$(Get-Content -LiteralPath $outFile -Raw -ErrorAction SilentlyContinue)" `
-                                                   -Stderr "$(Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue)" -ExitCode $p.ExitCode
+        # **返事は層がキットの形（1.0 の形）に直す**（docs/design/pipeline-1.0.md）
+        $json = ConvertTo-UappPipelineCompat (ConvertFrom-UappPipelineResponse -Op "eval" -Version (Get-UappPipelineVersionForSend -ProjectDir $ProjectDir) `
+                    -Stdout "$(Get-Content -LiteralPath $outFile -Raw -ErrorAction SilentlyContinue)" `
+                    -Stderr "$(Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue)" -ExitCode $p.ExitCode)
         return [pscustomobject]@{ attempted = $true; ok = [bool]($json -and $json.success)
                                   timedOut = $false; json = $json
                                   seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1) }

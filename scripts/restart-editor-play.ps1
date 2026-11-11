@@ -15,6 +15,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot "uapp-platform.ps1")   # OS 差分の吸収（Windows / macOS。mac は暫定・未検証）
+. (Join-UappPath $PSScriptRoot "uapp-pipeline.ps1")   # com.unity.pipeline の層（返事はキットの形＝1.0 の形で読む。docs/design/pipeline-1.0.md）
 
 $cliGlobalArgs = Get-UappUnityCliGlobalArgs -ProxyDisable:(Resolve-UappUnityCliProxyDisable)
 $root = (Resolve-Path -LiteralPath (Join-UappPath $PSScriptRoot "..")).Path
@@ -48,7 +49,8 @@ function Invoke-Cli {
     $cmdRest = @(); if ($CmdArgs.Count -gt 1) { $cmdRest = @($CmdArgs[1..($CmdArgs.Count - 1)]) }
     $style = Get-UappPipelineStyleOnce -ProjectDir $projectDir -Label $projectName
     for ($attempt = 0; $attempt -lt 2; $attempt++) {
-        $sendArgs = @(Get-UappPipelineCommandArgs -Name $cmdName -Style $style) + $cmdRest
+        $pipeVer = Get-UappPipelineVersionForSend -ProjectDir $projectDir
+        $sendArgs = @(Get-UappPipelineCommandArgs -Name $cmdName -Style $style -Version $pipeVer) + $cmdRest
         # CLI の出力（UTF-8）をコンソール符号化で復号しない（run-unity-tests.ps1 と同じ理由:
         # cp932 だとマルチバイトの後続バイトが `"` を飲み込み JSON が壊れる）
         $prevEnc = [Console]::OutputEncoding
@@ -59,7 +61,8 @@ function Invoke-Cli {
         } finally { [Console]::OutputEncoding = $prevEnc }
         # **JSON は標準出力だけから読む**（標準エラーの行で壊れる。docs/design/cli-stderr-json.md）。
         # **pipeline 0.10 の包みの無い応答は包みありの形に揃える**（issue #88。docs/design/pipeline-0.10.md）
-        $parsed = ConvertFrom-UappCliCommandResponse -Stdout $split.Stdout -Stderr $split.Stderr -ExitCode $exitCode
+        # **返事は層がキットの形（1.0 の形）に直す**。中身は .Value で読む
+        $parsed = ConvertTo-UappPipelineCompat (ConvertFrom-UappPipelineResponse -Op (ConvertTo-UappPipelineOp $cmdName) -Version $pipeVer -Stdout $split.Stdout -Stderr $split.Stderr -ExitCode $exitCode)
         if ($attempt -eq 0 -and (Test-UappPipelineRenamedResponse -Parsed $parsed)) {
             Set-UappPipelineStyleGrouped -ProjectDir $projectDir -Label $projectName -CommandName $cmdName
             $style = "grouped"
@@ -117,7 +120,7 @@ while ($sw.Elapsed.TotalSeconds -lt $PlayRetrySeconds) {
     $status = Invoke-Cli @("editor_status")
     # ドメインリロード中は status 自体が応答しない（$null）。それは「まだ確認できない」であって
     # 「止まった」ではないので、確認できるまで待つ
-    if ($status -and $status.success -and $status.data.result.playMode -eq "stopped") { $stopped = $true; break }
+    if ($status -and $status.success -and $status.Value.playMode -eq "stopped") { $stopped = $true; break }
     Start-Sleep -Seconds 2
 }
 if (-not $stopped) {

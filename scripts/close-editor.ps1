@@ -24,6 +24,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot "uapp-platform.ps1")   # OS 差分の吸収（Windows / macOS）
+. (Join-UappPath $PSScriptRoot "uapp-pipeline.ps1")   # com.unity.pipeline の層（返事はキットの形＝1.0 の形で読む。docs/design/pipeline-1.0.md）
 
 $cliGlobalArgs = Get-UappUnityCliGlobalArgs -ProxyDisable:(Resolve-UappUnityCliProxyDisable -Switch:$UnityCliProxyDisable)
 $root = (Resolve-Path -LiteralPath (Join-UappPath $PSScriptRoot "..")).Path
@@ -119,7 +120,9 @@ function Invoke-Cli {
     $label = Split-Path $projectDir -Leaf
     $style = Get-UappPipelineStyleOnce -ProjectDir $projectDir -Label $label
     for ($attempt = 0; $attempt -lt 2; $attempt++) {
-        $r = Invoke-CliOnce -CmdArgs (@(Get-UappPipelineCommandArgs -Name $cmdName -Style $style) + $cmdRest) -TimeoutSeconds $TimeoutSeconds
+        $pipeVer = Get-UappPipelineVersionForSend -ProjectDir $projectDir
+        $r = Invoke-CliOnce -CmdArgs (@(Get-UappPipelineCommandArgs -Name $cmdName -Style $style -Version $pipeVer) + $cmdRest) -TimeoutSeconds $TimeoutSeconds `
+                            -Op (ConvertTo-UappPipelineOp $cmdName) -Version $pipeVer
         if ($attempt -eq 0 -and (Test-UappPipelineRenamedResponse -Parsed $r.Json)) {
             Set-UappPipelineStyleGrouped -ProjectDir $projectDir -Label $label -CommandName $cmdName
             $style = "grouped"
@@ -131,7 +134,7 @@ function Invoke-Cli {
 
 function Invoke-CliOnce {
     # Invoke-Cli の 1 回ぶん（名前は変換済み）。戻り値は @{ Json; Raw; TimedOut }
-    param([string[]]$CmdArgs, [int]$TimeoutSeconds = 60)
+    param([string[]]$CmdArgs, [int]$TimeoutSeconds = 60, [string]$Op = "", [AllowNull()][string]$Version)
     $outFile = [System.IO.Path]::GetTempFileName()
     $errFile = [System.IO.Path]::GetTempFileName()
     try {
@@ -157,7 +160,8 @@ function Invoke-CliOnce {
         $raw = $stdout + $stderr
         # **JSON は標準出力だけから読む**（標準エラーの行で壊れる。docs/design/cli-stderr-json.md）。$raw はメッセージ用。
         # **pipeline 0.10 の包みの無い応答は包みありの形に揃える**（issue #88。docs/design/pipeline-0.10.md）
-        $parsed = ConvertFrom-UappCliCommandResponse -Stdout $stdout -Stderr $stderr -ExitCode $proc.ExitCode
+        # **返事は層がキットの形（1.0 の形）に直す**。中身は .Value で読む
+        $parsed = ConvertTo-UappPipelineCompat (ConvertFrom-UappPipelineResponse -Op $Op -Version $Version -Stdout $stdout -Stderr $stderr -ExitCode $proc.ExitCode)
         return @{ Json = $parsed; Raw = $raw; TimedOut = $false }
     } finally {
         Remove-Item -LiteralPath $outFile, $errFile -Force -ErrorAction SilentlyContinue
@@ -188,7 +192,7 @@ if (-not $Force) {
                "Exit は保存ダイアログを出さずに閉じるので、確認できないまま閉じません。" +
                "エディタの状態を確認するか、捨ててよいと分かっているなら -Force を付けてください")
     }
-    $openScenes = @($scenes.Json.data.result.scenes)
+    $openScenes = @($scenes.Json.Value)   # キットの形: シーンのレコードの配列
     if ($openScenes.Count -eq 0) {
         throw ("開いているシーンを 1 つも取得できませんでした（応答の形が想定と違う）。" +
                "未保存の変更を判定できないため中断します（捨ててよいなら -Force）")
@@ -212,7 +216,7 @@ if (-not $Force) {
 # Play 中なら先に止める（Play のまま Exit すると、実行中の状態がそのまま落ちる。
 # 停止できなくても閉じる方針は変えない＝あくまで行儀の問題）
 $playStatus = Invoke-Cli @("editor_status") -TimeoutSeconds 60
-if ($playStatus.Json -and $playStatus.Json.success -and $playStatus.Json.data.result.playMode -ne "stopped") {
+if ($playStatus.Json -and $playStatus.Json.success -and $playStatus.Json.Value.playMode -ne "stopped") {
     Write-Host "[$projectName] Play 中なので先に停止します..."
     Invoke-Cli @("editor_stop") | Out-Null
     Start-Sleep -Seconds 2

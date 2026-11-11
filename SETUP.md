@@ -237,6 +237,14 @@ bundle id ならそのままでよい）。
 ```
 
 これで `Assets\uapp_e2e\E2EBridge`・`uapp_e2e\`一式・AIエージェント導線が配置される。
+
+**終了コード 4 で止まったら（または出力に `[要確認] com.unity.pipeline が古い` の行があったら）、com.unity.pipeline の版をユーザーに確認する**（Unity 6 以降のプロジェクトで、
+`Packages/manifest.json` の com.unity.pipeline がキットの検証した版より古いとき。**何も書き換えずに止まっている**）。
+表示された内容（今の版・上げる先の版・上げないほうがよい場合）をユーザーに見せて上げるかを聞き、
+同じコマンドに `-PipelineUpgrade yes`（上げる。**推奨**）か `-PipelineUpgrade no`（上げない）を付けて実行し直す。
+上げると manifest の 1 行だけが変わる（`packages-lock.json` は次にエディタを開いたとき Unity が更新する）。
+「推奨: いまは上げない」と出たら（エディタが開いている可能性）、閉じてから `yes` で実行し直すか `no` で進める。
+同じ版・新しい版・`file:` や git の URL の値には触らない。キットを更新するたびに確かめるので、`no` と答えた場合は次の更新でもう一度聞かれる。
 導線は `-Agents claude|codex|both`（既定 both）で選択できる: claude=`.claude\skills\`+`.claude\rules\`、
 codex=`.agents\skills\`+`uapp_e2e\AGENTS.md`。後から追加したくなったら該当値で再実行すればよい
 （再実行安全・既配置分の自動削除はしない）。
@@ -341,12 +349,14 @@ Codex ユーザーでルート `AGENTS.md` が無いプロジェクトは `-Root
 0.9.1-exp.1 と 0.10.0-exp.1 は 1.0.0-beta.16 で検証した（0.10 は 2026-11-04 に Windows と macOS・uGUI のサンプル 1 本のエディタ直結と EditMode、
 2026-11-05 に Windows・Unity 6 のサンプル 3 本のエディタ直結・EditMode（テストのある 2 本）・Android のビルドと E2E）。
 0.10.0-exp.1 は 1.0.0-beta.17 でも検証した（キット 0.1.31 のリリース検証。Windows と macOS でエディタ直結と EditMode）。
-入る版は経路で違う: **注入モード（`inject-to-project.ps1`）が足す既定の版は 0.10.0-exp.1**（すでに入っている版は上げない）/
+**1.0.0-pre.1 は 1.0.0-beta.17 で検証した**（キット 0.1.32 のリリース検証。Windows と macOS でエディタ直結と EditMode。1.0 は `script eval_file` が無くなったので、キットは 0.10 以降には `script eval --file` で送る）。
+入る版は経路で違う: **注入モード（`inject-to-project.ps1`）が足す既定の版は 1.0.0-pre.1**（すでに古い版が入っていれば手順 1 の確認のうえで上げる）/
 installer の経路では、下の `run-e2e.ps1 -Editor` の初回に Unity CLI の `unity pipeline install` が入れる版になる。
 入っている版は `Packages/packages-lock.json` の `com.unity.pipeline` の `version` で見る。
-どちらの経路でも 0.10 が入りうるので、**0.10 で検証した 1.0.0-beta.16 以降に揃える**（0.10 は beta.16 と beta.17 で検証。0.9.1 と beta.17、0.10 と 1.0.0-beta.15 の組み合わせは未実測）。
-`unity --version` が 1.0.0-beta.16 より前なら `unity upgrade` で上げてから実行する
-（0.8.0-exp.1 と 1.0.0-beta.16 の組み合わせは未実測。0.8 のままなら、`Packages/manifest.json` の `com.unity.pipeline` の版を書き換えて 0.9.1 以降へ上げることを勧める）:
+**1.0 が入りうるので、1.0 で検証した 1.0.0-beta.17 に揃える**（1.0.0-pre.1 と 1.0.0-beta.16 以前の組み合わせは未実測。0.10 は beta.16 と beta.17 で検証。0.9.1 と beta.17、0.10 と 1.0.0-beta.15 の組み合わせは未実測）。
+`unity --version` が 1.0.0-beta.17 より前なら `unity upgrade` で上げてから実行する
+（0.8.0-exp.1 と 1.0.0-beta.16 の組み合わせは未実測。**入っている版が古ければ、installer と注入が手順 1 の確認のうえで 1.0.0-pre.1 へ上げる**。
+上げなかった場合は `run-e2e.ps1 -Editor` が注意を 1 行出す。注入の対象なら `-Eject` してから `-PipelineUpgrade yes` で注入し直す）:
 
 ```powershell
 .\uapp_e2e\scripts\run-e2e.ps1 -Editor

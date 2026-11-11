@@ -395,6 +395,10 @@ function Get-UappUnityCliErrorClass {
     #>
     param($Parsed)
 
+    # 層（uapp-pipeline.ps1）が終了コードで分類済みのもの（1.0 の rc 17＝コンパイル中・リロード中）は待てば直る
+    if ($Parsed -and $Parsed.PSObject.Properties["Error"] -and $Parsed.Error -and $Parsed.Error.Class -eq "transient") {
+        return @{ Class = "transient"; Reason = "pipeline がコンパイル中・リロード中（終了コード）"; Detail = "$($Parsed.Error.Message)" }
+    }
     if (-not $Parsed -or -not $Parsed.errors) {
         return @{ Class = "unknown"; Reason = "構造化されたエラーが無い"; Detail = "" }
     }
@@ -1354,9 +1358,122 @@ function Get-UappPipelinePackageState {
         return @{ State = "unknown"; Why = "dependencies がオブジェクトではありません（$($dep.GetType().Name)）" }
     }
     if ($dep.PSObject.Properties.Name -contains "com.unity.pipeline") {
-        return @{ State = "present"; Why = "" }
+        # 版も返す（キーは JSON では大小文字を区別するので、名前は完全一致で探す。
+        # PowerShell のプロパティ参照は区別しないので使わない＝.claude/rules/case-sensitivity.md）
+        $prop = @($dep.PSObject.Properties | Where-Object { $_.Name -ceq "com.unity.pipeline" }) | Select-Object -First 1
+        return @{ State = "present"; Why = ""; Version = $(if ($prop) { "$($prop.Value)" } else { $null }) }
     }
     return @{ State = "none"; Why = "" }
+}
+
+# --- 導入するときに com.unity.pipeline をキットの検証済みの版へ上げる（docs/design/pipeline-upgrade-on-install.md） ---
+function Get-UappKitPipelineVersion { "1.0.0-pre.1" }   # キットが検証した版（run-e2e の「検証済みの組み合わせ」・SETUP 5a と揃える）
+
+# 版を比べる（a<b で -1・同じで 0・a>b で 1・版として読めなければ $null）。数字 3 つを数として比べ、
+# 同じならプレリリースの無い方が新しい。両方にあれば . で区切り、数字どうしは数・それ以外は文字（区別する）で比べる
+function Compare-UappPipelineVersion([string]$A, [string]$B) {
+    $re = '^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.]+))?$'
+    if ($A -notmatch $re) { return $null }; $ma = $Matches.Clone()
+    if ($B -notmatch $re) { return $null }; $mb = $Matches.Clone()
+    for ($i = 1; $i -le 3; $i++) { $x = [long]$ma[$i]; $y = [long]$mb[$i]; if ($x -ne $y) { return $(if ($x -lt $y) { -1 } else { 1 }) } }
+    $pa = $ma[4]; $pb = $mb[4]
+    if (-not $pa -and -not $pb) { return 0 }
+    if (-not $pa) { return 1 }; if (-not $pb) { return -1 }
+    $sa = $pa.Split('.'); $sb = $pb.Split('.')
+    for ($i = 0; $i -lt [math]::Min($sa.Count, $sb.Count); $i++) {
+        $na = 0L; $nb = 0L
+        $ia = [long]::TryParse($sa[$i], [ref]$na); $ib = [long]::TryParse($sb[$i], [ref]$nb)
+        if ($ia -and $ib) { if ($na -ne $nb) { return $(if ($na -lt $nb) { -1 } else { 1 }) } ; continue }
+        $c = [string]::CompareOrdinal($sa[$i], $sb[$i]); if ($c -ne 0) { return $(if ($c -lt 0) { -1 } else { 1 }) }
+    }
+    if ($sa.Count -eq $sb.Count) { return 0 }
+    return $(if ($sa.Count -lt $sb.Count) { -1 } else { 1 })
+}
+
+# Unity 6 以降のプロジェクトか（$true / $false / 読めなければ $null）。ProjectVersion.txt の m_EditorVersion の先頭の数
+function Test-UappUnity6Project([string]$ProjectDir) {
+    $p = Resolve-UappFsPath (Join-UappPath $ProjectDir "ProjectSettings/ProjectVersion.txt")
+    if (-not [System.IO.File]::Exists($p)) { return $null }
+    try { $t = [System.IO.File]::ReadAllText($p) } catch { return $null }
+    if ($t -match 'm_EditorVersion:\s*(\d+)') { return ([int]$Matches[1] -ge 6000) }
+    return $null
+}
+
+# 導入先の pipeline の状態（absent / older / same / newer / unparsable / unknown）
+function Get-UappPipelineUpgradeState([string]$ProjectDir) {
+    $target = Get-UappKitPipelineVersion
+    $s = Get-UappPipelinePackageState -ManifestPath (Join-UappPath $ProjectDir "Packages/manifest.json")
+    if ($s.State -eq "unknown") { return @{ State = "unknown"; Current = $null; Target = $target; Why = $s.Why } }
+    if ($s.State -eq "none") { return @{ State = "absent"; Current = $null; Target = $target; Why = "" } }
+    # キーが大小文字だけ違う（Com.Unity.Pipeline 等）。Unity のキーは区別するので、版が読めない値として触らない（mac の実測で表示が誤っていた）
+    if ($null -eq $s.Version) {
+        $key = "?"
+        try { $key = (@((Get-Content -LiteralPath (Join-UappPath $ProjectDir "Packages/manifest.json") -Raw | ConvertFrom-Json).dependencies.PSObject.Properties | Where-Object { $_.Name -eq "com.unity.pipeline" }) | Select-Object -First 1).Name } catch { }
+        if (-not $key) { $key = "?" }
+        return @{ State = "unparsable"; Current = $null; Target = $target; Why = "キー '$key' は com.unity.pipeline と大小文字が違う" }
+    }
+    $c = Compare-UappPipelineVersion $s.Version $target
+    $state = if ($null -eq $c) { "unparsable" } elseif ($c -lt 0) { "older" } elseif ($c -eq 0) { "same" } else { "newer" }
+    return @{ State = $state; Current = $s.Version; Target = $target; Why = "" }
+}
+
+# manifest の com.unity.pipeline の値だけを置き換える（全体を組み直さない＝差分を 1 行に）。ちょうど 1 か所でなければ止める
+function Set-UappPipelineVersion([string]$ProjectDir, [string]$From, [string]$To) {
+    $p = Resolve-UappFsPath (Join-UappPath $ProjectDir "Packages/manifest.json")
+    $bytes = [System.IO.File]::ReadAllBytes($p)
+    $bom = $bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF
+    $text = [System.IO.File]::ReadAllText($p)
+    $re = '("com\.unity\.pipeline"\s*:\s*")' + [regex]::Escape($From) + '"'
+    $n = [regex]::Matches($text, $re).Count
+    if ($n -ne 1) { throw "manifest.json の com.unity.pipeline の値 '$From' が $n か所に一致しました（1 か所のときだけ書き換える）: $p" }
+    $new = [regex]::Replace($text, $re, ('${1}' + $To.Replace('$', '$$') + '"'))
+    [System.IO.File]::WriteAllText($p, $new, [System.Text.UTF8Encoding]::new($bom))
+}
+
+# 実行し直す例を、実際に渡された引数から組み立てる（-PipelineUpgrade は除く。元の引数を落とすと、写した AI が -UiType や -Agents を既定に戻してしまう）
+function Format-UappRerunCommand([string]$ScriptPath, [System.Collections.IDictionary]$Bound) {
+    $parts = @("& '" + ($ScriptPath -replace "'", "''") + "'")
+    foreach ($k in $Bound.Keys) {
+        if ($k -eq "PipelineUpgrade") { continue }
+        $v = $Bound[$k]
+        if ($v -is [System.Management.Automation.SwitchParameter]) { if ($v.IsPresent) { $parts += "-$k" } }
+        else { $parts += ("-$k '" + ("$v" -replace "'", "''") + "'") }   # 単引用符で囲む（$ やバッククォートを展開させない）
+    }
+    return ($parts -join " ")
+}
+
+# 導入するときの確認。older なら -PipelineUpgrade に従う（ask は書き換える前に終了コード 4 で止める）。
+# 戻り値: @{ Changed = $true/$false; From; To }。$Who は表示用（installer / inject）
+function Invoke-UappPipelineUpgradeCheck([string]$ProjectDir, [string]$Mode, [string]$Who, [string]$RerunHint) {
+    $none = @{ Changed = $false; From = $null; To = $null }
+    $u6 = Test-UappUnity6Project $ProjectDir
+    if ($u6 -eq $false) { return $none }   # Unity 6 より前は pipeline を使わない
+    if ($null -eq $u6) { Write-Host "  [--] ProjectVersion.txt が読めないので com.unity.pipeline の版は確かめない"; return $none }
+    $st = Get-UappPipelineUpgradeState $ProjectDir
+    switch ($st.State) {
+        "absent"     { return $none }
+        "same"       { Write-Host "  [--] com.unity.pipeline $($st.Current)（キットが検証した版と同じ）"; return $none }
+        "newer"      { Write-Host "  [--] com.unity.pipeline $($st.Current)（キットが検証した $($st.Target) より新しい。触らない）"; return $none }
+        "unparsable" { if ($st.Why) { Write-Host "  [--] Packages/manifest.json の $($st.Why)ので、版を確かめない（触らない）" } else { Write-Host "  [--] com.unity.pipeline の値 '$($st.Current)' は版ではない（file: や git の URL。意図して置いたものとして触らない）" }; return $none }
+        "unknown"    { Write-Host "  [--] Packages/manifest.json を読めないので com.unity.pipeline の版は確かめない（$($st.Why)）"; return $none }
+    }
+    # older
+    if ($Mode -eq "no") { Write-Host "  [--] com.unity.pipeline $($st.Current) を上げない（-PipelineUpgrade no）。キットが検証したのは $($st.Target)"; return $none }
+    if ($Mode -eq "yes") {
+        Set-UappPipelineVersion $ProjectDir $st.Current $st.Target
+        Write-Host "  [OK] com.unity.pipeline を $($st.Current) → $($st.Target) に上げた（Packages/manifest.json の 1 行。packages-lock.json は次にエディタを開いたとき Unity が更新する）"
+        return @{ Changed = $true; From = $st.Current; To = $st.Target }
+    }
+    # ask: 書き換える前に止めて、人に聞く材料を出す
+    $locked = [System.IO.File]::Exists((Resolve-UappFsPath (Join-UappPath $ProjectDir "Temp/UnityLockfile")))
+    Write-Host ""
+    Write-Host "[要確認] com.unity.pipeline が古い: $($st.Current)（キットが検証した版は $($st.Target)）。何も書き換えずに止めました（終了コード 4）。"
+    Write-Host "  **導入している AI へ**: この内容をユーザーに見せ、上げるかを聞いてから、同じコマンドに -PipelineUpgrade yes（上げる）か no（上げない）を付けて実行し直してください。推奨は上げる。"
+    Write-Host "  上げると Packages/manifest.json の com.unity.pipeline の 1 行だけが変わります（packages-lock.json は次にエディタを開いたとき Unity が更新）。"
+    Write-Host "  上げないほうがよい場合: 意図して古い版に固定している（他のツールが古い版を前提にしている等）/ 上げたあとに確かめる時間が無い。"
+    if ($locked) { Write-Host "  **推奨: いまは上げない** ― エディタがこのプロジェクトを開いている可能性があります（Temp/UnityLockfile がある）。閉じてから yes で実行し直すか、no で進めてください。" }
+    if ($RerunHint) { Write-Host "  実行し直す例（元の引数のまま -PipelineUpgrade を足す）: $RerunHint -PipelineUpgrade yes" }
+    exit 4
 }
 
 # --- com.unity.pipeline のコマンド名（0.8 の名前と 0.9 の「グループ 名前」） -------------
@@ -1371,7 +1488,7 @@ $script:UappPipelineGroupedNames = @{
     "list_open_scenes" = @("scene", "list_open")
     "open_scene"       = @("scene", "open")
     "eval"             = @("script", "eval")
-    "eval_file"        = @("script", "eval_file")
+    "eval_file"        = @("script", "eval")   # 0.10 以降は script eval --file（1.0 で eval_file が消えた）。0.9 だけ script eval_file（Get-UappPipelineCommandArgs -Version）
     "recompile"        = @("script", "recompile")
     "recompile_status" = @("script", "recompile_status")
     "run_tests"        = @("test", "run")
@@ -1416,17 +1533,19 @@ function Get-UappPipelineCommandStyle {
       0 環境変数 UAPP_E2E_PIPELINE_STYLE（run-e2e が pytest へ渡す値・検証での強制）
       1 packages-lock.json  2 manifest.json  3 package.json（埋め込み / file:<ディレクトリ>）
       4 ポートファイルの capabilities（pid が生きた Unity で -projectPath が一致するときだけ）
-      5 legacy
-      **最後を legacy にするのは、誤りの向きが回復できるから** ― 0.9 に古い名前を送ると
-      エディタが「It was renamed」を返すので送り直せる。逆向きは CLI beta.13 以前では回復できない。
+      5 grouped（版なし＝基準の 1.0 として送る。docs/design/pipeline-1.0.md）
+      **以前は最後を legacy にしていた**（0.9 に古い名前を送ると「It was renamed」で送り直せたため）。
+      1.0 は古い名前を新しい名前へ導かない（送り直せない）ので、0.1.32 から基準の 1.0 に倒す。
+      その代わり**版が分からない 0.9** は、`eval --file` が `script eval`（0.9.1 は --file を受けない）で失敗しうる＝残る限界。
+      読み方は版でなく形で決める（uapp-pipeline.ps1）ので、版が分からなくても返事の取り違えは起きない
     #>
-    param([Parameter(Mandatory)][string]$ProjectDir)
+    param([Parameter(Mandatory)][string]$ProjectDir, [switch]$IgnoreEnv)
     $why = @()
     $projFull = $null
     try { $projFull = Get-UappNormalizedDir (Resolve-Path -LiteralPath $ProjectDir).Path } catch { $projFull = $ProjectDir }
 
     # 0. 環境変数（小文字のみ。UAPP_E2E_PROJECT_PATH が未設定か対象と一致するときだけ）
-    $envStyle = $env:UAPP_E2E_PIPELINE_STYLE
+    $envStyle = if ($IgnoreEnv) { $null } else { $env:UAPP_E2E_PIPELINE_STYLE }
     if ($envStyle) {
         if ($envStyle -cne "grouped" -and $envStyle -cne "legacy") {
             $why += "環境変数 UAPP_E2E_PIPELINE_STYLE の値 '$envStyle' は grouped / legacy ではないので無視"
@@ -1439,7 +1558,12 @@ function Get-UappPipelineCommandStyle {
                 $match = Test-UappPathEqual -A $envFull -B $projFull
             }
             if ($match) {
-                return @{ Style = $envStyle; Version = $null; Source = "env"; Why = "" }
+                # 版も受け取る（UAPP_E2E_PIPELINE_VERSION。run-e2e が子へ渡す。docs/design/pipeline-1.0.md）
+                $envVer = "$env:UAPP_E2E_PIPELINE_VERSION".Trim()
+                if ($envVer -match '^\d+\.\d+\.') { return @{ Style = $envStyle; Version = $envVer; Source = "env"; Why = "" } }
+                # **形式だけが渡ったときも、版は 1〜4 段で読む**（版を捨てると読み方が基準の 1.0 に倒れる。mac のレビュー 中 1）
+                $inner = Get-UappPipelineCommandStyle -ProjectDir $ProjectDir -IgnoreEnv
+                return @{ Style = $envStyle; Version = $inner.Version; Source = $(if ($inner.Version) { "env" } else { "env+default" }); Why = $inner.Why }
             }
             $why += "環境変数 UAPP_E2E_PIPELINE_STYLE は別のプロジェクト（UAPP_E2E_PROJECT_PATH）向けなので使わない"
         }
@@ -1488,7 +1612,9 @@ function Get-UappPipelineCommandStyle {
     if ($port) {
         $caps = @(Get-UappJsonMember $port "capabilities")
         $pidVal = (Get-UappJsonMember $port "pid") -as [int]   # 数値でない壊れたファイルで判定ごと落とさない
-        if ($caps -ccontains "commands.obsoleteNames") {
+        # capability で版を推定する（採取した 3 版で確かめた: 1.0 は tests.camelCase・0.10 は transport.pipelineProtocol・0.9 は commands.obsoleteNames だけ）
+        $capVersion = if ($caps -ccontains "tests.camelCase") { "1.0.0" } elseif ($caps -ccontains "transport.pipelineProtocol") { "0.10.0" } elseif ($caps -ccontains "commands.obsoleteNames") { "0.9.0" } else { $null }
+        if ($capVersion) {
             $prevWarn = $WarningPreference
             $proc = $null; $listFailed = $false; $listError = ""
             try {
@@ -1510,7 +1636,7 @@ function Get-UappPipelineCommandStyle {
                 $path = $Matches[1].Trim()
                 try { $path = Get-UappNormalizedDir (Resolve-Path -LiteralPath $path).Path } catch { }
                 if (Test-UappPathEqual -A $path -B $projFull) {
-                    return @{ Style = "grouped"; Version = $null; Source = "port-file"; Why = ($why -join " / ") }
+                    return @{ Style = "grouped"; Version = $capVersion; Source = "port-file"; Why = ($why -join " / ") }
                 }
                 $why += "ポートファイルの pid の Unity は別のプロジェクト（$path）を開いている"
             } else {
@@ -1522,7 +1648,8 @@ function Get-UappPipelineCommandStyle {
     # 5. 既定
     if (-not $lockEntry -and -not $manEntry) { $why += "packages-lock.json / manifest.json に $pkg の版が読めない" }
     elseif (-not $why) { $why += "版の形でない値（$lockVal / $manVal）" }
-    return @{ Style = "legacy"; Version = $null; Source = "default"; Why = ($why -join " / ") }
+    # 版が分からないときは基準の 1.0 とみなす（grouped・Version なし。docs/design/pipeline-1.0.md）。0.8 は版が分かれば legacy で送る
+    return @{ Style = "grouped"; Version = $null; Source = "default"; Why = ($why -join " / ") }
 }
 
 function Get-UappPipelineCommandArgs {
@@ -1531,13 +1658,16 @@ function Get-UappPipelineCommandArgs {
       0.8 の名前を、Style（grouped / legacy）に合わせた送る引数の配列にする。
       **対応表に無い名前は throw する**（黙って古い名前を送ると、0.9 で動かない経路が残ったことに気づけない）
     #>
-    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$Style)
+    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$Style, [AllowNull()][string]$Version)
     if (-not $script:UappPipelineGroupedNames.ContainsKey($Name) -or
         -not ($script:UappPipelineGroupedNames.Keys -ccontains $Name)) {
         throw "com.unity.pipeline のコマンド '$Name' は対応表にありません（uapp-platform.ps1 の UappPipelineGroupedNames に足す）"
     }
     # 配列はパイプラインへ展開して返す（`return , @(...)` にすると、呼び手の `@(...)` が入れ子になり
     # `System.Object[]` という 1 つの引数を送ってしまう。呼び手は `@(...)` で受ける）
+    # 0.9.x の eval_file だけは script eval_file（0.9.1 の script eval が --file を受けるかは確かでない。docs/design/pipeline-1.0.md）
+    # **-Version を渡さない呼び方は以前と同じ送り方**（0.1.31 までの呼び手との互換。2026-11-11 ユーザー指示）
+    if ($Style -ceq "grouped" -and $Name -ceq "eval_file" -and (-not $PSBoundParameters.ContainsKey("Version") -or $Version -match '^\s*0\.9\.')) { return @("script", "eval_file") }
     if ($Style -ceq "grouped") { return $script:UappPipelineGroupedNames[$Name] }
     if ($Style -ceq "legacy")  { return $Name }
     throw "Style は grouped / legacy のどちらか: '$Style'"

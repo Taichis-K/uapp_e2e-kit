@@ -74,16 +74,41 @@ def _cli_global_args() -> list[str]:
     return []
 
 
-def _run(argv: list[str]) -> dict | None:
+def eval_value(stdout: str, returncode: int | None) -> tuple[bool, object]:
+    """`unity cmd … script eval … --format json` の返事から (成功したか, 値) を取り出す。
+
+    PowerShell 側の層（scripts/uapp-pipeline.ps1）と同じく、**キットの形は 1.0 の形（値そのもの）**。
+    0.10 は `{output, diagnostics, success, result}`、0.9.1 はそれを `{success, command, data: {result: …}}` で包む。
+    採取した返事（scripts/fixtures/pipeline/）で 3 版とも試験する（test_client_unit.py）。
+    **終了コードが 0 と分かっているときだけ成功**（取れないものを成功にしない）。
+    """
+    if returncode != 0:
+        return False, None
+    text = (stdout or "").lstrip(chr(0xFEFF)).strip()
+    if not text:
+        return False, None
+    try:
+        body = json.loads(text)
+    except ValueError:
+        return False, None
+    if isinstance(body, dict) and {"success", "command", "data"} <= body.keys():   # 0.9.1 の包み
+        if body.get("success") is not True:
+            return False, None
+        body = (body.get("data") or {}).get("result")
+    if isinstance(body, dict) and "diagnostics" in body and "result" in body:        # 0.10 以前の eval の本体
+        if body.get("success") is False:
+            return False, None
+        return True, body.get("result")
+    return True, body                                                                 # 1.0: 値そのもの
+
+
+def _run(argv: list[str]) -> tuple[bool, object]:
     try:
         result = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8",
                                 errors="replace", timeout=TIMEOUT_SEC)
     except (OSError, subprocess.SubprocessError):
-        return None
-    try:
-        return json.loads(result.stdout or "{}")
-    except ValueError:
-        return None
+        return False, None
+    return eval_value(result.stdout, result.returncode)
 
 
 def capture(out_path: Path) -> bool:
@@ -110,8 +135,8 @@ def capture(out_path: Path) -> bool:
     argv += [*_eval_command(), "--code",
              f'UnityEngine.ScreenCapture.CaptureScreenshot(@"{literal}"); return "queued";',
              "--format", "json", "--no-banner"]
-    response = _run(argv)
-    if not response or not response.get("success"):
+    ok, value = _run(argv)
+    if not ok or value != "queued":
         return False
 
     deadline = time.monotonic() + WAIT_SEC

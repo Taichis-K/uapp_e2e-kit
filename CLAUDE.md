@@ -74,6 +74,8 @@ CRLF を含むファイルは一致しない** — 自前で突き合わせる�
   （`-Force` でも通さない。所有関係が壊れて撤去できなくなるため）。`-Force` で警告に
   落とせるのは**対象のエディタが開いている / 状態を判定できない**場合と、
   **既存の `e2e-config.json` がある**場合（退避して撤去時に戻す）
+- 対象の com.unity.pipeline がキットの検証した版より古いと、**何も書き換えずに終了コード 4 で止まる**。
+  ユーザーに上げるかを聞いて `-PipelineUpgrade yes`（推奨。撤去で元の版へ戻す）か `no` で実行し直す（installer も同じ。SETUP.md の「手順」の 1. ファイル配置）
 - 対象の UI 実装に合わせて `-UiType ngui-legacy` 等を渡す（既定 `ugui-nis`。
   生成する `e2e-config.json` に書かれる。`-Orientation` も同様）
 
@@ -231,7 +233,8 @@ python -m e2e_driver.journey ..\Builds\journey    # → report.html 生成（詳
 $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 ```
 
-**JSON は標準出力だけから読む**（`2>&1` で標準エラーを混ぜない）。送るコマンドの名前も com.unity.pipeline の版で変わる（0.9 から「グループ 名前」）。
+**JSON は標準出力だけから読む**（`2>&1` で標準エラーを混ぜない）。送るコマンドの名前と返事の形は com.unity.pipeline の版で変わる
+（0.9 で名前・0.10 で包み・1.0 で値そのもの／1 件 1 行）ので、**送る引数と返事の読み取りはキット同梱の層 `scripts/uapp-pipeline.ps1` に任せる**（返事は版によらず 1.0 の形）。
 理由と書き方は `docs/ai-loop.md` の「失敗解析の優先順位」にある「自作の .ps1 から `unity cmd` を直接叩く場合」の段落を見る。
 
 **結果の読み方（3 つ）**:

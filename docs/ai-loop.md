@@ -282,22 +282,14 @@ adb.uninstall(pkg); adb.install(apk)                      # クリーンイン�
    **JSON は標準出力だけから読む**（`2>&1` で標準エラーを混ぜない）。CLI は標準エラーに JSON 以外の行を出すことがあり
    （Claude Code の中から呼ぶと、unity プラグインが入っていなければ `<claude-code-hint … />` の 1 行）、混ぜると応答全体が JSON にならない。
 
-   **送るコマンドの名前は com.unity.pipeline の版で変わる**: 0.9 から「グループ 名前」になり
-   （`editor_status` → `editor status`、`run_tests` → `test run`）、**グループと名前は別々の引数で渡す**。
-   `editor_status` などの古い名前は 0.9 のエディタでは `Command Not Found` になる（応答の本文が新しい名前を示す。
-   `eval` のように 1 つのグループにしか無い名前は通るが、当てにしない）。
-   Unity CLI 1.0.0-beta.14 以降は新しい名前を 0.8 向けに読み替えるが、逆向き（古い名前を 0.9 へ）は読み替えない。
-   キット同梱のスクリプトは版を見て切り替えている。
-
-   **com.unity.pipeline 0.10 × Unity CLI 1.0.0-beta.16 では、`unity cmd … --format json` の応答から包み
-   （`success` / `command` / `data` / `errors`）が外れ、コマンドの結果だけが返る**（0.9 までの `data.result` にあたるもの。
-   たとえば eval は `{"output":null,"diagnostics":[],"success":true,"result":"ok"}`、Play の開始は `"Entered play mode"` という JSON の文字列）。
-   失敗は終了コードが 0 以外になり、本文に `"success":false` と `errorCode` が入るか、標準出力が空で標準エラーに文章だけが出る
-   （JSON は標準出力だけから読み、標準エラーはメッセージ用に残す）。
-   **ただし `test run` はテストが失敗しても終了コード 0・`success:true` で、失敗の件数は `Summary.Failed` に入る**（0.10・Windows で観測）。
-   テストの成否は終了コードでなく `Summary.Failed` で見る。
-   CLI 自身のエラー（エディタが見つからない等）と `unity status` は今までどおり包みつき。
-   自作のスクリプトで読むときは、**終了コードと、包みの有無の両方を見る**（キット同梱のスクリプトは両方の形を読む）。
+   **送るコマンドの名前と、返事の形は com.unity.pipeline の版で変わる**（0.9 で名前が「グループ 名前」に・0.10 で包み（`success` / `command` / `data` / `errors`）が外れた・
+   1.0 で値そのもの・1 件 1 行（NDJSON）・空の返事になった）。**自作のスクリプトで読むなら、キット同梱の層 `scripts/uapp-pipeline.ps1` を使う**:
+   `uapp-platform.ps1` と `uapp-pipeline.ps1` を順に `.` で読み、送る引数は `Get-UappPipelineSendArgs -Op <したいこと> -Version <版>`、
+   返事は `ConvertFrom-UappPipelineResponse -Op <したいこと> -Version <版> -Stdout -Stderr -ExitCode` で読む（版は `Get-UappPipelineVersionForSend -ProjectDir <プロジェクト>`）。
+   返事は**版によらず 1.0 の形**で返る（eval は値そのもの・`list_open_scenes` はシーンのレコードの配列・`run_tests` は `records` と `total` / `passed` / `failed` などの件数）。
+   版の違いは層の中の表に閉じ込めてあり、キットを更新すれば新しい版にも追随する（自作のスクリプトで返事の形を直接読むと、版が変わるたびに壊れる）。
+   **1.0 ではテストが失敗すると終了コード 6 で、結果の行は標準出力に出る**（層は成功として読み、失敗したテストを `records` に入れる）。
+   一致するテストが無いと終了コード 2（標準エラーが `No EditMode tests matched` で始まる。層は 0 件として読む）。
 
 判断基準: 失敗が「実ユーザーにも起きる」ならアプリを直す。「テストの前提が誤り」ならテストを直す。
 

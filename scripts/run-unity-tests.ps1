@@ -42,6 +42,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot "uapp-platform.ps1")   # OS 差分の吸収（Windows / macOS。mac は暫定・未検証）
+. (Join-UappPath $PSScriptRoot "uapp-pipeline.ps1")   # com.unity.pipeline の層（返事はキットの形＝1.0 の形で読む。docs/design/pipeline-1.0.md）
 
 # **CLI のグローバル引数は 1 か所で決めて全呼び出しへ渡す**（一部の呼び出しにだけ付くと、
 # 「status は通るのに pipeline install で落ちる」ような分かりにくい欠け方になる）。
@@ -414,7 +415,8 @@ if ($Editor) {
         # run_tests でも二重実行にならない）。以後このスクリプトでは grouped に固定
         $cmdName = $CmdArgs[0]
         $cmdRest = @(); if ($CmdArgs.Count -gt 1) { $cmdRest = @($CmdArgs[1..($CmdArgs.Count - 1)]) }
-        $CmdArgs = @(Get-UappPipelineCommandArgs -Name $cmdName -Style (Get-PipelineStyle)) + $cmdRest
+        $pipeVer = Get-UappPipelineVersionForSend -ProjectDir $projectDir
+        $CmdArgs = @(Get-UappPipelineCommandArgs -Name $cmdName -Style (Get-PipelineStyle) -Version $pipeVer) + $cmdRest
         for ($attempt = 0; $attempt -lt 2; $attempt++) {
             if ($TimeoutSeconds -gt 0) {
                 # **空白を含む引数は明示的に引用する**（Start-Process -ArgumentList の配列は
@@ -440,10 +442,11 @@ if ($Editor) {
             }
             # **JSON は標準出力だけから読む**（標準エラーの行で壊れる。docs/design/cli-stderr-json.md）。$raw は証跡・メッセージ用。
             # **pipeline 0.10 の包みの無い応答は包みありの形に揃える**（issue #88。docs/design/pipeline-0.10.md）
-            $parsed = ConvertFrom-UappCliCommandResponse -Stdout $stdout -Stderr $stderr -ExitCode $exitCode
+            # **返事は層がキットの形（1.0 の形）に直す**。中身は .Value で読む（docs/design/pipeline-1.0.md）
+            $parsed = ConvertTo-UappPipelineCompat (ConvertFrom-UappPipelineResponse -Op (ConvertTo-UappPipelineOp $cmdName) -Version $pipeVer -Stdout $stdout -Stderr $stderr -ExitCode $exitCode)
             if ($attempt -eq 0 -and (Test-UappPipelineRenamedResponse -Parsed $parsed)) {
                 Set-UappPipelineStyleGrouped -ProjectDir $projectDir -Label $projectName -CommandName $cmdName
-                $CmdArgs = @(Get-UappPipelineCommandArgs -Name $cmdName -Style "grouped") + $cmdRest
+                $CmdArgs = @(Get-UappPipelineCommandArgs -Name $cmdName -Style "grouped" -Version $pipeVer) + $cmdRest
                 continue
             }
             break
@@ -534,7 +537,7 @@ if ($Editor) {
     # 確認しろ」という**存在しないエラーを探させる誤誘導**になる。バランス調整で人がゲームを
     # 遊んで放置しているのが常態の導入先があるので、**自動では停止しない**（進行中のプレイが消える）
     $esProbe = Invoke-Pipeline @("editor_status") -AllowFail -TimeoutSeconds 60
-    $esResult = if ($esProbe) { $esProbe.data.result } else { $null }
+    $esResult = if ($esProbe) { $esProbe.Value } else { $null }
     if ($esResult -is [string]) { try { $esResult = $esResult | ConvertFrom-Json } catch {} }
     $playMode = "$($esResult.playMode)"
     if ($playMode -in @("playing", "paused")) {
@@ -549,7 +552,7 @@ if ($Editor) {
     # `up_to_date`（何も要らなかった）を返す。解釈できない応答（版差）は
     # 「不明」として扱い、下のポーリングと最後の砦に判断を委ねる
     $trigger = Invoke-Pipeline @("recompile") -TimeoutSeconds 120
-    $triggerState = $trigger.data.result
+    $triggerState = $trigger.Value
     if ($triggerState -is [string]) { try { $triggerState = $triggerState | ConvertFrom-Json } catch {} }
     # 状態は idle | triggered | compiling | completed | up_to_date。
     # **`triggered` は「Refresh 中でまだ compilationStarted が来ていない」進行中の状態**であり、
@@ -585,12 +588,12 @@ if ($Editor) {
             Start-Sleep -Milliseconds 700
             continue
         }
-        $state = $probe.data.result
+        $state = $probe.Value
         # recompile_status の result は 0.7.0-exp.1 まで**オブジェクトではなく JSON 文字列**で返り、
         # 0.8.0-exp.1 からオブジェクトで返る（パッケージのソースで確認し、2026-10-15 に実測）。両方を受ける
         if ($state -is [string]) {
             try { $state = $state | ConvertFrom-Json }
-            catch { throw "recompile_status の応答を解釈できません: $($probe.data.result)" }
+            catch { throw "recompile_status の応答を解釈できません: $($probe.Value)" }
         }
         $phase = "$($state.status)$($state.state)"
         if (-not $phase) { throw "recompile_status が状態を返しません（Unity CLI / pipeline の版を確認）" }
@@ -619,7 +622,7 @@ if ($Editor) {
         # 保険: 事前検査の後で人が Play を始めた場合もここへ来る。playMode を添えて
         # 「存在しないコンパイルエラーを探させる」誤誘導を避ける（導入先 §24）
         $lateEs = Invoke-Pipeline @("editor_status") -AllowFail -TimeoutSeconds 30
-        $lateResult = if ($lateEs) { $lateEs.data.result } else { $null }
+        $lateResult = if ($lateEs) { $lateEs.Value } else { $null }
         if ($lateResult -is [string]) { try { $lateResult = $lateResult | ConvertFrom-Json } catch {} }
         $latePlay = "$($lateResult.playMode)"
         $playHint = if ($latePlay -in @("playing", "paused")) {
@@ -646,7 +649,7 @@ if ($Editor) {
     while ($probeWait.Elapsed.TotalSeconds -lt 120) {
         $failedProbe = Invoke-Pipeline @("eval", "--code", $probeCode) -AllowFail -TimeoutSeconds 60
         if ($failedProbe -and $failedProbe.success) {
-            $probeResult = "$($failedProbe.data.result.result)"
+            $probeResult = "$($failedProbe.Value)"
             if ($probeResult -ne "2") { break }      # コンパイル中でなくなるまで待つ
         }
         Start-Sleep -Seconds 2
@@ -694,7 +697,7 @@ if ($Editor) {
                         continue
                     }
                     $lastSeen.Restart()
-                    $againState = $again.data.result
+                    $againState = $again.Value
                     if ($againState -is [string]) {
                         try { $againState = $againState | ConvertFrom-Json } catch { continue }
                     }
@@ -738,25 +741,24 @@ if ($Editor) {
     $cmdArgs = @("run_tests", "--mode", "editor", "--timeout", $TimeoutSeconds)
     if ($Filter) { $cmdArgs += @("--filter", $Filter) }
     $response = Invoke-Pipeline $cmdArgs
-    $result = $response.data.result
-    $summary = $result.Summary
+    $result = $response.Value   # キットの形: @{ records; total; passed; failed; skipped; inconclusive; duration }
 
     Write-Host ""
     Write-Host "=== $Mode テスト結果（エディタ内 run_tests） ==="
-    Write-Host ("  合計 $($summary.Total) / 成功 $($summary.Passed) / 失敗 $($summary.Failed) / " +
-                "スキップ $($summary.Skipped) / $([math]::Round([double]$result.Duration, 1))秒")
-    foreach ($case in @($result.Results | Where-Object { $_.Status -ne "Passed" -and $_.Status -ne "Skipped" })) {
+    Write-Host ("  合計 $($result.total) / 成功 $($result.passed) / 失敗 $($result.failed) / " +
+                "スキップ $($result.skipped) / $([math]::Round([double]$result.duration, 1))秒")
+    foreach ($case in @($result.records | Where-Object { $_.status -ne "Passed" -and $_.status -ne "Skipped" })) {
         Write-Host ""
-        Write-Host "  [$($case.Status)] $($case.FullName)"
-        if ($case.Message) { Write-Host "    $($case.Message.Trim())" }
-        if ($case.StackTrace) {
-            ($case.StackTrace -split "`n" | Select-Object -First 3) | ForEach-Object { Write-Host "    $($_.Trim())" }
+        Write-Host "  [$($case.status)] $($case.fullName)"
+        if ($case.message) { Write-Host "    $("$($case.message)".Trim())" }
+        if ($case.stackTrace) {
+            ("$($case.stackTrace)" -split "`n" | Select-Object -First 3) | ForEach-Object { Write-Host "    $($_.Trim())" }
         }
     }
     Write-Host ""
 
-    $total = [int]$summary.Total
-    $failedCount = [int]$summary.Failed
+    $total = [int]$result.total
+    $failedCount = [int]$result.failed
     if ($total -eq 0) {
         Write-Warning "テストが 0 件でした（$Mode）。テストアセンブリと -Filter を確認"
     }
@@ -764,8 +766,8 @@ if ($Editor) {
     $ok = ($failedCount -eq 0 -and $total -gt 0)
     Send-TestEvidence @{
         suite = "unity-$($Mode.ToLower())"; project = $projectName; via = "editor"
-        total = $total; passed = [int]$summary.Passed; failed = $failedCount
-        skipped = [int]$summary.Skipped; durationSec = [double]$result.Duration
+        total = $total; passed = [int]$result.passed; failed = $failedCount
+        skipped = [int]$result.skipped; durationSec = [double]$result.duration
         ok = $ok; exitCode = $(if ($ok) { 0 } else { 1 })
     }
     if (-not $ok) { exit 1 }

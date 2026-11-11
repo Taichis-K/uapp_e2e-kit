@@ -55,6 +55,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 . (Join-Path $PSScriptRoot "uapp-platform.ps1")   # OS 差分の吸収（Windows / macOS。mac は暫定・未検証）
+. (Join-UappPath $PSScriptRoot "uapp-pipeline.ps1")   # com.unity.pipeline の層（返事はキットの形＝1.0 の形で読む。docs/design/pipeline-1.0.md）
 
 # -RequireProjectTests は環境変数でも有効化できる（ラッパー・CI から渡しやすくする。
 # スイッチ明示が常に優先＝環境変数で無効化はできない）
@@ -560,6 +561,9 @@ if ($Editor) {
 
     # 送るコマンド名の形式（grouped / legacy）。最初の送信の直前に 1 回だけ決める（docs/design/pipeline-0.9.md）
     function Get-PipelineStyle { Get-UappPipelineStyleOnce -ProjectDir $projectDir -Label $projectName }
+    # eval_file の送り方は版で変わる（0.10 以降は script eval --file・0.9 は script eval_file。docs/design/pipeline-1.0.md）
+    # 分からない結果は覚えない（エディタの起動・pipeline install のあとで読み直す）＝層の Get-UappPipelineVersionForSend
+    function Get-PipelineVersionOnce { Get-UappPipelineVersionForSend -ProjectDir $projectDir }
 
     function Invoke-UnityCli {
         <#
@@ -601,11 +605,13 @@ if ($Editor) {
         # 呼び手は 0.8 の名前で書き、ここで変換する。$retrySafe の照合は変換前の 0.8 の名前で行う
         $isCmd = ($CliArgs[0] -eq "cmd")
         $cmdRest = @()
+        # 版は 1 回の呼び出しで 1 回だけ取る（送り方と読み方で食い違わないように。mac のレビュー 低 2）
+        $callVer = if ($isCmd) { Get-PipelineVersionOnce } else { $null }
         if ($isCmd) {
             $cmdName = $CliArgs[1]
             if ($CliArgs.Count -gt 2) { $cmdRest = @($CliArgs[2..($CliArgs.Count - 1)]) }
             $CliArgs = @("cmd", "--project-path", $projectDir) +
-                       @(Get-UappPipelineCommandArgs -Name $cmdName -Style (Get-PipelineStyle)) + $cmdRest
+                       @(Get-UappPipelineCommandArgs -Name $cmdName -Style (Get-PipelineStyle) -Version $callVer) + $cmdRest
         } else {
             $cmdName = $CliArgs[0]
         }
@@ -628,7 +634,8 @@ if ($Editor) {
             $raw = $split.Stdout + "`n" + $split.Stderr
             # **cmd の応答は、pipeline 0.10 の包みの無い形も包みありの形に揃える**（issue #88。docs/design/pipeline-0.10.md）。
             # cmd でない呼び出し（pipeline install 等）は包みが外れていないので従来どおり
-            $parsed = if ($isCmd) { ConvertFrom-UappCliCommandResponse -Stdout $split.Stdout -Stderr $split.Stderr -ExitCode $exitCode }
+            # **cmd の返事は層がキットの形（1.0 の形）に直す**。中身は .Value で読む（docs/design/pipeline-1.0.md）
+            $parsed = if ($isCmd) { ConvertTo-UappPipelineCompat (ConvertFrom-UappPipelineResponse -Op (ConvertTo-UappPipelineOp $cmdName) -Version $callVer -Stdout $split.Stdout -Stderr $split.Stderr -ExitCode $exitCode) }
                       else { ConvertFrom-UappCliJson -Stdout $split.Stdout }
             if ($parsed -and $parsed.success) {
                 if ($notified) {
@@ -643,7 +650,7 @@ if ($Editor) {
                 $resent = $true
                 Set-UappPipelineStyleGrouped -ProjectDir $projectDir -Label $projectName -CommandName $cmdName
                 $CliArgs = @("cmd", "--project-path", $projectDir) +
-                           @(Get-UappPipelineCommandArgs -Name $cmdName -Style "grouped") + $cmdRest
+                           @(Get-UappPipelineCommandArgs -Name $cmdName -Style "grouped" -Version $(if ($callVer) { $callVer } else { "0.9.0" })) + $cmdRest   # 改名の返事は 0.9 / 0.10 からしか来ない＝eval_file は script eval_file（mac のレビュー 中 1）
                 $label = ($CliArgs | Where-Object { $_ -notmatch "^-" -and $_ -ne $projectDir }) -join " "
                 continue
             }
@@ -824,6 +831,12 @@ if ($Editor) {
         }
         Write-Host "[$projectName] エディタ接続完了（$([int]$sw.Elapsed.TotalSeconds)秒）"
     }
+    # 導入のときに上げなかった（または導入より前からの）古い com.unity.pipeline のまま動いていることを見えるようにする（止めない）
+    $pipeState = Get-UappPipelineUpgradeState $projectDir
+    if ($pipeState.State -eq "older") {
+        Write-Host ("[$projectName] 注意: com.unity.pipeline $($pipeState.Current) はキットが検証した $($pipeState.Target) より古い。" +
+                    $(if ([System.IO.File]::Exists((Resolve-UappFsPath (Join-UappPath $projectDir "uapp_e2e-inject.json")))) { "上げるなら inject-to-project.ps1 で -Eject してから -PipelineUpgrade yes で注入し直す" } else { "上げるなら install-to-project.ps1 を -PipelineUpgrade yes で実行し直す" }))
+    }
 
     # 版差の早期検出: Unity CLI と com.unity.pipeline の組み合わせが変わると、後続の失敗が
     # 「400 Bad Request: Parameter Validation Failed」のような読み解きにくい形で出る
@@ -842,7 +855,7 @@ if ($Editor) {
     # **応答が無い / JSON にできなかった場合も分類器へ通す**（`$probe` が $null なら unknown）。
     # 通さないと「分類: 」が空のまま出て、次の人が「分類器が動いていないのか」で迷う（実測で確認）
     $probeClass = if ($probe -and $probe.success) { $null } else { Get-UappUnityCliErrorClass -Parsed $probe }
-    if ($probeClass.Class -ne "transient" -and (-not $probe -or -not $probe.success -or $probe.data.result.result -ne "ok")) {
+    if ($probeClass.Class -ne "transient" -and (-not $probe -or -not $probe.success -or "$($probe.Value)" -ne "ok")) {
         $detail = if ($probe.errors) { ($probe.errors | ForEach-Object { $_.message }) -join " / " } else { "応答なし" }
         # **分類の答えを捨てない**（レビュー指摘）。以前はここが「何が起きても版差」と断定しており、
         # 一過性エラーでも**原因から最も遠い場所**（CLI とパッケージの版）を調べさせていた。
@@ -852,7 +865,8 @@ if ($Editor) {
         if ($null -eq $probeClass -or $probeClass.Class -eq "permanent") {
             throw ("Unity CLI / com.unity.pipeline のバージョンが想定と異なります（eval の疎通に失敗: $detail）。" +
                    "'unity --version' と <プロジェクト>\Packages\manifest.json の com.unity.pipeline を確認する。" +
-                   "検証済みの組み合わせ: unity-cli 1.0.0-beta.17 / com.unity.pipeline 0.10.0-exp.1（キット 0.1.31 のリリース検証。Windows と macOS でエディタ直結と EditMode）、" +
+                   "検証済みの組み合わせ: unity-cli 1.0.0-beta.17 / com.unity.pipeline 1.0.0-pre.1（キット 0.1.32 のリリース検証。Windows と macOS でエディタ直結と EditMode。1.0 で script eval_file が消えたので eval は script eval --file で送る）、" +
+                   "unity-cli 1.0.0-beta.17 / com.unity.pipeline 0.10.0-exp.1（キット 0.1.31 のリリース検証。Windows と macOS でエディタ直結と EditMode）、" +
                    "unity-cli 1.0.0-beta.16 / com.unity.pipeline 0.9.1-exp.1・0.10.0-exp.1" +
                    "（0.10 は unity cmd の応答から包みが外れ、キットは両方の形を読む。2026-11-04 に Windows と macOS・uGUI のサンプル 1 本でエディタ直結と EditMode、2026-11-05 に Windows・Unity 6 のサンプル 3 本でエディタ直結・EditMode（テストのある 2 本）・Android のビルドと E2E）、" +
                    "unity-cli 1.0.0-beta.15 / com.unity.pipeline 0.8.0-exp.1・0.9.1-exp.1" +
@@ -860,7 +874,7 @@ if ($Editor) {
                    "unity-cli 1.0.0-beta.13 / com.unity.pipeline 0.8.0-exp.1（3 サンプルともエディタ直結で実走。2026-10-15）。" +
                    "過去に通った組み合わせ: unity-cli 1.0.0-beta.11 / com.unity.pipeline 0.7.0-exp.1、" +
                    "unity-cli 1.0.0-beta.3 または 1.0.0-beta.5 / com.unity.pipeline 0.4.0-exp.1・0.5.0-exp.1。" +
-                   "0.10.0-exp.1 より新しい版は未検証（レジストリの最新はそれより新しいことがある）")
+                   "1.0.0-pre.1 より新しい版は未検証（レジストリの最新はそれより新しいことがある）")
         }
         # **ここで記録する** ― プローブは `-AllowFail` なので Invoke-UnityCli 側では書かれない
         # （書かせると、後始末の editor_stop でも書かれて緑の走行に証跡が出てしまう）。
@@ -877,7 +891,7 @@ if ($Editor) {
     # 排他ガード: stopped 以外（playing / paused）は他タスク/他セッションが使用中とみなしてフェイルファスト
     # （paused も既存 Play セッション。ここを通すと finally の editor_stop で他者の Play を強制終了してしまう）
     $es = Invoke-UnityCli @("cmd", "editor_status")
-    $playMode = $es.data.result.playMode
+    $playMode = $es.Value.playMode
     if ($playMode -ne "stopped") {
         throw ("エディタは既に Play セッション中です（playMode=$playMode。他タスク/他セッションが使用中の可能性）。" +
                "意図的に奪う場合は 'unity cmd $((Get-UappPipelineCommandArgs -Name editor_stop -Style (Get-PipelineStyle)) -join ' ')' 後に再実行")
@@ -917,16 +931,22 @@ if ($Editor) {
     if (-not $Scene) {
         $r = Invoke-UnityCli @("cmd", "eval", "--code",
             'foreach (var s in UnityEditor.EditorBuildSettings.scenes) { if (s.enabled) return s.path; } return "";')
-        $Scene = $r.data.result.result
+        $Scene = $r.Value
     }
     if ($Scene) {
         # open_scene は現在の全シーンを閉じる（OpenSceneMode.Single）ため、未保存変更を黙って捨てない:
         # 対象シーンが既にアクティブなら開き直さない。別シーンを開く必要があり dirty があれば中断する
-        $openScenes = (Invoke-UnityCli @("cmd", "list_open_scenes")).data.result.scenes
+        $openScenes = @((Invoke-UnityCli @("cmd", "list_open_scenes")).Value)   # キットの形: シーンのレコードの配列
         $activeScene = $openScenes | Where-Object { $_.isActive } | Select-Object -First 1
         if ($activeScene -and $activeScene.path -eq $Scene) {
             Write-Host "[$projectName] シーン: $Scene（既に開いている）"
         } else {
+            # **isDirty を判定できない要素があれば止める**（close-editor と同じ。返事の形を取り違えたまま open_scene を送ると、未保存の変更を捨てる）
+            $unknownDirty = @($openScenes | Where-Object { $null -eq $_ -or $null -eq $_.PSObject.Properties["isDirty"] })
+            if ($openScenes.Count -eq 0 -or $unknownDirty.Count -gt 0) {
+                throw ("開いているシーンの未保存状態を判定できません（$($unknownDirty.Count) 件・シーン $($openScenes.Count) 件）。" +
+                       "確認できないまま open_scene を送ると未保存の変更を捨てうるので中断します")
+            }
             $dirty = @($openScenes | Where-Object { $_.isDirty } | ForEach-Object { $_.path })
             if ($dirty.Count -gt 0) {
                 throw ("未保存のシーン変更があるため中断: $($dirty -join ', ')。" +
@@ -994,6 +1014,7 @@ if ($Editor) {
     # 契約違反になる（docs/02 のポート設計）。元の値は finally で必ず戻す
     $savedBridgePort = $env:UAPP_E2E_BRIDGE_PORT
     $savedPipelineStyle = $env:UAPP_E2E_PIPELINE_STYLE   # 下の finally で立てる前の値へ戻す
+    $savedPipelineVersion = $env:UAPP_E2E_PIPELINE_VERSION
     $savedProjectPathEnv = $env:UAPP_E2E_PROJECT_PATH    # 同上（STYLE だけ戻すと、STYLE の絞り込みが外れて別のプロジェクトにも効く）
     # **例外を投げうる処理は環境変数を触る前に済ませる**。設定と try の間で throw すると
     # 呼び出し元のシェルに残る（不正な editorBridgePort での [int] 変換、Push-Location の失敗。
@@ -1031,6 +1052,9 @@ if ($Editor) {
         # **コマンド名の形式も渡す**（ドライバの editor_screenshot と、pytest から呼ばれる
         # restart-editor-play が同じ形式で送る。docs/design/pipeline-0.9.md）。終わったら立てる前の値へ戻す
         $env:UAPP_E2E_PIPELINE_STYLE = Get-PipelineStyle
+        # **版も渡す**（子の層が送り方と読み方を決める。docs/design/pipeline-1.0.md）。分からなければ渡さない＝子は 1.0 とみなす
+        $pv = Get-PipelineVersionOnce
+        if ($pv) { $env:UAPP_E2E_PIPELINE_VERSION = $pv } else { Remove-Item -LiteralPath Env:\UAPP_E2E_PIPELINE_VERSION -ErrorAction SilentlyContinue }
         if ($JourneyDir) { $env:UAPP_E2E_JOURNEY_DIR = $JourneyDir }
         # **どの設定で走ったかをジャーニーへ残す**（issue #41）。serve は既定では
         # journey ディレクトリから祖先を遡って設定を探すが、注入モードでは出力先が
@@ -1074,6 +1098,8 @@ if ($Editor) {
         else { Remove-Item -LiteralPath Env:\UAPP_E2E_PROJECT_PATH -ErrorAction SilentlyContinue }
         if ($savedPipelineStyle) { $env:UAPP_E2E_PIPELINE_STYLE = $savedPipelineStyle }
         else { Remove-Item -LiteralPath Env:\UAPP_E2E_PIPELINE_STYLE -ErrorAction SilentlyContinue }
+        if ($savedPipelineVersion) { $env:UAPP_E2E_PIPELINE_VERSION = $savedPipelineVersion }
+        else { Remove-Item -LiteralPath Env:\UAPP_E2E_PIPELINE_VERSION -ErrorAction SilentlyContinue }
         # **消すのではなく元の値へ戻す**（呼び出し元が設定していた値を奪わない）
         if ($savedBridgePort) { $env:UAPP_E2E_BRIDGE_PORT = $savedBridgePort }
         else { Remove-Item -LiteralPath Env:\UAPP_E2E_BRIDGE_PORT -ErrorAction SilentlyContinue }

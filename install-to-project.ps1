@@ -24,7 +24,10 @@ param(
     # 導入は行わず、kit-manifest.json とファイル実体の照合だけを行って終了する。
     # 導入先が「自分が改変したのか、更新の副作用か」をその場で切り分けるための確認口
     # （issue #33。導入先が素の SHA256 で自前照合し、全件不一致に見えて混乱した）
-    [switch]$VerifyManifest
+    [switch]$VerifyManifest,
+    # 導入先の com.unity.pipeline がキットの検証済みの版より古いときの扱い（docs/design/pipeline-upgrade-on-install.md）。
+    # ask（既定）= 何も書き換えずに終了コード 4 で止めて、ユーザーに聞く材料を出す / yes = 上げる / no = 上げない
+    [ValidateSet("ask", "yes", "no")][string]$PipelineUpgrade = "ask"
 )
 
 $ErrorActionPreference = "Stop"
@@ -333,6 +336,17 @@ if ($VerifyManifest) {
     }
     Write-Host "すべて記録どおり（ローカル改変なし）"
     exit 0
+}
+
+# --- com.unity.pipeline の版（何かを書き換える前に確かめる。ask なら終了コード 4 で止まる） ---
+# 注入モードの対象（uapp_e2e-inject.json がある）は判定しない（注入が記録した版と実体がずれる。注入側で扱う）
+if ([System.IO.File]::Exists((Resolve-UappFsPath (Join-UappPath $target "uapp_e2e-inject.json")))) {
+    Write-Host "  [--] 注入モードの対象なので com.unity.pipeline の版は確かめない（inject-to-project.ps1 が扱う）"
+} else {
+    # 実行し直す例は解決したあとの絶対パスで写す（カレントが変わっても同じ場所を指す）
+    $rerunBound = @{} + $PSBoundParameters; $rerunBound["ProjectPath"] = $target
+    [void](Invoke-UappPipelineUpgradeCheck -ProjectDir $target -Mode $PipelineUpgrade -Who "installer" `
+        -RerunHint (Format-UappRerunCommand $PSCommandPath $rerunBound))
 }
 
 # --- 0. 更新時バックアップ（既導入の場合のみ） ---

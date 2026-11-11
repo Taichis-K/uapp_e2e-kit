@@ -663,3 +663,32 @@ def test_editor_screenshot_eval_command_follows_pipeline_style(monkeypatch, valu
     else:
         monkeypatch.setenv("UAPP_E2E_PIPELINE_STYLE", value)
     assert _eval_command() == expected
+
+# 採取した 3 版の eval の返事（scripts/fixtures/pipeline/。開発リポだけにある＝配布キットでは飛ばす）。
+# PowerShell 側の層（uapp-pipeline.ps1）と同じく、キットの形は 1.0 の形（値そのもの）で返す（docs/design/pipeline-1.0.md）
+_PIPELINE_FIXTURES = Path(__file__).resolve().parents[2] / "scripts" / "fixtures" / "pipeline"
+
+
+@pytest.mark.parametrize("version,name,rc,ok,value", [
+    ("1.0.0-pre.1", "eval-code", 0, True, "ok"),
+    ("1.0.0-pre.1", "eval-scene", 0, True, "Assets/Scenes/SampleScene.unity"),
+    ("1.0.0-pre.1", "eval-file-old", 13, False, None),
+    ("0.10.0-exp.1", "eval-code", 0, True, "ok"),
+    ("0.10.0-exp.1", "eval-file", 0, True, "ok"),
+    ("0.9.1-exp.1", "eval-code", 0, True, "ok"),
+    ("0.9.1-exp.1", "eval-file", 2, False, None),
+])
+def test_editor_screenshot_eval_value_reads_all_pipeline_versions(version, name, rc, ok, value):
+    from e2e_driver.editor_screenshot import eval_value
+    path = _PIPELINE_FIXTURES / version / f"{name}.out"
+    if not path.exists():
+        pytest.skip("採取した返事は開発リポだけにある")
+    assert eval_value(path.read_text(encoding="utf-8"), rc) == (ok, value)
+
+
+def test_editor_screenshot_eval_value_needs_exit_code_zero():
+    from e2e_driver.editor_screenshot import eval_value
+    assert eval_value('"queued"', 0) == (True, "queued")
+    assert eval_value('"queued"', None) == (False, None)     # 終了コードが分からないものを成功にしない
+    assert eval_value("", 0) == (False, None)
+    assert eval_value('{"output":null,"diagnostics":["x"],"success":false,"result":null}', 0) == (False, None)

@@ -24,10 +24,14 @@ param(
     [switch]$Force,
     # 生成する e2e-config.json の値（対象の UI 実装に合わせる）
     [ValidateSet("ugui-nis", "ugui-legacy", "ngui-nis", "ngui-legacy")][string]$UiType = "ugui-nis",
-    [ValidateSet("portrait", "landscape")][string]$Orientation = "portrait"
+    [ValidateSet("portrait", "landscape")][string]$Orientation = "portrait",
+    # 対象の com.unity.pipeline がキットの検証済みの版より古いときの扱い（docs/design/pipeline-upgrade-on-install.md）。
+    # ask（既定）= 何も書き換えずに終了コード 4 で止める / yes = 上げる（記録して -Eject で元の版へ戻す）/ no = 上げない
+    [ValidateSet("ask", "yes", "no")][string]$PipelineUpgrade = "ask"
 )
 
 $ErrorActionPreference = "Stop"
+$script:BoundAtStart = $PSBoundParameters   # 実行し直す例に元の引数を写すため（関数の中では $PSBoundParameters が関数のものになる）
 
 . (Join-Path $PSScriptRoot "uapp-platform.ps1")   # OS 差分の吸収（Windows / macOS）
 
@@ -311,7 +315,7 @@ function Get-PipelineVersion {
     }
     # 配布キットのハブには unity-nis が無いので、ここへ落ちるのが通常経路。
     # **キットが検証した版を既定にする**（run-e2e.ps1 の版差メッセージの「検証済みの組み合わせ」と揃える。docs/05 は版を書いていない）
-    return "0.10.0-exp.1"
+    return (Get-UappKitPipelineVersion)
 }
 
 function Test-PipelinePackagePresent([string]$Target) {
@@ -426,6 +430,11 @@ function Invoke-Inject([string]$Target) {
         throw ("既に注入済みです（$RECORD_NAME がある）。撤去してから注入し直してください: " +
                ".\scripts\inject-to-project.ps1 -TargetProject '$Target' -Eject")
     }
+    # com.unity.pipeline が古ければ、台帳も記録も作る前に止めて聞く（ask のときだけ。yes / no は手順 3 で扱う）
+    if ($PipelineUpgrade -eq "ask") {
+        [void](Invoke-UappPipelineUpgradeCheck -ProjectDir $Target -Mode "ask" -Who "inject" `
+            -RerunHint (Format-UappRerunCommand $PSCommandPath $script:BoundAtStart))
+    }
 
     # スロット確定（台帳）
     $assigned = Use-Ledger {
@@ -524,7 +533,20 @@ function Invoke-Inject([string]$Target) {
         $added = Add-PipelinePackage $Target
         Write-Host "  [OK] $PIPELINE_PKG $added を追加"
     } else {
-        Write-Host "  [--] $PIPELINE_PKG は既にある（撤去時も触らない）"
+        $pst = Get-UappPipelineUpgradeState $Target
+        if ($pst.State -eq "older" -and $PipelineUpgrade -eq "yes" -and (Test-UappUnity6Project $Target)) {
+            # 上げる前に記録する（-Eject で元の版へ戻すため。define と同じ順序）
+            $record.steps += [ordered]@{ kind = "package-upgrade"; name = $PIPELINE_PKG; from = $pst.Current; to = $pst.Target }
+            Write-Record $Target $record
+            Set-UappPipelineVersion $Target $pst.Current $pst.Target
+            Write-Host "  [OK] $PIPELINE_PKG を $($pst.Current) → $($pst.Target) に上げた（撤去時に $($pst.Current) へ戻す）"
+        } elseif ($pst.State -eq "older") {
+            $why = if ($PipelineUpgrade -eq "no") { "-PipelineUpgrade no" } else { "ProjectVersion.txt が読めない・Unity 6 より前のどちらか" }
+            Write-Host "  [--] $PIPELINE_PKG $($pst.Current) は上げない（$why。キットが検証したのは $($pst.Target)）"
+        } else {
+            $what = switch ($pst.State) { "same" { "キットが検証した版と同じ" } "newer" { "キットが検証した版より新しい" } "unparsable" { "版ではない値（file: や git の URL）" } default { "版を確かめられない" } }
+            Write-Host "  [--] $PIPELINE_PKG は既にある（$what。撤去時も触らない）"
+        }
     }
 
     # 4. e2e-config.json（対象専用ポート）
@@ -705,6 +727,16 @@ function Invoke-Eject([string]$Target) {
                     }
                 }
                 "package" { if (Remove-PipelinePackage $Target) { Write-Host "  [戻] $PIPELINE_PKG を除去" } }
+                "package-upgrade" {
+                    # 今の値が注入で上げた版のときだけ戻す（人がさらに上げ下げしていたら触らない）
+                    $now = Get-UappPipelinePackageState -ManifestPath (Join-UappPath $Target "Packages/manifest.json")
+                    if ($now.State -eq "present" -and "$($now.Version)" -ceq "$($step.to)") {
+                        Set-UappPipelineVersion $Target $step.to $step.from
+                        Write-Host "  [戻] $PIPELINE_PKG を $($step.to) → $($step.from) に戻した"
+                    } else {
+                        Write-Host "  [--] $PIPELINE_PKG が注入で上げた版（$($step.to)）ではないので戻さない（今: $($now.Version)）"
+                    }
+                }
                 "config"  { $p = Join-UappPath $Target $step.path
                             if (Test-Path -LiteralPath $p) {
                                 Remove-Item -LiteralPath $p -Force

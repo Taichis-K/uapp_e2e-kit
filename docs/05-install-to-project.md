@@ -316,6 +316,10 @@ AVDとエディタ、複数エディタの同時運用のポート設計は [doc
 
 新しいキット zip を展開して `install-to-project.ps1 -ProjectPath <プロジェクト>` を**再実行するだけ**。
 
+**com.unity.pipeline が古いと、何も書き換えずに終了コード 4 で止まる**（Unity 6 以降のプロジェクトで、キットが検証した版より古いとき）。
+表示を見て上げるかを決め、`-PipelineUpgrade yes`（上げる。推奨）か `no`（上げない）を付けて実行し直す。
+上げると `Packages/manifest.json` の 1 行だけが変わる。`no` と答えた場合は、次の更新でもう一度聞かれる。
+
 **更新前のバックアップ:**
 
 - インストーラーが既導入を検知すると、**キット関連領域を丸ごと自動で
@@ -566,6 +570,7 @@ __pycache__/
 - 以下は自動では戻さない（実行後に案内が表示される）:
   1. Scripting Define Symbols の `UAPP_E2E_BRIDGE` 除去（検出状態を表示）
   2. 追加したパッケージが他で不要なら manifest から削除
+- installer が `-PipelineUpgrade yes` で上げた com.unity.pipeline の版は戻さない（上げた版のまま残る。**案内には出ない**。注入の `-Eject` は元の版へ戻す）
 
 ## 制約・注意
 
