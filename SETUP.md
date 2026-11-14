@@ -349,13 +349,16 @@ Codex ユーザーでルート `AGENTS.md` が無いプロジェクトは `-Root
 0.9.1-exp.1 と 0.10.0-exp.1 は 1.0.0-beta.16 で検証した（0.10 は 2026-11-04 に Windows と macOS・uGUI のサンプル 1 本のエディタ直結と EditMode、
 2026-11-05 に Windows・Unity 6 のサンプル 3 本のエディタ直結・EditMode（テストのある 2 本）・Android のビルドと E2E）。
 0.10.0-exp.1 は 1.0.0-beta.17 でも検証した（キット 0.1.31 のリリース検証。Windows と macOS でエディタ直結と EditMode）。
-**1.0.0-pre.1 は 1.0.0-beta.17 で検証した**（キット 0.1.32 のリリース検証。Windows と macOS でエディタ直結と EditMode。1.0 は `script eval_file` が無くなったので、キットは 0.10 以降には `script eval --file` で送る）。
-入る版は経路で違う: **注入モード（`inject-to-project.ps1`）が足す既定の版は 1.0.0-pre.1**（すでに古い版が入っていれば手順 1 の確認のうえで上げる）/
+1.0.0-pre.1 は 1.0.0-beta.17 で検証した（キット 0.1.32 のリリース検証。Windows と macOS でエディタ直結と EditMode。1.0 は `script eval_file` が無くなったので、キットは 0.10 以降には `script eval --file` で送る）。
+**正式版の 1.0.0 は Unity CLI 1.0.0 で検証した**（キット 0.1.33 のリリース検証。Windows と macOS でエディタ直結と EditMode）。
+入る版は経路で違う: **注入モード（`inject-to-project.ps1`）が足す既定の版は 1.0.0**（すでに古い版が入っていれば手順 1 の確認のうえで上げる）/
 installer の経路では、下の `run-e2e.ps1 -Editor` の初回に Unity CLI の `unity pipeline install` が入れる版になる。
 入っている版は `Packages/packages-lock.json` の `com.unity.pipeline` の `version` で見る。
-**1.0 が入りうるので、1.0 で検証した 1.0.0-beta.17 に揃える**（1.0.0-pre.1 と 1.0.0-beta.16 以前の組み合わせは未実測。0.10 は beta.16 と beta.17 で検証。0.9.1 と beta.17、0.10 と 1.0.0-beta.15 の組み合わせは未実測）。
-`unity --version` が 1.0.0-beta.17 より前なら `unity upgrade` で上げてから実行する
-（0.8.0-exp.1 と 1.0.0-beta.16 の組み合わせは未実測。**入っている版が古ければ、installer と注入が手順 1 の確認のうえで 1.0.0-pre.1 へ上げる**。
+**推奨は pipeline を 1.0.0 に上げ、Unity CLI を 1.0.0 に揃えること**（pipeline 1.0.0 と Unity CLI 1.0.0-beta.17 以前の組み合わせは未実測）。
+pipeline を 1.0.0-pre.1 のまま使うなら、検証したのは Unity CLI 1.0.0-beta.17（上の行。1.0.0-beta.16 以前は未実測）。Unity CLI 1.0.0 との組み合わせは未実測だが、pipeline のコードは 1.0.0 と同一。
+pipeline を上げずに 0.10 以前のまま使う場合、Unity CLI 1.0.0 との組み合わせは未実測（検証した組み合わせはこの段落の上の行）。
+pipeline が 1.0.0 で `unity --version` が 1.0.0 より前なら `unity upgrade` で上げてから実行する
+（0.8.0-exp.1 と 1.0.0-beta.16 の組み合わせは未実測。**入っている版が古ければ、installer と注入が手順 1 の確認のうえで 1.0.0 へ上げる**。
 上げなかった場合は `run-e2e.ps1 -Editor` が注意を 1 行出す。注入の対象なら `-Eject` してから `-PipelineUpgrade yes` で注入し直す）:
 
 ```powershell

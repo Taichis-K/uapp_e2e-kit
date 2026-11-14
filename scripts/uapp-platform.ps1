@@ -1367,7 +1367,7 @@ function Get-UappPipelinePackageState {
 }
 
 # --- 導入するときに com.unity.pipeline をキットの検証済みの版へ上げる（docs/design/pipeline-upgrade-on-install.md） ---
-function Get-UappKitPipelineVersion { "1.0.0-pre.1" }   # キットが検証した版（run-e2e の「検証済みの組み合わせ」・SETUP 5a と揃える）
+function Get-UappKitPipelineVersion { "1.0.0" }   # キットが検証した版（run-e2e の「検証済みの組み合わせ」・SETUP 5a と揃える）
 
 # 版を比べる（a<b で -1・同じで 0・a>b で 1・版として読めなければ $null）。数字 3 つを数として比べ、
 # 同じならプレリリースの無い方が新しい。両方にあれば . で区切り、数字どうしは数・それ以外は文字（区別する）で比べる

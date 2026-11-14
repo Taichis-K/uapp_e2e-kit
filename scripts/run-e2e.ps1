@@ -865,7 +865,8 @@ if ($Editor) {
         if ($null -eq $probeClass -or $probeClass.Class -eq "permanent") {
             throw ("Unity CLI / com.unity.pipeline のバージョンが想定と異なります（eval の疎通に失敗: $detail）。" +
                    "'unity --version' と <プロジェクト>\Packages\manifest.json の com.unity.pipeline を確認する。" +
-                   "検証済みの組み合わせ: unity-cli 1.0.0-beta.17 / com.unity.pipeline 1.0.0-pre.1（キット 0.1.32 のリリース検証。Windows と macOS でエディタ直結と EditMode。1.0 で script eval_file が消えたので eval は script eval --file で送る）、" +
+                   "検証済みの組み合わせ: unity-cli 1.0.0 / com.unity.pipeline 1.0.0（キット 0.1.33 のリリース検証。Windows と macOS でエディタ直結と EditMode）、" +
+                   "unity-cli 1.0.0-beta.17 / com.unity.pipeline 1.0.0-pre.1（キット 0.1.32 のリリース検証。Windows と macOS でエディタ直結と EditMode。1.0 で script eval_file が消えたので eval は script eval --file で送る）、" +
                    "unity-cli 1.0.0-beta.17 / com.unity.pipeline 0.10.0-exp.1（キット 0.1.31 のリリース検証。Windows と macOS でエディタ直結と EditMode）、" +
                    "unity-cli 1.0.0-beta.16 / com.unity.pipeline 0.9.1-exp.1・0.10.0-exp.1" +
                    "（0.10 は unity cmd の応答から包みが外れ、キットは両方の形を読む。2026-11-04 に Windows と macOS・uGUI のサンプル 1 本でエディタ直結と EditMode、2026-11-05 に Windows・Unity 6 のサンプル 3 本でエディタ直結・EditMode（テストのある 2 本）・Android のビルドと E2E）、" +
@@ -874,7 +875,7 @@ if ($Editor) {
                    "unity-cli 1.0.0-beta.13 / com.unity.pipeline 0.8.0-exp.1（3 サンプルともエディタ直結で実走。2026-10-15）。" +
                    "過去に通った組み合わせ: unity-cli 1.0.0-beta.11 / com.unity.pipeline 0.7.0-exp.1、" +
                    "unity-cli 1.0.0-beta.3 または 1.0.0-beta.5 / com.unity.pipeline 0.4.0-exp.1・0.5.0-exp.1。" +
-                   "1.0.0-pre.1 より新しい版は未検証（レジストリの最新はそれより新しいことがある）")
+                   "1.0.0 より新しい版は未検証（レジストリの最新はそれより新しいことがある）")
         }
         # **ここで記録する** ― プローブは `-AllowFail` なので Invoke-UnityCli 側では書かれない
         # （書かせると、後始末の editor_stop でも書かれて緑の走行に証跡が出てしまう）。
