@@ -1,5 +1,5 @@
 # uapp-pipeline.ps1 — com.unity.pipeline を扱う層（配布物。uapp-platform.ps1 のあとに . で読む）
-# 設計: docs/design/pipeline-1.0.md。**基準はキットの形（いまは 1.0.0 の返事と同じ。1.0.0 のコードは 1.0.0-pre.1 と同一）**で、
+# 設計: docs/design/pipeline-1.0.md。**基準はキットの形（いまは 1.0.1 の返事と同じ。1.0.0 のコードは 1.0.0-pre.1 と同一・1.0.1 は set_auto_tick だけが違う）**で、
 # 0.10 と 0.9.1 の返事はここで 1.0 の形へ直す。呼び手は「送る引数を決める」「返事を読む」をここに任せ、
 # 待つループ（タイムアウトの再試行・生存確認・証跡）は呼び手に残す（run-e2e と run-unity-tests で待ち方が意図して違う＝#38）。
 # **新しい版はこの表に 1.0 との差を足し、採取した返事を scripts/fixtures/pipeline/<版>/ に足す**（check-platform-helpers が全版を試験する）。

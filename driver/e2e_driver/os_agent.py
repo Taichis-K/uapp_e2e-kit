@@ -183,8 +183,10 @@ def _check_base(response: dict, bundle_id: str | None, path: str) -> None:
 def tap(x: float, y: float, bundle_id: str | None = None) -> None:
     """正規化座標（0〜1・左上原点）でタップする。**画面解像度に依存しない**。
 
-    **既定（bundle_id なし）は SpringBoard の画面が基準**（iPhone では回転しない＝縦。iPad は未実測）。システムダイアログ・
-    ホーム画面を押すときはこちら。
+    **既定（bundle_id なし）は SpringBoard の frame が基準**（`status()` の `screen` と同じ大きさ）。システムダイアログ・
+    ホーム画面を押すときはこちら。**横向きでは、その大きさが前面によって変わる**（iPhone 15 Pro Max / iOS 26 の実機 1 台で観測。issue #94）:
+    アプリが前面なら縦の大きさで、横の画面には当たらない。コントロールセンターなど SpringBoard の画面が前面なら横の大きさで、
+    横の画面の位置に当たる。横のコントロールセンターは `tap_element` で押せる（座標系を直して押す）。iPad・iOS 16 の実機は未実測。
     **bundle_id を渡すとそのアプリの画面が基準**になる。**横画面のアプリはこちらでないと当たらない**
     （issue #80）。**外部ブラウザなど別のアプリでも、横画面ならそのアプリの bundle id を渡す**
     （横画面の Safari は SpringBoard 基準では外れ、`com.apple.mobilesafari` 基準なら当たった。シミュレータで実測）。そのアプリが前面に無ければエージェントが拒否する（HTTP 409 → OsAgentError）。
@@ -201,7 +203,7 @@ def tap_unity(x: float, y: float, screen: tuple[int, int], bundle_id: str | None
 
     **横画面のアプリでは bundle_id を渡し、screen にはアプリ側の画面サイズ**（Unity の
     `Screen.width`・`Screen.height`＝横長の値）を渡す。`status()` の `screen` は SpringBoard の
-    大きさ（iPhone では回転しない。iPad は未実測）なので、横画面の screen には使わない。
+    大きさ（横向きでも前面によって縦のままのことがある＝issue #94）なので、横画面の screen には使わない。
     """
     width, height = screen
     if width <= 0 or height <= 0:
@@ -431,8 +433,12 @@ def find_elements(*, bundle_id: str | None = None, identifier: str | None = None
                   limit: int = 50) -> dict:
     """アクセシビリティの要素を探す（`{"count": <一致数>, "elements": [...]}`）。**Unity の UI は出ない**。
 
-    `bundle_id` を省くと SpringBoard（ホーム画面・システムの UI）。各要素の `center` はそのアプリの画面の正規化座標で、
-    `tap(…, bundle_id=…)` に同じ `bundle_id` で渡せる。**押せるか（hittable）は返さない**（`tap_element` が判断する）。
+    `bundle_id` を省くと SpringBoard（ホーム画面・システムの UI）。**押す位置は `appCenter`**（そのアプリの画面の正規化座標）で、
+    `tap(…, bundle_id=…)` に同じ `bundle_id` で渡せる。`frameSpace` は要素の `frame` の座標系（`app` / `screen` / `unknown` /
+    `unmeasured`）。`unknown` と `unmeasured` のときの `appCenter` は `None`。判定できなかったときは 2 つのキーが付かない。
+    横向きでは、システムの UI（コントロールセンター・アラート）の `frame` が物理の画面（縦）の座標で返ることがあり（`screen`）、
+    そのとき `center`（`frame` を根の大きさで割っただけの値。古いエージェントとの互換のため残す）は押す位置にならない（issue #94）。
+    古いエージェントは `frameSpace`・`appCenter` を返さない。**押せるか（hittable）は返さない**（`tap_element` が判断する）。
     並び順と `tap_element` の `index` は一致するとは限らないので、押すときは一意に決まる指定を使う。
     """
     payload = _query(bundle_id, identifier, label, value, label_contains, type)
@@ -447,8 +453,15 @@ def tap_element(*, bundle_id: str | None = None, identifier: str | None = None, 
 
     **WebView の中の覆い（`div` など）は見ないことがある**（そのときは 409 にならず中心の座標を押す＝当たるのは上の覆い。
     ネイティブの UI の覆いは未確認）。
-    押すのは確かめた時点のスナップショットの中心（確かめたあとに一致しなくなっていたら 404）。`bundle_id` を渡したとき、
-    要素がキーボードの裏にあれば押さずに 409（キーボードのキーは押せる）。
+    押すのは確かめた時点のスナップショットの中心（確かめたあとに一致しなくなっていたら 404）。中心が画面の外でも、
+    端で一部が見えていれば（見えている部分が幅・高さとも 10 pt 以上・祖先で切れた部分は除く）その中心を押す。
+    見えている部分が小さい・要素が画面より大きいときは 409。`bundle_id` を渡したとき、押す点がキーボードの裏にあれば
+    押さずに 409（キーボードのキーは押せる）。
+    横向きで要素の `frame` が物理の画面の座標で返るとき（実機のコントロールセンター・シミュレータのアラートで実測）は、
+    アプリの座標に直して押す（issue #94）。**座標系を決められないときは押さずに 409 で、本文の `reason` が `frameSpaceUnknown`
+    か `frameSpaceUnmeasured`**（スクロールの問題ではない）。実機で横のアプリの上に出たアラートは `frameSpaceUnmeasured` で止まりうる（未実測）。
+    まず `tap_element` をやり直す。それでも決まらないときに限り、`find_elements` で一致が 1 件・`frameSpace` が `screen` なら
+    その `appCenter` を `tap` に渡せる（その場合は押せるか・画面の外・キーボードの裏の検査を通らない）。
     """
     payload = _query(bundle_id, identifier, label, value, label_contains, type)
     payload.update({"index": int(index), "timeout": _timeout(timeout)})
@@ -473,7 +486,8 @@ def type_into(text: str, *, clear: bool = False, bundle_id: str | None = None, i
 
     **消し切れなければ 409 で入力しない**（カーソル位置・消去ボタン・伏せ字のせいで値が混ざるのを防ぐ）。
     **消したあとの値がプレースホルダーと同じでも 409**（空欄なのか、残りがたまたま同じ文字列なのか判別できない）。
-    消したあとに入力欄を読み直せない（フォーカスが外れた）ときも 409 で入力しない。要素の押し方とキーボードの 409 は `tap_element` と同じ。
+    消したあとに入力欄を読み直せない（フォーカスが外れた）ときも 409 で入力しない。要素の押し方・キーボードの 409・
+    横向きの座標系（`frameSpaceUnknown`）は `tap_element` と同じ。
     プレースホルダーのある欄では空になると値がプレースホルダーとして読めることがあるので、**空欄に入れるときは `clear` を付けない**。
     """
     if not isinstance(text, str):

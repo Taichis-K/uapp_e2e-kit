@@ -54,7 +54,7 @@ fixture を足すときはそのサブディレクトリの `conftest.py` に書
 
    | やりたいこと | Android | iOS |
    |---|---|---|
-   | 座標タップ | `adb.ui_tap(...)` | `os_agent.tap(x, y)`（**横画面のアプリは `bundle_id=` を渡す** ― 既定は SpringBoard 基準（iPhone では縦）で当たらない。`uapp_e2e/docs/ai-loop.md` の「OS レベルの UI オートメーション」） |
+   | 座標タップ | `adb.ui_tap(...)` | `os_agent.tap(x, y)`（**横画面のアプリは `bundle_id=` を渡す** ― 既定は SpringBoard 基準で、アプリが前面のときは縦の大きさなので当たらない。横のシステムの UI は `os_agent.tap_element`。`uapp_e2e/docs/ai-loop.md` の「OS レベルの UI オートメーション」） |
    | **文字入力** | `adb.ui_type("...")` | **`os_agent.type_text("...", bundle_id=...)`**（Unity の入力欄はシミュレータ（iPhone 16 / iOS 18.6）では入らず 409。実機（iPhone 8 / iOS 16）では押して待つと入った） |
    | システムダイアログ | `adb.ui_tap(text="許可")` | `os_agent.handle_alert("許可")`（**名前は省略しない** ― 省略すると先頭のボタンを押す。名前が違うと 404＋候補一覧が返る） |
    | 他アプリから戻す | — | `os_agent.activate(bundle_id)` |

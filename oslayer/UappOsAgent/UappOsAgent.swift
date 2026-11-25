@@ -25,8 +25,9 @@
 //   GET  /screenshot                    … 画面全体の PNG（**OS が合成した結果**）
 //   POST /tap      {"x":…,"y":…[,"bundleId":…]} … 正規化座標（0〜1・左上原点）でタップ
 //   POST /swipe    {"x1":…,…[,"bundleId":…]}    … 正規化座標でスワイプ
-//        **bundleId を省くと SpringBoard（iPhone では回転しない＝縦。iPad は未実測）基準**。渡すとそのアプリの画面基準で押す
-//        （横画面のアプリはこちらでないと当たらない。issue #80）。渡したときは前面でなければ 409
+//        **bundleId を省くと SpringBoard の frame（/status の screen）基準**。横向きでは、その大きさが前面によって変わる
+//        （アプリが前面なら縦の大きさで、横の画面には当たらない。CC など SpringBoard が前面なら横。issue #94 で実機観測）。
+//        渡すとそのアプリの画面基準で押す（横画面のアプリはこちらでないと当たらない。issue #80）。渡したときは前面でなければ 409
 //   POST /type     {"bundleId":…,"text":…} … **対象アプリを明示**して文字入力
 //   POST /alert    {"button":"…"}       … システムアラートのボタンを押す
 //   POST /activate {"bundleId":"…"}     … 実行中のアプリを前面へ（**未起動なら拒否**）
@@ -37,6 +38,7 @@
 //   POST /app/state | /app/launch | /app/terminate {"bundleId", …} … アプリの状態・起動（引数・環境変数）・終了
 //   POST /elements {query…}             … アクセシビリティの要素を探す（snapshot を 1 回取って Swift で照合）
 //   POST /element/tap | /element/wait | /element/type {query…} … 要素を押す・待つ・文字を入れる
+//        横向きでスナップショットの frame が物理の画面の座標で返る要素は、押す前にアプリの座標へ戻す（issue #94。FrameSpaces）
 //   POST /tree {"bundleId"?}            … アクセシビリティツリー（debugDescription。text/plain）
 //   POST /doubletap | /longpress {"x","y",…} / POST /pinch {"bundleId","scale",…} … ジェスチャ
 //   POST /press {"button"} / POST /open-url {"url"} … 端末のボタン・URL を開く
@@ -152,12 +154,13 @@ final class UappOsAgent: XCTestCase {
                 // トークン未設定のエージェント（別実行の残骸など）は false を返すので、
                 // ホストは自分が起動した個体でないと分かる
                 "authenticated": UappOsAgent.token != nil,
-                // **SpringBoard の frame**（iPhone では回転しない。iPad は未実測）。横画面のアプリの画面サイズとしては使わない
+                // **SpringBoard の frame**（bundleId を省いた /tap の正規化の基準）。横向きでは前面によって縦にも横にもなる
+                // （アプリが前面なら縦、CC など SpringBoard が前面なら横＝実機観測。issue #94）。横画面のアプリの画面サイズとしては使わない
                 "screen": ["w": Int(frame.width), "h": Int(frame.height)],
                 // ホストが**押す前に**対応を確かめるための一覧。古いエージェントは bundleId を
                 // 黙って無視して SpringBoard 基準で押すので、応答を見てからでは遅い（issue #80）。
                 // orientation は一覧として見せるだけ（古い版は /orientation を 404 で返し、何も起きない）
-                "features": ["bundleId", "orientation", "app", "elements", "gestures", "press", "openUrl", "typeFocusCheck"],
+                "features": ["bundleId", "orientation", "app", "elements", "gestures", "press", "openUrl", "typeFocusCheck", "frameSpace"],
                 // 端末の向き（XCUIDevice）。一度も回していないと unknown 等を返しうる
                 "orientation": UappOsAgent.orientationName(XCUIDevice.shared.orientation),
             ])
@@ -285,6 +288,8 @@ final class UappOsAgent: XCTestCase {
             }
             // **横画面では座標で押さない**。SpringBoard の frame は横（例 852×393）で返るのに、アラートのスナップショットの
             // frame は縦の座標のまま（シミュレータ iPhone 16 / iOS 18.6 で実測）で、正規化すると画面の外を指す（#80 と同じ型）。
+            // （実機でアプリが前面のときは SpringBoard の frame が縦で返るので、この分岐に入らず座標で押す見込み＝未実測。
+            //   縦の座標は物理の画面の座標で、#94 の FrameSpaces で戻せるが、同意の取り違えの危険があるのでここは変えていない）
             // 違うボタンを押すと同意を取り違えるので、横のときは今までどおり要素を引いて tap() する（#89 の型が残る＝残る限界）
             let board = springboard.frame
             if board.width > board.height {
@@ -394,7 +399,26 @@ final class UappOsAgent: XCTestCase {
                 var matched: [XCUIElementSnapshot] = []
                 collect(root, filter: filter, into: &matched)
                 let frame = root.frame
-                let elements = matched.prefix(limit).map { UappOsAgent.describe($0, base: frame) }
+                // 座標系の判定（issue #94）。既存の frame・center は変えず、frameSpace と appCenter を足す
+                // 判定に失敗しても一覧は今までどおり返す（押さない API なので、frameSpace・appCenter を付けないだけ）
+                let spaces: FrameSpaces?
+                if case .success(let value) = makeFrameSpaces(base.app, root: root, isSpringBoard: !isBundleRequest(request)) {
+                    spaces = value
+                } else {
+                    spaces = nil
+                }
+                let elements: [[String: Any]] = matched.prefix(limit).map { node in
+                    var d = UappOsAgent.describe(node, base: frame)
+                    guard let spaces = spaces else { return d }
+                    let space = spaces.space(of: node)
+                    d["frameSpace"] = space.name
+                    if let r = spaces.normalized(node.frame, space) {
+                        d["appCenter"] = ["x": Double(r.midX), "y": Double(r.midY)]
+                    } else {
+                        d["appCenter"] = NSNull()
+                    }
+                    return d
+                }
                 return HttpResponse(status: 200, json: ["count": matched.count, "elements": elements])
             }
 
@@ -410,8 +434,20 @@ final class UappOsAgent: XCTestCase {
                 case .failure(let response): return response
                 case .success(let snap):
                     let app = baseApp(request)
-                    if let refusal = pressRefusal(snap.frame, app: app) { return refusal }
-                    guard pressPoint(in: snap.frame, rx: 0.5, ry: 0.5, app: app) else { return UappOsAgent.cannotPressResponse }
+                    // 押す位置はアプリの正規化座標で作る。横向きで物理の画面の座標で返る要素は戻す（issue #94）
+                    let spaces: FrameSpaces
+                    switch makeFrameSpaces(app, isSpringBoard: !isBundleRequest(request)) {
+                    case .failure(let response): return response
+                    case .success(let value): spaces = value
+                    }
+                    let space = spaces.space(of: snap)
+                    guard let rect = spaces.normalized(snap.frame, space) else { return frameSpaceUnknownResponse(snap, spaces: spaces) }
+                    let point: CGPoint
+                    switch pressTarget(rect, snap: snap, space: space, spaces: spaces, app: app) {
+                    case .failure(let response): return response
+                    case .success(let value): point = value
+                    }
+                    pressAt(point, app: app)
                     return HttpResponse(status: 200, json: ["ok": true, "element": UappOsAgent.summary(snap)])
                 }
             }
@@ -459,10 +495,27 @@ final class UappOsAgent: XCTestCase {
                 case .success(let value): snap = value
                 }
                 let app = baseApp(request)
-                if let refusal = pressRefusal(snap.frame, app: app) { return refusal }
+                // 比べる枠と押す位置は、すべてアプリの正規化座標にそろえる（issue #94。生の frame どうしを比べない）。
+                // 判定は押す前の根の写しで作る（押したあとに Window の構成が変わると追えない＝設計書の残る限界）
+                let spaces: FrameSpaces
+                switch makeFrameSpaces(app, isSpringBoard: !isBundleRequest(request)) {
+                case .failure(let response): return response
+                case .success(let value): spaces = value
+                }
+                let space = spaces.space(of: snap)
+                guard let target = spaces.normalized(snap.frame, space) else { return frameSpaceUnknownResponse(snap, spaces: spaces) }
+                let point: CGPoint
+                switch pressTarget(target, snap: snap, space: space, spaces: spaces, app: app) {
+                case .failure(let response): return response
+                case .success(let value): point = value
+                }
                 let summary = UappOsAgent.summary(snap)
-                let target = snap.frame
-                guard pressPoint(in: target, rx: 0.5, ry: 0.5, app: app) else { return UappOsAgent.cannotPressResponse }
+                // フォーカスの要素の座標系。根の写しで見つからなければ対象と同じと見なす
+                func normFocus(_ s: XCUIElementSnapshot) -> CGRect? {
+                    let fs = spaces.space(of: s)
+                    return spaces.normalized(s.frame, (fs == .unknown || fs == .unmeasured) ? space : fs)
+                }
+                pressAt(point, app: app)
                 // **押した要素（かその子）にフォーカスが来たかを確かめ、フォーカスを持つ要素へ入力する**。
                 // 「アプリのどこかにフォーカスがある」だけだと、別の入力欄がフォーカスを持ったまま押しても移らない要素を
                 // 指定したときに、typeText が XCTest の失敗になりエージェントが止まりうる（#81 と同じ型）。
@@ -473,13 +526,15 @@ final class UappOsAgent: XCTestCase {
                 var focusedFrame: CGRect? = nil
                 func focusedInTarget() -> XCUIElementSnapshot? {
                     let focused = focusedElement(in: app)
-                    guard focused.exists, let s = try? focused.snapshot() else { return nil }
+                    guard focused.exists, let s = try? focused.snapshot(), let sRect = normFocus(s) else { return nil }
                     var frames = [target]
                     if let f = focusedFrame { frames.append(f) }
-                    if element.exists, let now = try? element.snapshot(), now.frame.width > 0, now.frame.height > 0 {
-                        frames.append(now.frame)
+                    if element.exists, let now = try? element.snapshot(), now.frame.width > 0, now.frame.height > 0,
+                       let nowRect = spaces.normalized(now.frame, space) {
+                        frames.append(nowRect)
                     }
-                    guard frames.contains(where: { $0.insetBy(dx: -1, dy: -1).contains(s.frame) }) else { return nil }
+                    // 1 pt の許容を正規化座標に直す
+                    guard frames.contains(where: { $0.insetBy(dx: -spaces.tolX, dy: -spaces.tolY).contains(sRect) }) else { return nil }
                     return s
                 }
                 let deadline = Date().addingTimeInterval(2)
@@ -488,7 +543,7 @@ final class UappOsAgent: XCTestCase {
                 guard let input = field else {
                     return HttpResponse(status: 409, json: ["error": "要素を押しましたが、その要素にキーボードのフォーカスが来ません", "element": summary])
                 }
-                focusedFrame = input.frame
+                focusedFrame = normFocus(input)
                 if clear {
                     let placeholder = input.placeholderValue ?? ""
                     let current = (input.value as? String) ?? ""
@@ -496,12 +551,25 @@ final class UappOsAgent: XCTestCase {
                     if !current.isEmpty {
                         // 右端寄りを押してカーソルを末尾へ寄せてから、値の長さぶん削除キーを送る
                         // （要素を基準にした座標は解決し直すので、アプリの座標で押す。入力はフォーカスへ届くアプリへ送る）
-                        // （入力欄はフォーカスを持って対象の中にあるので、画面の外とキーボードの検査はしない）
+                        // （キーボードの検査はしない。押す点は画面との共通部分（見えている部分）に切ってから作る＝issue #94 の追補）
                         // 判定のあとに欄がさらに動くことがある（キーボードを避ける途中で判定した等。issue #93）ので、
                         // 押す直前にフォーカスの要素を読み直し、その frame を押す（読めなければ判定したときの frame）
                         let fresh = focusedInTarget() ?? input
-                        focusedFrame = fresh.frame
-                        guard pressPoint(in: fresh.frame, rx: 0.95, ry: 0.5, app: app) else { return UappOsAgent.cannotPressResponse }
+                        // normFocus は対象の座標系（決まっている）へ戻すので nil にならない。なった場合も、対象は押したあと
+                        guard let freshRect = normFocus(fresh) else {
+                            return HttpResponse(status: 409, json: [
+                                "error": "フォーカスの要素の座標を作れません（対象は押しました。既存の値は消していません。入力していません）",
+                                "remaining": NSNull()])
+                        }
+                        focusedFrame = freshRect
+                        let visible = freshRect.intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+                        guard !visible.isNull, visible.width * spaces.base.width >= UappOsAgent.minVisiblePt,
+                              visible.height * spaces.base.height >= UappOsAgent.minVisiblePt else {
+                            return HttpResponse(status: 409, json: [
+                                "error": "入力欄の見えている部分が小さすぎて、末尾を押せません（対象は押しました。既存の値は消していません。入力していません）",
+                                "remaining": NSNull()])
+                        }
+                        pressNormalized(visible, rx: 0.95, ry: 0.5, app: app)
                         // 押したことでフォーカスが外れていたら削除キーを送らない（フォーカスが無いまま typeText を呼ぶと
                         // XCTest の失敗になりエージェントが止まる＝#81 の型）
                         guard focusedInTarget() != nil else {
@@ -661,7 +729,8 @@ final class UappOsAgent: XCTestCase {
 
     /// 正規化座標（0〜1）を画面上の座標へ。**解像度に依存しない**ので、
     /// 機種が変わってもホスト側のテストを書き換えずに済む。
-    /// **基準を省くと SpringBoard**（iPhone では回転しない＝縦。iPad は未実測）。対照実験（performProbeGesture）はこちらのまま。
+    /// **基準を省くと SpringBoard**（その frame が基準。横向きでは前面によって縦にも横にもなる＝実機観測。issue #94。iPad は未実測）。
+    /// 対照実験（performProbeGesture）はこちらのまま。
     /// アプリを基準にすると、そのアプリの画面（横なら横）で正規化される。
     /// 横画面のアプリは SpringBoard 基準では当たらない（導入先の実機観測。issue #80）。
     /// 「XCUITest がアプリの向きで押す」という機序は推定で、Apple の文書に向きの記述は無い
@@ -744,6 +813,12 @@ final class UappOsAgent: XCTestCase {
             if let response = notForegroundResponse(app) { return .failure(response) }
             return .success(ElementBase(app: app))
         }
+    }
+
+    /// bundleId を渡した要求か（/element/* の基準がアプリか SpringBoard か）
+    private func isBundleRequest(_ request: HttpRequest) -> Bool {
+        if case .value = bundleIdParam(request) { return true }
+        return false
     }
 
     private func baseApp(_ request: HttpRequest) -> XCUIApplication {
@@ -899,23 +974,248 @@ final class UappOsAgent: XCTestCase {
         return .success(snap)
     }
 
-    /// 押す前の位置の検査（押さないなら応答を返す）。中心が画面の外なら 409。
+    /// 押す点を決める（押さないなら応答を返す）。中心が画面の中ならその中心。
+    /// **中心が画面の外でも、見えている部分（画面と祖先の frame との共通部分）が幅・高さとも 10 pt 以上なら、その中心**
+    /// （iPhone 8 の横の CC で、右端で半分見えているボタンを押すため。issue #94 の追補）。要素が画面より大きい次元を持つ・
+    /// 祖先が決まらない・見えている部分が小さいときは 409。
     /// **要素がキーボードの裏にある**（中心がキーボードの中で、要素がキーボードの一部でない）なら 409
     /// （中心を押すとキーを押して文字が入る）。キー・Return・完了などキーボードの一部は押す。
     /// 「丸ごと入っていればキーボードの一部」とは見なさない（キーボードの裏に丸ごと隠れた要素を押してしまう＝実測）
-    private func pressRefusal(_ frame: CGRect, app: XCUIApplication) -> HttpResponse? {
-        guard let point = normalizedPoint(in: frame, rx: 0.5, ry: 0.5, app: app),
-              (0...1).contains(point.dx), (0...1).contains(point.dy) else {
-            return HttpResponse(status: 409, json: ["error": "要素の中心が画面の外です（/swipe でスクロールしてからやり直す）"])
+    /// `rect` は対象の frame をアプリの正規化座標にしたもの（`FrameSpaces.normalized`）。キーボードも同じ座標にそろえて比べる（issue #94）。
+    /// キーボードの座標系は根の写しで探し、見つからなければ対象と同じ（`space`）と見なす
+    private func pressTarget(_ rect: CGRect, snap: XCUIElementSnapshot, space: FrameSpace, spaces: FrameSpaces,
+                             app: XCUIApplication) -> Result<CGPoint, HttpResponse> {
+        var center = CGPoint(x: rect.midX, y: rect.midY)
+        if !((0...1).contains(center.x) && (0...1).contains(center.y)) {
+            switch visibleCenter(rect, snap: snap, space: space, spaces: spaces, app: app) {
+            case .failure(let why):
+                return .failure(HttpResponse(status: 409, json: [
+                    "error": "要素の中心が画面の外です（\(why)。/swipe でスクロールしてからやり直す）"]))
+            case .success(let p): center = p
+            }
         }
         let keyboard = app.keyboards.firstMatch
-        if keyboard.exists, let kb = try? keyboard.snapshot(),
-           kb.frame.contains(CGPoint(x: frame.midX, y: frame.midY)),
-           !UappOsAgent.hasDescendant(kb, frame: frame) {
-            return HttpResponse(status: 409, json: [
-                "error": "要素の中心がキーボードの裏にあります（押すとキーを押します）。キーボードを閉じるかスクロールしてからやり直す"])
+        if keyboard.exists, let kb = try? keyboard.snapshot() {
+            // キーボードの座標系が根の写しで決まらなければ（unknown）、戻す対応があるならアプリ・物理の画面の両方の解釈で比べ、
+            // どちらかで裏なら止める（安全側）。未実測の区域（unmeasured）は戻す式が無いので、アプリの座標として比べる
+            let found = spaces.space(of: kb)
+            let candidates: [FrameSpace]
+            switch found {
+            case .unknown: candidates = spaces.canConvert ? [.app, .screen] : [.app]
+            case .unmeasured: candidates = [.app]
+            default: candidates = [found]
+            }
+            for ks in candidates {
+                if let kbRect = spaces.normalized(kb.frame, ks), kbRect.contains(center),
+                   !UappOsAgent.hasDescendant(kb, rect: rect, space: ks, spaces: spaces) {
+                    return .failure(HttpResponse(status: 409, json: [
+                        "error": "要素の押す点がキーボードの裏にあります（押すとキーを押します）。キーボードを閉じるかスクロールしてからやり直す"]))
+                }
+            }
         }
-        return nil
+        return .success(center)
+    }
+
+    /// 見えている部分の下限（pt）。端の切れ端を押さないため（issue #94 の追補。根拠は iPhone 8 の CC の幅 32 pt の 1 例）
+    static let minVisiblePt: CGFloat = 10
+
+    /// 中心が画面の外の要素の、見えている部分の中心（アプリの正規化座標）。失敗の理由を文字列で返す
+    private func visibleCenter(_ rect: CGRect, snap: XCUIElementSnapshot, space: FrameSpace, spaces: FrameSpaces,
+                               app: XCUIApplication) -> Result<CGPoint, VisibleError> {
+        // 画面より大きい次元を持つ要素は、見えている部分の真ん中が別の子要素に当たりうるので押さない
+        guard rect.width <= 1, rect.height <= 1 else { return .failure(VisibleError("要素が画面より大きい")) }
+        // 祖先（スクロールビューなど）に切り取られた部分を外すため、根を取り直して祖先をたどる（この経路だけの追加の取得）
+        guard let root = try? app.snapshot() else { return .failure(VisibleError("根のスナップショットを取れない")) }
+        var paths: [[XCUIElementSnapshot]] = []
+        func find(_ n: XCUIElementSnapshot, _ path: [XCUIElementSnapshot]) {
+            let g = n.frame, f = snap.frame
+            if n.elementType == snap.elementType && n.identifier == snap.identifier && n.label == snap.label &&
+                abs(g.minX - f.minX) <= 1 && abs(g.minY - f.minY) <= 1 && abs(g.maxX - f.maxX) <= 1 && abs(g.maxY - f.maxY) <= 1 {
+                paths.append(path)
+            }
+            for c in n.children { find(c, path + [n]) }
+        }
+        find(root, [])
+        guard paths.count == 1 else { return .failure(VisibleError("祖先を決められない（一致 \(paths.count) 件）")) }
+        var visible = rect.intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+        for ancestor in paths[0].dropFirst() {   // 根（アプリ）は除く
+            guard let a = spaces.normalized(ancestor.frame, space), a.width > 0, a.height > 0 else { continue }
+            visible = visible.intersection(a)
+            if visible.isNull { break }
+        }
+        guard !visible.isNull, visible.width * spaces.base.width >= UappOsAgent.minVisiblePt,
+              visible.height * spaces.base.height >= UappOsAgent.minVisiblePt else {
+            return .failure(VisibleError("見えている部分が \(Int(UappOsAgent.minVisiblePt)) pt より小さいか無い"))
+        }
+        return .success(CGPoint(x: visible.midX, y: visible.midY))
+    }
+
+    struct VisibleError: Error, CustomStringConvertible {
+        let description: String
+        init(_ d: String) { description = d }
+    }
+
+    /// アプリの正規化座標の点を押す（要素を解決し直さない）
+    private func pressAt(_ p: CGPoint, app: XCUIApplication) {
+        app.coordinate(withNormalizedOffset: CGVector(dx: p.x, dy: p.y)).tap()
+    }
+
+    /// 正規化した矩形の中の点（幅・高さに対する割合）を、アプリの正規化座標で押す（要素を解決し直さない）
+    private func pressNormalized(_ rect: CGRect, rx: CGFloat, ry: CGFloat, app: XCUIApplication) {
+        app.coordinate(withNormalizedOffset: CGVector(dx: rect.minX + rect.width * rx, dy: rect.minY + rect.height * ry)).tap()
+    }
+
+    private func frameSpaceUnknownResponse(_ snap: XCUIElementSnapshot, spaces: FrameSpaces) -> HttpResponse {
+        let space = spaces.space(of: snap)
+        let why = space == .unmeasured
+            ? "要素は、座標系を確かめていない区域（縦長の基準の下で、物理の画面を横にした大きさの Window）にあります"
+            : "根のスナップショットで同じ要素が見つからなかったか、座標系の違う複数の要素に一致しました（件数は matches）"
+        return HttpResponse(status: 409, json: [
+            "error": "要素の座標系を決められません。押していません。" + why,
+            "reason": space == .unmeasured ? "frameSpaceUnmeasured" : "frameSpaceUnknown",
+            "matches": spaces.matchCount(of: snap),
+            "orientation": UappOsAgent.orientationName(XCUIDevice.shared.orientation),
+            "element": UappOsAgent.summary(snap)])
+    }
+
+    /// 要素の frame の座標系（issue #94。設計は docs/design/os-agent-landscape-element-frame.md）
+    enum FrameSpace {
+        /// app: アプリの座標 / screen: 物理の画面の座標 / unknown: 根の写しで決まらない /
+        /// unmeasured: 縦長の基準の下で形が入れ替わった、物理の画面の大きさの Window の下（座標系が未実測。戻さない）
+        case app, screen, unknown, unmeasured
+        var name: String {
+            switch self { case .app: return "app"; case .screen: return "screen"; case .unknown: return "unknown"; case .unmeasured: return "unmeasured" }
+        }
+    }
+
+    /// 要求ごとに 1 回作る、座標系の判定と変換。
+    /// 横長の基準の下に「形が入れ替わり、大きさが物理の画面（screenPoint が張る矩形）と一致する Window」があれば、
+    /// その下の要素のスナップショットの frame は物理の画面の座標（シミュレータの ATT・実機の CC で実測）。それ以外はアプリの座標
+    struct FrameSpaces {
+        let base: CGRect
+        /// 根の写しのノードと、その座標系。nil なら判定しない（すべてアプリの座標）
+        let nodes: [(node: XCUIElementSnapshot, space: FrameSpace)]?
+        /// 物理の点 → アプリの正規化座標（p00 と、p10 − p00・p01 − p00）
+        let p00: CGPoint, a: CGVector, b: CGVector
+
+        var tolX: CGFloat { 1 / base.width }
+        /// 物理の画面の座標を戻す対応を持っているか（基準が横長で、物理の画面の Window があったとき）
+        var canConvert: Bool { nodes?.contains(where: { $0.space == .screen }) ?? false }
+        var tolY: CGFloat { 1 / base.height }
+
+        func space(of s: XCUIElementSnapshot) -> FrameSpace { lookup(s).space }
+
+        /// 根の写しでの一致の件数（同一のオブジェクトなら 1）
+        func matchCount(of s: XCUIElementSnapshot) -> Int { lookup(s).count }
+
+        private func lookup(_ s: XCUIElementSnapshot) -> (space: FrameSpace, count: Int) {
+            guard let nodes = nodes else { return (.app, 0) }
+            // 同じ根の写しから取ったノードは同一のオブジェクト（/elements）。別のスナップショットなら属性で照合する
+            if let hit = nodes.first(where: { ($0.node as AnyObject) === (s as AnyObject) }) { return (hit.space, 1) }
+            let f = s.frame
+            let same = nodes.filter { n in
+                let g = n.node.frame
+                return n.node.elementType == s.elementType && n.node.identifier == s.identifier && n.node.label == s.label &&
+                    abs(g.minX - f.minX) <= 1 && abs(g.minY - f.minY) <= 1 && abs(g.maxX - f.maxX) <= 1 && abs(g.maxY - f.maxY) <= 1
+            }
+            guard let first = same.first?.space else { return (.unknown, 0) }
+            return (same.allSatisfy({ $0.space == first }) ? first : .unknown, same.count)
+        }
+
+        /// frame をアプリの正規化座標の矩形にする（unknown なら nil）
+        func normalized(_ f: CGRect, _ space: FrameSpace) -> CGRect? {
+            switch space {
+            case .unknown, .unmeasured: return nil
+            case .app:
+                return CGRect(x: (f.minX - base.minX) / base.width, y: (f.minY - base.minY) / base.height,
+                              width: f.width / base.width, height: f.height / base.height)
+            case .screen:
+                let corners = [CGPoint(x: f.minX, y: f.minY), CGPoint(x: f.maxX, y: f.minY),
+                               CGPoint(x: f.minX, y: f.maxY), CGPoint(x: f.maxX, y: f.maxY)].map(toApp)
+                let xs = corners.map { $0.x }, ys = corners.map { $0.y }
+                return CGRect(x: xs.min()!, y: ys.min()!, width: xs.max()! - xs.min()!, height: ys.max()! - ys.min()!)
+            }
+        }
+
+        /// 物理の点 s を s = p00 + u·a + v·b の (u, v) へ
+        func toApp(_ s: CGPoint) -> CGPoint {
+            let dx = s.x - p00.x, dy = s.y - p00.y
+            let det = a.dx * b.dy - a.dy * b.dx
+            return CGPoint(x: (dx * b.dy - dy * b.dx) / det, y: (a.dx * dy - a.dy * dx) / det)
+        }
+    }
+
+    /// `FrameSpaces` を作る。基準の frame が縦長なら判定しない（iPhone の物理の画面は縦なので入れ替わりは起きない）。
+    /// `root` を渡せばそれを使う（/elements は既に取っている）
+    private func makeFrameSpaces(_ app: XCUIApplication, root given: XCUIElementSnapshot? = nil,
+                                 isSpringBoard: Bool = true) -> Result<FrameSpaces, HttpResponse> {
+        // /elements は根の frame を基準にする（今までの center と同じ。アプリを解決し直す読み取りを増やさない）
+        let base = given?.frame ?? app.frame
+        guard base.width > 0, base.height > 0 else { return .failure(UappOsAgent.cannotPressResponse) }
+        let plain = FrameSpaces(base: base, nodes: nil, p00: .zero, a: CGVector(dx: 1, dy: 0), b: CGVector(dx: 0, dy: 1))
+        let wide = base.width > base.height
+        // 縦長の基準は、端末が縦なら見ない（毎回の根の取得を避ける）。縦以外の向き（横・faceUp など）なら、
+        // 形が入れ替わった Window の下を「決められない」にする（実機でアプリが前面・横のとき SpringBoard の frame は縦で、
+        // Window は横＝その下の要素の座標系は未実測。戻す式を確かめていないので押さない）
+        if !wide && XCUIDevice.shared.orientation == .portrait { return .success(plain) }
+        let root: XCUIElementSnapshot
+        if let given = given { root = given } else {
+            do { root = try app.snapshot() } catch {
+                // bundleId のアプリの要素はアプリの座標で返る（実測）ので、取れなければ今までと同じ計算にする（今当たっているものを壊さない）。
+                // 縦長の基準の確かめは安全側に寄せるための追加なので、取れなければ今までと同じ計算に戻す
+                if !isSpringBoard || !wide { return .success(plain) }
+                return .failure(HttpResponse(status: 409, json: [
+                    "error": "根のスナップショットを取れません（\(error)）。押していません", "reason": "snapshotFailed"]))
+            }
+        }
+        let rootWide = root.frame.width > root.frame.height
+        var windows: [XCUIElementSnapshot] = []
+        func findWindows(_ n: XCUIElementSnapshot) {
+            if n.elementType == .window && (n.frame.width > n.frame.height) != rootWide { windows.append(n) }
+            for c in n.children { findWindows(c) }
+        }
+        findWindows(root)
+        guard !windows.isEmpty else { return .success(plain) }
+        if !wide {
+            // 物理の画面（= 縦長の基準）を横にした大きさの Window だけを区域にする（小さな横長の Window は対象にしない）
+            let zones = windows.filter { w in
+                abs(w.frame.minX) <= 1 && abs(w.frame.minY) <= 1 &&
+                    abs(w.frame.width - base.height) <= 1 && abs(w.frame.height - base.width) <= 1
+            }
+            guard !zones.isEmpty else { return .success(plain) }
+            return .success(FrameSpaces(base: base, nodes: UappOsAgent.markNodes(root, zones: zones, as: .unmeasured),
+                                        p00: .zero, a: CGVector(dx: 1, dy: 0), b: CGVector(dx: 0, dy: 1)))
+        }
+        // 物理の画面の対応を XCTest に聞く（アプリの解決は要るが、要素の解決は要らない）
+        guard app.exists else {
+            return .failure(HttpResponse(status: 404, json: ["error": "アプリが終わりました（押していません）"]))
+        }
+        let p00 = app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0)).screenPoint
+        let p10 = app.coordinate(withNormalizedOffset: CGVector(dx: 1, dy: 0)).screenPoint
+        let p01 = app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 1)).screenPoint
+        let a = CGVector(dx: p10.x - p00.x, dy: p10.y - p00.y), b = CGVector(dx: p01.x - p00.x, dy: p01.y - p00.y)
+        guard abs(a.dx * b.dy - a.dy * b.dx) > 0.5 else { return .failure(UappOsAgent.cannotPressResponse) }
+        let p11 = CGPoint(x: p10.x + b.dx, y: p10.y + b.dy)
+        let xs = [p00.x, p10.x, p01.x, p11.x], ys = [p00.y, p10.y, p01.y, p11.y]
+        let physW = xs.max()! - xs.min()!, physH = ys.max()! - ys.min()!
+        let onScreen = windows.filter { w in
+            abs(w.frame.minX) <= 1 && abs(w.frame.minY) <= 1 && abs(w.frame.width - physW) <= 1 && abs(w.frame.height - physH) <= 1
+        }
+        guard !onScreen.isEmpty else { return .success(plain) }
+        return .success(FrameSpaces(base: base, nodes: UappOsAgent.markNodes(root, zones: onScreen, as: .screen), p00: p00, a: a, b: b))
+    }
+
+    /// 根の写しの全ノードに座標系の印を付ける（`zones` の Window の下は `space`、それ以外は app）
+    private static func markNodes(_ root: XCUIElementSnapshot, zones: [XCUIElementSnapshot],
+                                  as space: FrameSpace) -> [(node: XCUIElementSnapshot, space: FrameSpace)] {
+        var nodes: [(node: XCUIElementSnapshot, space: FrameSpace)] = []
+        func walk(_ n: XCUIElementSnapshot, _ under: Bool) {
+            let here = under || zones.contains(where: { ($0 as AnyObject) === (n as AnyObject) })
+            nodes.append((n, here ? space : .app))
+            for c in n.children { walk(c, here) }
+        }
+        walk(root, false)
+        return nodes
     }
 
     /// スナップショットの子孫のうち、種類がボタンのもの（木の順）
@@ -926,13 +1226,13 @@ final class UappOsAgent: XCTestCase {
         }
     }
 
-    /// スナップショットの子孫に、同じ `frame`（各辺 1 pt の許容）の要素があるか
-    private static func hasDescendant(_ node: XCUIElementSnapshot, frame: CGRect) -> Bool {
+    /// スナップショットの子孫に、同じ矩形（アプリの正規化座標。各辺 1 pt の許容）の要素があるか。子孫は `space` で正規化する
+    private static func hasDescendant(_ node: XCUIElementSnapshot, rect: CGRect, space: FrameSpace, spaces: FrameSpaces) -> Bool {
         for child in node.children {
-            let f = child.frame
-            if abs(f.minX - frame.minX) <= 1 && abs(f.minY - frame.minY) <= 1 &&
-               abs(f.maxX - frame.maxX) <= 1 && abs(f.maxY - frame.maxY) <= 1 { return true }
-            if hasDescendant(child, frame: frame) { return true }
+            if let f = spaces.normalized(child.frame, space),
+               abs(f.minX - rect.minX) <= spaces.tolX && abs(f.minY - rect.minY) <= spaces.tolY &&
+               abs(f.maxX - rect.maxX) <= spaces.tolX && abs(f.maxY - rect.maxY) <= spaces.tolY { return true }
+            if hasDescendant(child, rect: rect, space: space, spaces: spaces) { return true }
         }
         return false
     }
@@ -945,14 +1245,6 @@ final class UappOsAgent: XCTestCase {
                         dy: (frame.minY + frame.height * ry - base.minY) / base.height)
     }
 
-    /// `frame` の中の点を、アプリの正規化座標で押す（要素を解決し直さない。`/tap` と同じ経路）。
-    /// 座標を作れない（アプリの `frame` の幅か高さが 0）なら押さずに偽（呼び手は 200 を返さない）
-    @discardableResult
-    private func pressPoint(in frame: CGRect, rx: CGFloat, ry: CGFloat, app: XCUIApplication) -> Bool {
-        guard let point = normalizedPoint(in: frame, rx: rx, ry: ry, app: app) else { return false }
-        app.coordinate(withNormalizedOffset: point).tap()
-        return true
-    }
 
     private static var cannotPressResponse: HttpResponse {
         HttpResponse(status: 409, json: ["error": "押す座標を作れません（アプリの frame の幅か高さが 0）。押していません"])

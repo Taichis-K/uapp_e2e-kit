@@ -246,7 +246,7 @@ iproxy 8201:8200 -u "$UDID" & IPROXY_PID=$!
 
 ```bash
 curl -sS -H "X-Uapp-Token: $TOKEN" http://127.0.0.1:8201/status
-# {"agent":"uapp-os-agent/1.0","platform":"iOS","screen":{...},"features":["bundleId","orientation","app","elements","gestures","press","openUrl","typeFocusCheck"],"orientation":"portrait","authenticated":true,"ok":true}
+# {"agent":"uapp-os-agent/1.0","platform":"iOS","screen":{...},"features":["bundleId","orientation","app","elements","gestures","press","openUrl","typeFocusCheck","frameSpace"],"orientation":"portrait","authenticated":true,"ok":true}
 ```
 
 **`authenticated: true` まで見る。**
@@ -258,7 +258,7 @@ curl -sS -H "X-Uapp-Token: $TOKEN" http://127.0.0.1:8201/status
 `/tap` と `/swipe` は **XCUI の API を呼んだ直後に `{"ok":true,"base":"…"}` を返します**（`base` は押した基準。`springboard` か、送った `bundleId`）
 （`UappOsAgent.swift`）。座標がどこであっても、画面上で何も起きなくても 200 です
 （200 を返さない主なものは、認証の 401・引数の誤りの 400・`bundleId` のアプリが前面に無いときの 409。座標が画面のどこを指すかは検査しない）。
-**横画面のアプリを押すときは `bundleId` を渡す**（既定の基準は SpringBoard＝iPhone では縦。使い方は同梱の `ai-loop.md` の
+**横画面のアプリを押すときは `bundleId` を渡す**（既定の基準は SpringBoard の frame で、アプリが前面のときは縦の大きさ＝iOS 26 の実機で観測、iOS 16 は未実測。使い方は同梱の `ai-loop.md` の
 「OS レベルの UI オートメーション」）。curl なら:
 
 ```bash
