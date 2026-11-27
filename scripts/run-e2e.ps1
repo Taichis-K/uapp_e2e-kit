@@ -36,6 +36,9 @@ param(
     # 環境変数 UAPP_E2E_UNITY_CLI_PROXY_DISABLE=1 でも同じ。**プロキシ経由が必要な認証・
     # ダウンロードも直結になる**ので、既定では付けない
     [switch]$UnityCliProxyDisable,
+    # エディタを開くときの `unity pipeline install` にエージェントスキル（unity-pipeline）を入れさせない（既定オフ＝Unity CLI の既定どおり入れる）。
+    # Unity CLI 1.1.0 以上のときだけ `--no-skill` を付ける。環境変数 UAPP_E2E_UNITY_CLI_NO_SKILL=1 でも同じ
+    [switch]$UnityCliNoSkill,
     # 導入先の自作テストの実行数が 0 なら失敗にする（既定オフ。導入先フィードバック起点＝
     # 「自作 0 件は緑だが無意味なので失敗と同じ扱いにしたい」。検証ループの門として使う）。
     # 判定はテスト内訳表示と同じ（kit-manifest.json 由来・skip は実行数に数えない）。
@@ -819,7 +822,10 @@ if ($Editor) {
         }
         Write-Host "[$projectName] エディタ未接続。Pipeline パッケージを確認してエディタを起動します..."
         # 注意: 未導入の場合 Packages\manifest.json に com.unity.pipeline が追加される（VCS差分になる）
-        $null = Invoke-UnityCli @("pipeline", "install", "--project-path", $projectDir)
+        # -UnityCliNoSkill のときだけ、CLI 1.1.0 以上に --no-skill を付ける（既定は CLI の既定どおりスキルを入れる。docs/design/cli-pipeline-install-no-skill.md）
+        $noSkill = Resolve-UappUnityCliNoSkill -Switch:$UnityCliNoSkill
+        $cliVer = if ($noSkill) { Get-UappUnityCliVersion -UnityCli $unityCli -GlobalArgs $cliGlobalArgs } else { $null }
+        $null = Invoke-UnityCli (Get-UappPipelineInstallArgs -ProjectDir $projectDir -CliVersion $cliVer -NoSkill:$noSkill)
         # **パスは引用する**（-ArgumentList の配列は空白結合されるため、空白入りのパスが割れる）
         Start-Process -FilePath $unityCli -ArgumentList (@($cliGlobalArgs) + @("open", (Format-CliArg $projectDir))) | Out-Null
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -865,7 +871,8 @@ if ($Editor) {
         if ($null -eq $probeClass -or $probeClass.Class -eq "permanent") {
             throw ("Unity CLI / com.unity.pipeline のバージョンが想定と異なります（eval の疎通に失敗: $detail）。" +
                    "'unity --version' と <プロジェクト>\Packages\manifest.json の com.unity.pipeline を確認する。" +
-                   "検証済みの組み合わせ: unity-cli 1.0.1 / com.unity.pipeline 1.0.1（キット 0.1.34 のリリース検証。Windows と macOS でエディタ直結と EditMode）、" +
+                   "検証済みの組み合わせ: unity-cli 1.1.0 / com.unity.pipeline 1.0.1（キット 0.1.35 のリリース検証。Windows と macOS でエディタ直結と EditMode。1.1.0 は pipeline install がエージェントのスキルも入れる＝-UnityCliNoSkill で止める）、" +
+                   "unity-cli 1.0.1 / com.unity.pipeline 1.0.1（キット 0.1.34 のリリース検証。Windows と macOS でエディタ直結と EditMode）、" +
                    "unity-cli 1.0.0 / com.unity.pipeline 1.0.0（キット 0.1.33 のリリース検証。Windows と macOS でエディタ直結と EditMode）、" +
                    "unity-cli 1.0.0-beta.17 / com.unity.pipeline 1.0.0-pre.1（キット 0.1.32 のリリース検証。Windows と macOS でエディタ直結と EditMode。1.0 で script eval_file が消えたので eval は script eval --file で送る）、" +
                    "unity-cli 1.0.0-beta.17 / com.unity.pipeline 0.10.0-exp.1（キット 0.1.31 のリリース検証。Windows と macOS でエディタ直結と EditMode）、" +
@@ -914,7 +921,7 @@ if ($Editor) {
         $recompileFailure = $null
         try {
             & (Join-UappPath $PSScriptRoot "run-unity-tests.ps1") -ProjectPath $projectDir `
-                -Editor -RecompileOnly -UnityCliProxyDisable:$UnityCliProxyDisable
+                -Editor -RecompileOnly -UnityCliProxyDisable:$UnityCliProxyDisable -UnityCliNoSkill:$UnityCliNoSkill
             if ($LASTEXITCODE -ne 0) { $recompileFailure = "exit=$LASTEXITCODE" }
         }
         catch { $recompileFailure = $_.Exception.Message }

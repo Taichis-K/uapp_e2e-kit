@@ -352,14 +352,19 @@ Codex ユーザーでルート `AGENTS.md` が無いプロジェクトは `-Root
 1.0.0-pre.1 は 1.0.0-beta.17 で検証した（キット 0.1.32 のリリース検証。Windows と macOS でエディタ直結と EditMode。1.0 は `script eval_file` が無くなったので、キットは 0.10 以降には `script eval --file` で送る）。
 正式版の 1.0.0 は Unity CLI 1.0.0 で検証した（キット 0.1.33 のリリース検証。Windows と macOS でエディタ直結と EditMode）。
 Unity CLI 1.0.0 と 1.0.0-pre.1・0.10.0-exp.1 の組み合わせは、macOS・サンプル 1 本でエディタ直結・EditMode・エディタを閉じる処理だけを確かめた（キット 0.1.33 の並行検証）。
-**1.0.1 は Unity CLI 1.0.1 で検証した**（キット 0.1.34 のリリース検証。Windows と macOS でエディタ直結と EditMode。1.0.1 と 1.0.0 のコードの違いは `set_auto_tick` だけで、キットは使っていない）。
+1.0.1 は Unity CLI 1.0.1 で検証した（キット 0.1.34 のリリース検証。Windows と macOS でエディタ直結と EditMode。1.0.1 と 1.0.0 のコードの違いは `set_auto_tick` だけで、キットは使っていない）。
+**1.0.1 は Unity CLI 1.1.0 でも検証した**（キット 0.1.35 のリリース検証。Windows と macOS でエディタ直結と EditMode）。
+Unity CLI 1.1.0 から `unity pipeline install` がエージェントのスキル（unity-pipeline。利用者のホームの `.claude/skills/` など）も入れる。キットは CLI の既定に従うので、
+下の `run-e2e.ps1 -Editor` などをエディタが開いていない状態で実行する（キットが `pipeline install` を呼ぶ）と、スキルが入ることがある（どのクライアントに入るかは CLI が決める。実行しているエージェントと、既に Unity のスキルを持つクライアント＝CLI の変更履歴）。
+入れたくなければ `-UnityCliNoSkill`（`run-e2e.ps1` と `run-unity-tests.ps1`）か環境変数 `UAPP_E2E_UNITY_CLI_NO_SKILL=1` を付ける（CLI が 1.1.0 以上のときだけ `--no-skill` を付けて呼ぶ）。入ったスキルを消すのは `unity skill uninstall unity-pipeline`。
+スキルとキットの手順が食い違うときの扱いは `CLAUDE.md`（このキットの運用ガイド）の「失敗解析の優先順位」の節にある、`unity cmd` を直接叩くときの段落。
 入る版は経路で違う: **注入モード（`inject-to-project.ps1`）が足す既定の版は 1.0.1**（すでに古い版が入っていれば手順 1 の確認のうえで上げる）/
 installer の経路では、下の `run-e2e.ps1 -Editor` の初回に Unity CLI の `unity pipeline install` が入れる版になる。
 入っている版は `Packages/packages-lock.json` の `com.unity.pipeline` の `version` で見る。
-**推奨は pipeline を 1.0.1 に上げ、Unity CLI を 1.0.1 に揃えること**（pipeline 1.0.1 と Unity CLI 1.0.0 以前の組み合わせは未実測）。
-pipeline を 1.0.0 のまま使うなら Unity CLI 1.0.0、1.0.0-pre.1 のままなら Unity CLI 1.0.0-beta.17（または 1.0.0。上の行）が検証した組み合わせ（Unity CLI 1.0.1 との組み合わせは未実測）。
-pipeline を上げずに 0.10 以前のまま使う場合も、検証した組み合わせはこの段落の上の行（Unity CLI 1.0.1 との組み合わせ、Unity CLI 1.0.0 と 0.9.1 以前の組み合わせは未実測）。
-pipeline が 1.0.1 で `unity --version` が 1.0.1 より前なら `unity upgrade` で上げてから実行する
+**推奨は pipeline を 1.0.1 に上げ、Unity CLI を 1.1.0 に揃えること**（pipeline 1.0.1 と Unity CLI 1.0.0 以前の組み合わせは未実測）。
+pipeline を 1.0.0 のまま使うなら Unity CLI 1.0.0、1.0.0-pre.1 のままなら Unity CLI 1.0.0-beta.17（または 1.0.0。上の行）が検証した組み合わせ（Unity CLI 1.0.1・1.1.0 との組み合わせは未実測）。
+pipeline を上げずに 0.10 以前のまま使う場合も、検証した組み合わせはこの段落の上の行（Unity CLI 1.0.1・1.1.0 との組み合わせ、Unity CLI 1.0.0 と 0.9.1 以前の組み合わせは未実測）。
+pipeline が 1.0.1 で `unity --version` が 1.0.1 より前なら `unity upgrade` で上げてから実行する（1.0.1 と 1.1.0 はどちらも確かめてある＝上の行）
 （0.8.0-exp.1 と 1.0.0-beta.16 の組み合わせは未実測。**入っている版が古ければ、installer と注入が手順 1 の確認のうえで 1.0.1 へ上げる**。
 上げなかった場合は `run-e2e.ps1 -Editor` が注意を 1 行出す。注入の対象なら `-Eject` してから `-PipelineUpgrade yes` で注入し直す）:
 
@@ -381,7 +386,7 @@ pipeline が 1.0.1 で `unity --version` が 1.0.1 より前なら `unity upgrad
 |---|---|
 | 最初の `unity status` が応答しない（既定 60 秒。`-UnityCliProbeSeconds` で延ばせる） | その場で止まる。`unity doctor` で状態を見て、認証が切れていれば `unity auth login`（CLI を使わない手動の手順は下） |
 | エディタが Pipeline に接続している | そのまま使う |
-| このプロジェクトを開いている Unity がいない | `unity pipeline install` を呼ぶ（入っていなければ `Packages/manifest.json` に追加する。入る版は Unity CLI が選ぶ。失敗すればそこで止まる）→ エディタを開き、接続して準備が終わる（ready）まで 600 秒ほど待つ。超えたら止まるので `Editor.log` を見る |
+| このプロジェクトを開いている Unity がいない | `unity pipeline install` を呼ぶ（入っていなければ `Packages/manifest.json` に追加する。入る版は Unity CLI が選ぶ。Unity CLI 1.1.0 以上はエージェントのスキルも入る（`-UnityCliNoSkill` で止める）。失敗すればそこで止まる）→ エディタを開き、接続して準備が終わる（ready）まで 600 秒ほど待つ。超えたら止まるので `Editor.log` を見る |
 | このプロジェクトが掴まれているのに Pipeline が応答しない | コンパイル中の可能性があるので 300 秒ほど待つ（応答すればその時点で進む）。待ち終えて掴まれていなければ上の行の動きへ進む。まだ掴まれていれば「エディタは既にこのプロジェクトを開いていますが、Pipeline に接続していません」で止まる（二重起動はしない）＝下の「止まったら」へ |
 
 - 待ち時間は、1 回の確認に最長 60 秒かかるぶん少し延びることがある

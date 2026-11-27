@@ -232,6 +232,101 @@ function Get-UappUnityCli {
     return $null
 }
 
+# --- Unity CLI の版と `pipeline install` の引数（docs/design/cli-pipeline-install-no-skill.md） ---
+function ConvertFrom-UappCliVersionOutput {
+    <#
+      .SYNOPSIS
+      `unity --version --format json` の**標準出力**から版を読む純関数。読めなければ $null。
+
+      .NOTES
+      JSON の `data.version` を先に読み（CLI 1.1.0 の形）、だめなら標準出力の空でない最初の行を版として読む
+      （素の `--version` の形）。版の形（数字 3 つ ＋ 任意の `-プレリリース`）でなければ $null。
+      標準エラーは渡さない（CLI beta.15 が Claude Code の中で標準エラーに案内を出した前例）。
+    #>
+    param([string]$Stdout)
+    if (-not $Stdout) { return $null }
+    $cand = $null
+    try {
+        $j = $Stdout | ConvertFrom-Json -ErrorAction Stop
+        if ($j -is [System.Management.Automation.PSCustomObject] -and $j.data -and "$($j.data.version)") { $cand = "$($j.data.version)" }
+    } catch { }
+    if (-not $cand) { $cand = @($Stdout -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ }) | Select-Object -First 1 }
+    $cand = "$cand".Trim()
+    if ($cand -cmatch '^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$') { return $cand }
+    return $null
+}
+
+$script:UappCliVersionCache = @{}
+function Get-UappUnityCliVersion {
+    <#
+      .SYNOPSIS
+      Unity CLI の版（例 `1.1.0`）。読めない・期限切れ・起動できなければ $null。同じ実体の結果は 1 プロセスの中で覚える。
+
+      .NOTES
+      `unity <グローバル引数> --version --format json --no-banner` を期限つきで実行し、標準出力だけを
+      `ConvertFrom-UappCliVersionOutput` で読む。期限つきの実行は `Get-UappKitTagState`（ls-remote）と同じ形。
+    #>
+    param([string]$UnityCli, [string[]]$GlobalArgs = @(), [int]$TimeoutSeconds = 15)
+    if (-not $UnityCli) { return $null }
+    if ($script:UappCliVersionCache.ContainsKey($UnityCli)) { return $script:UappCliVersionCache[$UnityCli] }
+    $ver = $null
+    try {
+        $psi = [System.Diagnostics.ProcessStartInfo]::new($UnityCli)
+        foreach ($a in (@($GlobalArgs) + @("--version", "--format", "json", "--no-banner"))) { if ($a) { $psi.ArgumentList.Add($a) } }
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.RedirectStandardInput = $true
+        $psi.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
+        $proc = [System.Diagnostics.Process]::Start($psi)
+        try {
+            $proc.StandardInput.Close()
+            $outTask = $proc.StandardOutput.ReadToEndAsync()
+            $null = $proc.StandardError.ReadToEndAsync()
+            if (-not $proc.WaitForExit($TimeoutSeconds * 1000)) {
+                Stop-UappProcessTree -ProcessId $proc.Id
+            } else {
+                $proc.WaitForExit()
+                $ver = ConvertFrom-UappCliVersionOutput -Stdout $outTask.Result
+            }
+        } finally { $proc.Dispose() }
+    } catch { $ver = $null }
+    if ($ver) { $script:UappCliVersionCache[$UnityCli] = $ver }   # 読めなかった結果は覚えない（一時的な遅延でずっと付かなくなるのを避ける）
+    return $ver
+}
+
+function Resolve-UappUnityCliNoSkill {
+    <#
+      .SYNOPSIS
+      `unity pipeline install` にエージェントスキルを入れさせないか（`-UnityCliNoSkill` か環境変数 `UAPP_E2E_UNITY_CLI_NO_SKILL=1`）。
+      **既定は入れる**（Unity CLI 1.1.0 の既定に従う）。スイッチが指定されていればそちらが優先。
+    #>
+    param([switch]$Switch)
+    if ($Switch) { return $true }
+    return ($env:UAPP_E2E_UNITY_CLI_NO_SKILL -eq "1")
+}
+
+function Get-UappPipelineInstallArgs {
+    <#
+      .SYNOPSIS
+      `unity pipeline install` の引数（グローバル引数・`--format`・`--no-banner` は含めない）。
+      `-NoSkill` のときだけ、Unity CLI が 1.1.0 以上なら `--no-skill` を足す
+      （1.1.0 から pipeline install がエージェントスキルも入れる。**既定は CLI の既定どおり入れる**）。
+
+      .NOTES
+      版が読めない（$null）・1.1.0 未満・プレリリースは付けない（古い CLI は知らないオプションで失敗しうる。1.1.0 未満はスキルを入れない）。
+      判定は `-ge 0` に固定する（`Compare-UappPipelineVersion` は読めないと $null を返す）。
+      パスは素のまま返す（`Start-Process` へ渡すときだけ呼び手が引用する）。
+    #>
+    param([string]$ProjectDir, [string]$CliVersion, [switch]$NoSkill)
+    $a = @("pipeline", "install", "--project-path", $ProjectDir)
+    if ($NoSkill) {
+        $c = if ($CliVersion) { Compare-UappPipelineVersion $CliVersion.Trim() "1.1.0" } else { $null }
+        if ($null -ne $c -and $c -ge 0) { $a += "--no-skill" }
+    }
+    return $a   # 要素は常に 4 つ以上なので素の配列で返す（`,` で包むと @() を通したとき二重の配列になる）
+}
+
 function ConvertFrom-UappCliJson {
     <#
       .SYNOPSIS

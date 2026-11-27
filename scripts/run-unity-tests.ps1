@@ -36,7 +36,10 @@ param(
     # config の bypass はいずれも効かず、このフラグだけが効く
     # （詳細は uapp-platform.ps1 の Get-UappUnityCliGlobalArgs）。
     # 環境変数 UAPP_E2E_UNITY_CLI_PROXY_DISABLE=1 でも同じ
-    [switch]$UnityCliProxyDisable
+    [switch]$UnityCliProxyDisable,
+    # エディタを開くときの `unity pipeline install` にエージェントスキル（unity-pipeline）を入れさせない（既定オフ＝Unity CLI の既定どおり入れる）。
+    # Unity CLI 1.1.0 以上のときだけ `--no-skill` を付ける。環境変数 UAPP_E2E_UNITY_CLI_NO_SKILL=1 でも同じ
+    [switch]$UnityCliNoSkill
 )
 
 $ErrorActionPreference = "Stop"
@@ -505,7 +508,13 @@ if ($Editor) {
                    "`n  status の応答: $lastStatus")
         }
         Write-Host "[$projectName] エディタ未接続。Pipeline パッケージを確認してエディタを起動します..."
-        & $unityCli @cliGlobalArgs pipeline install --project-path $projectDir --format json --no-banner | Out-Null
+        # -UnityCliNoSkill のときだけ、CLI 1.1.0 以上に --no-skill を付ける（既定は CLI の既定どおりスキルを入れる。docs/design/cli-pipeline-install-no-skill.md）。
+        # 失敗は捨てずに警告へ出す（捨てると接続待ちのタイムアウトという遠い症状になる）
+        $noSkill = Resolve-UappUnityCliNoSkill -Switch:$UnityCliNoSkill
+        $cliVer = if ($noSkill) { Get-UappUnityCliVersion -UnityCli $unityCli -GlobalArgs $cliGlobalArgs } else { $null }
+        $installArgs = Get-UappPipelineInstallArgs -ProjectDir $projectDir -CliVersion $cliVer -NoSkill:$noSkill
+        $installOut = & $unityCli @cliGlobalArgs @installArgs --format json --no-banner 2>&1
+        if ($LASTEXITCODE -ne 0) { Write-Warning ("unity pipeline install が終了コード $LASTEXITCODE で失敗しました（このまま起動を試みます）: " + (($installOut | Out-String).Trim())) }
         # **パスは引用する**（-ArgumentList の配列は空白結合されるため、空白入りのパスが割れる）
         Start-Process -FilePath $unityCli -ArgumentList (@($cliGlobalArgs) + @("open", (Format-CliArg $projectDir))) | Out-Null
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
